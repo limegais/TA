@@ -1,195 +1,156 @@
-# ir_mitsubishi.py - Khusus untuk AC Mitsubishi
+# mqtt_server.py - MQTT Server di Raspberry Pi
 
-import time
-import lgpio
 import json
-import os
+import time
+import paho.mqtt.client as mqtt
+from datetime import datetime
+from controller import ACController
+from logger import DataLogger
+from display import OLEDDisplay
 
-class MitsubishiAC:
-    def __init__(self, tx_pin=17, rx_pin=18):
-        self.tx_pin = tx_pin
-        self.rx_pin = rx_pin
-        self.handle = None
-        self.codes_file = "mitsubishi_codes.json"
-        self.freq = 38000
-        
-        try:
-            self.handle = lgpio.gpiochip_open(4)
-            lgpio.gpio_claim_output(self.handle, self.tx_pin, 0)
-            lgpio.gpio_claim_input(self.handle, self.rx_pin)
-            print("[MITSUBISHI] IR Ready!")
-        except Exception as e:
-            print(f"[MITSUBISHI] Error: {e}")
-            self.handle = None
-        
-        self.codes = self.load_codes()
-    
-    def load_codes(self):
-        if os.path.exists(self.codes_file):
-            try:
-                with open(self.codes_file, 'r') as f:
-                    codes = json.load(f)
-                    print(f"[MITSUBISHI] Loaded {len(codes)} commands")
-                    return codes
-            except:
-                pass
-        return {}
-    
-    def save_codes(self):
-        with open(self.codes_file, 'w') as f:
-            json.dump(self.codes, f, indent=2)
-    
-    def send_raw(self, pulses):
-        if self.handle is None:
-            return False
-        
-        period = 1.0 / self.freq
-        half_period = period / 2
-        
-        for i, duration in enumerate(pulses):
-            duration_sec = duration / 1000000.0
-            end_time = time.time() + duration_sec
-            
-            if i % 2 == 0:
-                while time.time() < end_time:
-                    lgpio.gpio_write(self.handle, self.tx_pin, 1)
-                    time.sleep(half_period)
-                    lgpio.gpio_write(self.handle, self.tx_pin, 0)
-                    time.sleep(half_period)
-            else:
-                lgpio.gpio_write(self.handle, self.tx_pin, 0)
-                time.sleep(duration_sec)
-        
-        lgpio.gpio_write(self.handle, self.tx_pin, 0)
-        return True
-    
-    def capture(self, timeout=10):
-        if self.handle is None:
-            print("[MITSUBISHI] Not initialized!")
-            return None
-        
-        print(f"[CAPTURE] Tekan tombol remote ({timeout} detik)...")
-        
-        pulses = []
-        start_time = time.time()
-        last_value = lgpio.gpio_read(self.handle, self.rx_pin)
-        last_time = time.time()
-        capturing = False
-        
-        while (time.time() - start_time) < timeout:
-            value = lgpio.gpio_read(self.handle, self.rx_pin)
-            
-            if value != last_value:
-                now = time.time()
-                duration = int((now - last_time) * 1000000)
-                
-                if not capturing:
-                    capturing = True
-                    print("[CAPTURE] Sinyal terdeteksi!")
-                
-                if duration < 100000:
-                    pulses.append(duration)
-                
-                last_time = now
-                last_value = value
-            
-            if capturing and len(pulses) > 20:
-                if (time.time() - last_time) > 0.1:
-                    break
-            
-            time.sleep(0.00005)
-        
-        if len(pulses) > 20:
-            print(f"[CAPTURE] Berhasil! {len(pulses)} pulses")
-            return pulses
-        else:
-            print("[CAPTURE] Tidak ada sinyal")
-            return None
-    
-    def learn_command(self, name):
-        print(f"\n[LEARN] '{name}'")
-        pulses = self.capture()
-        if pulses:
-            self.codes[name] = pulses
-            self.save_codes()
-            print(f"[LEARN] Tersimpan!")
-            return True
-        return False
-    
-    def send_command(self, name):
-        if name in self.codes:
-            print(f"[SEND] {name}")
-            self.send_raw(self.codes[name])
-            return True
-        else:
-            print(f"[SEND] '{name}' tidak ditemukan!")
-            return False
-    
-    def power_on(self):
-        return self.send_command("power_on")
-    
-    def power_off(self):
-        return self.send_command("power_off")
-    
-    def list_commands(self):
-        return list(self.codes.keys())
-    
-    def cleanup(self):
-        if self.handle is not None:
-            lgpio.gpio_write(self.handle, self.tx_pin, 0)
-            lgpio.gpiochip_close(self.handle)
+# MQTT Settings
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+TOPIC_SENSOR = "smartac/sensor"      # Data dari ESP32
+TOPIC_COMMAND = "smartac/command"    # Perintah ke ESP32
+TOPIC_STATUS = "smartac/status"      # Status dari ESP32
 
+# Global variables
+controller = None
+logger = None
+display = None
+mqtt_client = None
+last_data = {
+    'temp': 25.0,
+    'humidity': 50.0,
+    'presence': False,
+    'ac_state': 'OFF'
+}
+
+def on_connect(client, userdata, flags, rc):
+    """Callback saat terhubung ke MQTT broker"""
+    if rc == 0:
+        print("[MQTT] Connected to broker!")
+        client.subscribe(TOPIC_SENSOR)
+        client.subscribe(TOPIC_STATUS)
+        print(f"[MQTT] Subscribed to: {TOPIC_SENSOR}, {TOPIC_STATUS}")
+    else:
+        print(f"[MQTT] Connection failed, code: {rc}")
+
+def on_message(client, userdata, msg):
+    """Callback saat menerima pesan"""
+    global last_data
+    
+    topic = msg.topic
+    payload = msg.payload.decode()
+    
+    try:
+        data = json.loads(payload)
+        
+        if topic == TOPIC_SENSOR:
+            # Data sensor dari ESP32
+            temp = data.get('temp', 25.0)
+            humidity = data.get('humidity', 50.0)
+            presence = data.get('presence', False)
+            
+            last_data['temp'] = temp
+            last_data['humidity'] = humidity
+            last_data['presence'] = presence
+            
+            now = datetime.now().strftime("%H:%M:%S")
+            pir_status = "ADA" if presence else "TIDAK ADA"
+            print(f"[{now}] T:{temp:.1f}C H:{humidity:.0f}% PIR:{pir_status}")
+            
+            # Proses dengan controller
+            if controller:
+                presence_score = 100 if presence else 0
+                action, target_temp, reason = controller.decide(presence_score, temp, humidity)
+                
+                # Kirim perintah ke ESP32
+                if action in ["ON", "OFF", "ECO"]:
+                    command = {
+                        'action': action,
+                        'target_temp': target_temp,
+                        'reason': reason
+                    }
+                    client.publish(TOPIC_COMMAND, json.dumps(command))
+                    print(f"[COMMAND] {action} - {reason}")
+                
+                # Log data
+                if logger:
+                    comfort = "OK"
+                    logger.log(temp, humidity, presence_score, 
+                              controller.get_state(), target_temp, comfort)
+            
+            # Update OLED
+            if display:
+                display.show_status(temp, humidity, pir_status, 
+                                   controller.get_state() if controller else "OFF", 
+                                   target_temp if controller else 25)
+        
+        elif topic == TOPIC_STATUS:
+            # Status dari ESP32
+            print(f"[STATUS] {data}")
+            last_data['ac_state'] = data.get('ac_state', 'OFF')
+    
+    except Exception as e:
+        print(f"[ERROR] {e}")
+
+def main():
+    global controller, logger, display, mqtt_client
+    
+    print("=" * 50)
+    print("   SMART AC - MQTT SERVER")
+    print("   Raspberry Pi")
+    print("=" * 50)
+    
+    # Inisialisasi komponen
+    try:
+        display = OLEDDisplay()
+        display.show_startup()
+        time.sleep(2)
+        print("  OK OLED")
+    except Exception as e:
+        print(f"  X OLED: {e}")
+        display = None
+    
+    try:
+        controller = ACController("config.json")
+        print("  OK Controller")
+    except Exception as e:
+        print(f"  X Controller: {e}")
+    
+    logger = DataLogger("ac_log.csv")
+    print("  OK Logger")
+    
+    # Setup MQTT Client
+    mqtt_client = mqtt.Client()
+    mqtt_client.on_connect = on_connect
+    mqtt_client.on_message = on_message
+    
+    try:
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        print("  OK MQTT Client")
+    except Exception as e:
+        print(f"  X MQTT: {e}")
+        return
+    
+    print("\n[SERVER] Running! Waiting for ESP32 data...")
+    print("[SERVER] Press Ctrl+C to stop.\n")
+    
+    if display:
+        display.show_message("MQTT Server", "Waiting for", "ESP32...")
+    
+    # Loop
+    try:
+        mqtt_client.loop_forever()
+    except KeyboardInterrupt:
+        print("\n[SERVER] Shutting down...")
+    
+    mqtt_client.disconnect()
+    if display:
+        display.cleanup()
+    print("[SERVER] Done!")
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("  MITSUBISHI AC - IR LEARNER")
-    print("=" * 50)
-    
-    ac = MitsubishiAC(tx_pin=17, rx_pin=18)
-    
-    while True:
-        print("\n" + "-" * 50)
-        print("Menu:")
-        print("  1. Learn tombol baru")
-        print("  2. Test kirim command")
-        print("  3. Lihat commands tersimpan")
-        print("  4. Hapus command")
-        print("  5. Keluar")
-        print("-" * 50)
-        
-        choice = input("Pilih (1-5): ").strip()
-        
-        if choice == "1":
-            print("\nContoh nama: power_on, power_off, temp_24, temp_25")
-            name = input("Nama command: ").strip()
-            if name:
-                input("Tekan ENTER, lalu tekan tombol remote...")
-                ac.learn_command(name)
-        
-        elif choice == "2":
-            cmds = ac.list_commands()
-            if cmds:
-                print("\nCommands:", cmds)
-                name = input("Nama command: ").strip()
-                if name:
-                    ac.send_command(name)
-                    print("Cek apakah AC merespon!")
-            else:
-                print("Belum ada command!")
-        
-        elif choice == "3":
-            cmds = ac.list_commands()
-            print("\nCommands:", cmds if cmds else "Kosong")
-        
-        elif choice == "4":
-            name = input("Nama command: ").strip()
-            if name in ac.codes:
-                del ac.codes[name]
-                ac.save_codes()
-                print("Dihapus!")
-        
-        elif choice == "5":
-            break
-    
-    ac.cleanup()
-    print("Selesai!")
+    main()
