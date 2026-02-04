@@ -1,205 +1,246 @@
+#!/usr/bin/env python3
+"""
+Smart AC Controller dengan GA Optimization
+"""
 
-import random
+import sys
+import os
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import json
+import time
 from datetime import datetime
+from threading import Thread
 
-class GAOptimizer:
-    def __init__(self):
-        # GA Parameters
-        self.population_size = 30
-        self.generations = 50
-        self.mutation_rate = 0.1
-        self.crossover_rate = 0.8
-        
-        # AC Parameters Range
-        self.temp_min = 16
-        self.temp_max = 30
-        self.modes = ['cool', 'eco', 'fan', 'off']
-        self.fan_speeds = ['low', 'medium', 'high', 'auto']
-        
-        # Weights for fitness function
-        self.comfort_weight = 0.4
-        self.energy_weight = 0.3
-        self.preference_weight = 0.3
-        
-        # History
-        self.history = []
+from shared.mqtt_client import MQTTHandler
+from shared.database import DatabaseHandler
+from shared.utils import setup_logger
+from ga_optimizer import GAOptimizer
+import ac_config as config
+
+# ===================== SETUP =====================
+logger = setup_logger('AC_Controller', '../logs/ac.log')
+
+sensor_data = {
+    "temperature": 0,
+    "humidity": 0,
+    "pir": 0,
+    "ac_state": 0,
+    "ac_mode": 0,
+    "ac_temp": 24,
+    "last_update": None
+}
+
+ga_optimizer = GAOptimizer()
+db = DatabaseHandler(data_dir="../data")
+mqtt_handler = None
+
+auto_control_enabled = True
+running = True
+
+# ===================== CALLBACKS =====================
+def on_sensor_data(topic, data):
+    """Handle data sensor dari ESP1"""
+    global sensor_data
     
-    def create_individual(self):
-        """Buat satu individu (solusi)"""
-        return {
-            'temp_setting': random.randint(self.temp_min, self.temp_max),
-            'mode': random.choice(self.modes),
-            'fan_speed': random.choice(self.fan_speeds)
-        }
+    sensor_data["temperature"] = data.get("temperature", 0)
+    sensor_data["humidity"] = data.get("humidity", 0)
+    sensor_data["pir"] = data.get("pir", 0)
+    sensor_data["ac_state"] = data.get("ac_state", 0)
+    sensor_data["ac_mode"] = data.get("ac_mode", 0)
+    sensor_data["ac_temp"] = data.get("ac_temp", 24)
+    sensor_data["last_update"] = datetime.now()
     
-    def create_population(self):
-        """Buat populasi awal"""
-        return [self.create_individual() for _ in range(self.population_size)]
+    timestamp = datetime.now().strftime("%H:%M:%S")
     
-    def fitness(self, individual, current_temp, humidity, occupancy, time_of_day):
-        """Hitung fitness score (Higher = Better)"""
-        temp_setting = individual['temp_setting']
-        mode = individual['mode']
-        
-        # === COMFORT SCORE ===
-        if mode == 'off':
-            comfort = 0 if current_temp > 28 else 50
+    print(f"\n[{timestamp}] 📨 ESP1 Sensor Data:")
+    print(f"   🌡️  Temp: {sensor_data['temperature']}°C")
+    print(f"   💧 Humidity: {sensor_data['humidity']}%")
+    print(f"   🚶 PIR: {'YES' if sensor_data['pir'] else 'NO'}")
+    print(f"   ❄️  AC: {'ON' if sensor_data['ac_state'] else 'OFF'}")
+    
+    db.save_sensor_data("esp1_ac", data)
+
+
+def on_status(topic, data):
+    """Handle status message"""
+    print(f"[STATUS] {data}")
+
+
+def on_ir_learn(topic, data):
+    """Handle captured IR code"""
+    print(f"\n[IR] Code Captured!")
+    print(f"   Protocol: {data.get('protocol')}")
+    print(f"   Address: 0x{data.get('address', 0):04X}")
+    print(f"   Command: 0x{data.get('command', 0):04X}")
+    db.save_event("esp1", "ir_capture", json.dumps(data))
+
+
+# ===================== CONTROL FUNCTIONS =====================
+def send_ac_command(command, temp=24):
+    """Kirim command ke ESP1"""
+    global mqtt_handler
+    
+    payload = {"cmd": command, "temp": temp}
+    mqtt_handler.publish(config.TOPIC_COMMAND, payload)
+    print(f"📤 Sent: {payload}")
+    db.save_event("esp1", "command", command)
+
+
+def run_optimization():
+    """Jalankan GA optimization"""
+    global sensor_data, ga_optimizer, mqtt_handler
+    
+    temp = sensor_data["temperature"]
+    humidity = sensor_data["humidity"]
+    occupancy = sensor_data["pir"] == 1
+    
+    if temp == 0:
+        print("[GA] No sensor data, skipping...")
+        return
+    
+    print("\n" + "=" * 50)
+    print("🧬 Running GA Optimization...")
+    print(f"   Input: Temp={temp}°C, Hum={humidity}%, Occ={occupancy}")
+    
+    rec = ga_optimizer.get_recommendation(temp, humidity, occupancy)
+    
+    print(f"   📊 Result:")
+    print(f"      Mode: {rec['recommended_mode']}")
+    print(f"      Temp: {rec['recommended_temp']}°C")
+    print(f"      Confidence: {rec['confidence']:.1%}")
+    print(f"      Reason: {rec['reason']}")
+    print("=" * 50)
+    
+    mqtt_handler.publish(config.TOPIC_RECOMMENDATION, rec)
+    
+    if auto_control_enabled:
+        apply_recommendation(rec)
+
+
+def apply_recommendation(rec):
+    """Apply GA recommendation"""
+    global sensor_data
+    
+    mode = rec['recommended_mode']
+    temp = rec['recommended_temp']
+    current_ac = sensor_data['ac_state']
+    
+    if mode == 'off' and current_ac == 1:
+        print("[AUTO] AC OFF")
+        send_ac_command("AC_OFF")
+    
+    elif mode in ['cool', 'eco'] and current_ac == 0:
+        print(f"[AUTO] AC {mode.upper()}")
+        if mode == 'eco':
+            send_ac_command("AC_ECO")
         else:
-            temp_diff = abs(current_temp - temp_setting)
-            if 23 <= temp_setting <= 26:
-                comfort = 100 - (temp_diff * 5)
-            else:
-                comfort = 80 - (temp_diff * 5)
-        
-        # Humidity factor
-        if 40 <= humidity <= 60:
-            comfort += 10
-        
-        comfort = max(0, min(100, comfort))
-        
-        # === ENERGY SCORE ===
-        energy_map = {'off': 0, 'fan': 20, 'eco': 50, 'cool': 100}
-        temp_factor = (temp_setting - self.temp_min) / (self.temp_max - self.temp_min)
-        energy = 100 - energy_map.get(mode, 50) * (1 - temp_factor * 0.3)
-        energy = max(0, min(100, energy))
-        
-        # === PREFERENCE SCORE ===
-        preference = 50
-        
-        # Night time (22:00 - 06:00)
-        if time_of_day >= 22 or time_of_day < 6:
-            if mode in ['eco', 'off']:
-                preference = 80
-            elif mode == 'cool':
-                preference = 40
-        
-        # Occupancy
-        if not occupancy:
-            if mode == 'off':
-                preference = 100
-            elif mode == 'eco':
-                preference = 70
-            else:
-                preference = 30
-        else:
-            if mode == 'off' and current_temp > 27:
-                preference = 20
-            elif mode == 'cool' and current_temp < 25:
-                preference = 40
-        
-        # === FINAL SCORE ===
-        score = (
-            self.comfort_weight * comfort +
-            self.energy_weight * energy +
-            self.preference_weight * preference
-        )
-        
-        return score
+            send_ac_command("AC_ON", temp)
+
+
+def optimization_loop():
+    """Background optimization loop"""
+    global running
     
-    def select_parents(self, population, fitness_scores):
-        """Tournament selection"""
-        tournament_size = 3
-        parents = []
-        
-        for _ in range(2):
-            candidates = random.sample(
-                list(zip(population, fitness_scores)), 
-                min(tournament_size, len(population))
-            )
-            winner = max(candidates, key=lambda x: x[1])
-            parents.append(winner[0])
-        
-        return parents
+    while running:
+        time.sleep(config.OPTIMIZATION_INTERVAL)
+        if auto_control_enabled and running:
+            try:
+                run_optimization()
+            except Exception as e:
+                print(f"[ERROR] Optimization: {e}")
+
+
+# ===================== MENU =====================
+def print_menu():
+    print("\n" + "=" * 50)
+    print("🌀 SMART AC CONTROLLER")
+    print("=" * 50)
+    print("1. AC ON")
+    print("2. AC OFF")
+    print("3. AC ECO")
+    print("4. Run GA Now")
+    print("5. Show Data")
+    print("6. Toggle Auto")
+    print("0. Exit")
+    print("=" * 50)
+
+
+def interactive_menu():
+    """Menu interaktif"""
+    global auto_control_enabled, running
     
-    def crossover(self, parent1, parent2):
-        """Crossover dua parent"""
-        if random.random() < self.crossover_rate:
-            return {
-                'temp_setting': random.choice([parent1['temp_setting'], parent2['temp_setting']]),
-                'mode': random.choice([parent1['mode'], parent2['mode']]),
-                'fan_speed': random.choice([parent1['fan_speed'], parent2['fan_speed']])
-            }
-        return parent1.copy()
-    
-    def mutate(self, individual):
-        """Mutasi individu"""
-        mutated = individual.copy()
-        
-        if random.random() < self.mutation_rate:
-            mutated['temp_setting'] = random.randint(self.temp_min, self.temp_max)
-        
-        if random.random() < self.mutation_rate:
-            mutated['mode'] = random.choice(self.modes)
-        
-        if random.random() < self.mutation_rate:
-            mutated['fan_speed'] = random.choice(self.fan_speeds)
-        
-        return mutated
-    
-    def optimize(self, current_temp, humidity, occupancy, time_of_day=None):
-        """Jalankan GA optimization"""
-        if time_of_day is None:
-            time_of_day = datetime.now().hour
-        
-        population = self.create_population()
-        best_ever = None
-        best_fitness = -1
-        
-        for _ in range(self.generations):
-            fitness_scores = [
-                self.fitness(ind, current_temp, humidity, occupancy, time_of_day)
-                for ind in population
-            ]
+    while running:
+        print_menu()
+        try:
+            choice = input("Pilih: ").strip()
             
-            # Track best
-            max_idx = fitness_scores.index(max(fitness_scores))
-            if fitness_scores[max_idx] > best_fitness:
-                best_fitness = fitness_scores[max_idx]
-                best_ever = population[max_idx].copy()
-            
-            # Create new population
-            new_population = [best_ever.copy()] if best_ever else []
-            
-            while len(new_population) < self.population_size:
-                parents = self.select_parents(population, fitness_scores)
-                child = self.crossover(parents[0], parents[1])
-                child = self.mutate(child)
-                new_population.append(child)
-            
-            population = new_population
+            if choice == "1":
+                send_ac_command("AC_ON")
+            elif choice == "2":
+                send_ac_command("AC_OFF")
+            elif choice == "3":
+                send_ac_command("AC_ECO")
+            elif choice == "4":
+                run_optimization()
+            elif choice == "5":
+                print(f"\n📊 Data:\n{json.dumps(sensor_data, indent=2, default=str)}")
+            elif choice == "6":
+                auto_control_enabled = not auto_control_enabled
+                print(f"Auto: {'ON' if auto_control_enabled else 'OFF'}")
+            elif choice == "0":
+                print("Exiting...")
+                running = False
+                break
+        except KeyboardInterrupt:
+            running = False
+            break
+        except Exception as e:
+            print(f"Error: {e}")
         
-        # Save history
-        self.history.append({
-            'timestamp': datetime.now().isoformat(),
-            'input': {'temp': current_temp, 'humidity': humidity, 'occupancy': occupancy},
-            'output': best_ever,
-            'fitness': best_fitness
-        })
-        
-        return best_ever, best_fitness
+        time.sleep(0.3)
+
+
+# ===================== MAIN =====================
+def main():
+    global mqtt_handler, running
     
-    def get_recommendation(self, current_temp, humidity, occupancy):
-        """Dapatkan rekomendasi setting AC"""
-        best, fitness = self.optimize(current_temp, humidity, occupancy)
-        
-        if best is None:
-            best = {'temp_setting': 24, 'mode': 'eco', 'fan_speed': 'auto'}
-            fitness = 50
-        
-        reasons = []
-        if not occupancy:
-            reasons.append("Tidak ada orang")
-        if current_temp > 28:
-            reasons.append(f"Suhu tinggi ({current_temp}°C)")
-        elif current_temp < 24:
-            reasons.append(f"Suhu nyaman ({current_temp}°C)")
-        if humidity > 70:
-            reasons.append("Kelembaban tinggi")
-        
-        return {
-            'recommended_temp': best['temp_setting'],
-            'recommended_mode': best['mode'],
-            'recommended_fan': best['fan_speed'],
-            'confidence': fitness / 100,
-            'reason': "; ".join(reasons) if reasons else "Kondisi normal"
-        }
+    print("\n" + "=" * 50)
+    print("🌀 SMART AC CONTROLLER + GA")
+    print("=" * 50)
+    
+    # Setup MQTT
+    mqtt_handler = MQTTHandler(
+        config.MQTT_BROKER, 
+        config.MQTT_PORT, 
+        "AC_Controller"
+    )
+    mqtt_handler.connect()
+    
+    # Subscribe
+    mqtt_handler.subscribe(config.TOPIC_SENSOR, on_sensor_data)
+    mqtt_handler.subscribe(config.TOPIC_STATUS, on_status)
+    mqtt_handler.subscribe(config.TOPIC_IR_LEARN, on_ir_learn)
+    
+    # Start MQTT loop
+    mqtt_handler.loop_start()
+    
+    # Start optimization thread
+    opt_thread = Thread(target=optimization_loop, daemon=True)
+    opt_thread.start()
+    
+    print("[OK] AC Controller started!")
+    
+    try:
+        interactive_menu()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down...")
+    finally:
+        running = False
+        mqtt_handler.disconnect()
+
+
+if __name__ == "__main__":
+    main()
