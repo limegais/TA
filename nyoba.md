@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, Response
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 import json
@@ -7,6 +7,7 @@ from collections import deque
 from influxdb_client import InfluxDBClient
 import threading
 import time
+import cv2
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -22,20 +23,73 @@ INFLUX_BUCKET = "sensordata"
 MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
 
+# Camera Configuration
+camera = None
+camera_lock = threading.Lock()
+
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
-    'camera': {'person_detected': False, 'count': 0, 'confidence': 0},
+    'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0},
-    'ir_codes': {}  # Store learned IR codes
+    'ir_codes': {}
 }
 
 log_messages = deque(maxlen=100)
 ir_learning_mode = False
 ir_learning_button = ""
 
-# MQTT Client Setup
+# ==================== CAMERA FUNCTIONS ====================
+def get_camera():
+    global camera
+    if camera is None:
+        camera = cv2.VideoCapture(0)
+        if camera.isOpened():
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            camera.set(cv2.CAP_PROP_FPS, 30)
+            mqtt_data['camera']['status'] = 'active'
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'Camera initialized successfully', 'level': 'success'})
+        else:
+            mqtt_data['camera']['status'] = 'error'
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'Camera failed to open', 'level': 'error'})
+    return camera
+
+def generate_frames():
+    while True:
+        with camera_lock:
+            cam = get_camera()
+            if cam is None or not cam.isOpened():
+                mqtt_data['camera']['status'] = 'error'
+                break
+            success, frame = cam.read()
+            if not success:
+                global camera
+                if camera is not None:
+                    camera.release()
+                    camera = None
+                mqtt_data['camera']['status'] = 'error'
+                break
+            
+            # Add timestamp overlay on frame
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, 'Smart Room Camera', (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+def release_camera():
+    global camera
+    if camera is not None:
+        camera.release()
+        camera = None
+        mqtt_data['camera']['status'] = 'inactive'
+
+# ==================== MQTT ====================
 mqtt_client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
@@ -98,7 +152,6 @@ def on_message(client, userdata, msg):
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
         
         elif 'ir/learned' in topic:
-            # IR code learned successfully
             button_name = payload.get('button', '')
             ir_code = payload.get('code', '')
             
@@ -121,9 +174,8 @@ mqtt_client.on_message = on_message
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 mqtt_client.loop_start()
 
-# InfluxDB Query Function
+# ==================== INFLUXDB ====================
 def get_influx_data(measurement, field, hours=1):
-    """Query InfluxDB for historical data"""
     try:
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
@@ -148,17 +200,49 @@ def get_influx_data(measurement, field, hours=1):
                 })
         
         client.close()
-        
         return data_points
         
     except Exception as e:
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'InfluxDB Query Error: {str(e)}', 'level': 'error'})
         return []
 
-# API Routes
+# ==================== API ROUTES ====================
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/camera/status')
+def camera_status():
+    try:
+        cam = get_camera()
+        if cam and cam.isOpened():
+            w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = int(cam.get(cv2.CAP_PROP_FPS))
+            return jsonify({'status': 'active', 'width': w, 'height': h, 'fps': fps})
+        else:
+            return jsonify({'status': 'inactive'})
+    except:
+        return jsonify({'status': 'error'})
+
+@app.route('/api/camera/restart', methods=['POST'])
+def restart_camera():
+    global camera
+    with camera_lock:
+        if camera is not None:
+            camera.release()
+            camera = None
+        time.sleep(1)
+        cam = get_camera()
+        if cam and cam.isOpened():
+            return jsonify({'status': 'success', 'message': 'Camera restarted'})
+        else:
+            return jsonify({'status': 'error', 'message': 'Camera failed to restart'}), 500
 
 @app.route('/api/data')
 def get_data():
@@ -226,7 +310,6 @@ def learn_ir():
         ir_learning_mode = True
         ir_learning_button = button_name
         
-        # Send MQTT command to ESP32 to start learning
         mqtt_client.publish('smartroom/ir/learn', json.dumps({'button': button_name, 'action': 'start'}))
         
         log_messages.append({
@@ -250,7 +333,6 @@ def send_ir():
         
         ir_code = mqtt_data['ir_codes'][button_name]
         
-        # Send stored IR code to ESP32
         mqtt_client.publish('smartroom/ir/send', json.dumps({'button': button_name, 'code': ir_code}))
         
         log_messages.append({
@@ -271,7 +353,7 @@ def get_ir_codes():
 def get_logs():
     return jsonify(list(log_messages))
 
-# HTML Template
+# ==================== HTML TEMPLATE ====================
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -614,6 +696,11 @@ HTML_TEMPLATE = '''
             cursor: not-allowed;
         }
 
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
         .ir-button-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -731,12 +818,101 @@ HTML_TEMPLATE = '''
             margin: 10px 0;
         }
 
+        /* ========== CAMERA STYLES ========== */
         .camera-view {
             background: var(--bg-card);
             padding: 20px;
             border-radius: 12px;
             border: 1px solid var(--border);
             text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .camera-feed-container {
+            position: relative;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            max-width: 100%;
+        }
+
+        .camera-feed-container img {
+            width: 100%;
+            max-height: 500px;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .camera-overlay-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+            padding: 10px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .camera-rec-badge {
+            background: var(--danger);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            animation: pulse 1.5s infinite;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .camera-time-badge {
+            color: white;
+            font-size: 12px;
+            background: rgba(0,0,0,0.5);
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .camera-error {
+            padding: 80px 20px;
+            color: var(--text-secondary);
+        }
+
+        .camera-error i {
+            font-size: 64px;
+            margin-bottom: 20px;
+            color: var(--border);
+        }
+
+        .camera-info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .camera-info-card {
+            background: var(--bg-dark);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .camera-info-label {
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .camera-info-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: var(--text-primary);
         }
 
         .camera-placeholder {
@@ -748,6 +924,12 @@ HTML_TEMPLATE = '''
             justify-content: center;
             color: var(--text-secondary);
             font-size: 18px;
+        }
+
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .main-content { margin-left: 0; }
+            .stats-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -772,7 +954,7 @@ HTML_TEMPLATE = '''
         </div>
         <div class="nav-item" onclick="showPage('camera')">
             <i class="fas fa-video"></i>
-            <span>Camera/Occupancy</span>
+            <span>Camera</span>
         </div>
         <div class="nav-item" onclick="showPage('power')">
             <i class="fas fa-bolt"></i>
@@ -986,18 +1168,54 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1>Camera & Occupancy</h1>
-                <p>Person detection and room occupancy monitoring</p>
+                <h1><i class="fas fa-video"></i> Live Camera Feed</h1>
+                <p>Real-time room monitoring via USB Camera</p>
             </div>
 
             <div class="camera-view">
-                <div class="camera-placeholder">
-                    <div>
-                        <i class="fas fa-video" style="font-size: 64px; margin-bottom: 20px;"></i>
-                        <p>Camera feed will appear here</p>
-                        <p style="font-size: 14px; margin-top: 10px;">Person Detected: <span id="person-detected">No</span></p>
-                        <p style="font-size: 14px;">Count: <span id="person-count">0</span></p>
-                        <p style="font-size: 14px;">Confidence: <span id="person-confidence">0</span>%</p>
+                <div class="camera-feed-container" id="camera-feed-container">
+                    <div class="camera-overlay-bar">
+                        <span class="camera-rec-badge"><i class="fas fa-circle"></i> REC</span>
+                        <span class="camera-time-badge" id="camera-time">00:00:00</span>
+                    </div>
+                    <img id="camera-img" src="/video_feed" alt="Camera Feed"
+                         onerror="this.style.display='none'; document.getElementById('camera-error').style.display='flex';">
+                    <div id="camera-error" class="camera-error" style="display:none; flex-direction:column; align-items:center;">
+                        <i class="fas fa-video-slash"></i>
+                        <h3>Camera Not Available</h3>
+                        <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
+                            Pastikan kamera USB terhubung dengan benar
+                        </p>
+                        <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
+                            <i class="fas fa-sync"></i> Retry Connection
+                        </button>
+                    </div>
+                </div>
+
+                <div class="camera-info-grid">
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-circle" style="color: var(--success);"></i> Status</div>
+                        <div class="camera-info-value" id="cam-status">Connecting...</div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-expand"></i> Resolution</div>
+                        <div class="camera-info-value" id="cam-resolution">640 x 480</div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-tachometer-alt"></i> Frame Rate</div>
+                        <div class="camera-info-value" id="cam-fps">30 FPS</div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-walking"></i> Person Detected</div>
+                        <div class="camera-info-value"><span id="cam-person">No</span></div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-users"></i> Person Count</div>
+                        <div class="camera-info-value"><span id="cam-count">0</span></div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label"><i class="fas fa-percentage"></i> Confidence</div>
+                        <div class="camera-info-value"><span id="cam-confidence">0</span>%</div>
                     </div>
                 </div>
             </div>
@@ -1095,7 +1313,6 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <div class="ir-button-grid" id="ir-button-grid">
-                    <!-- Power -->
                     <div class="ir-button" data-button="POWER">
                         <div class="ir-button-name">POWER</div>
                         <div class="ir-button-icon"><i class="fas fa-power-off"></i></div>
@@ -1104,7 +1321,6 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-POWER">Not learned</div>
                     </div>
 
-                    <!-- Temp UP -->
                     <div class="ir-button" data-button="TEMP_UP">
                         <div class="ir-button-name">TEMP +</div>
                         <div class="ir-button-icon"><i class="fas fa-plus"></i></div>
@@ -1113,7 +1329,6 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-TEMP_UP">Not learned</div>
                     </div>
 
-                    <!-- Temp DOWN -->
                     <div class="ir-button" data-button="TEMP_DOWN">
                         <div class="ir-button-name">TEMP -</div>
                         <div class="ir-button-icon"><i class="fas fa-minus"></i></div>
@@ -1122,7 +1337,6 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-TEMP_DOWN">Not learned</div>
                     </div>
 
-                    <!-- Fan Speed -->
                     <div class="ir-button" data-button="FAN">
                         <div class="ir-button-name">FAN SPEED</div>
                         <div class="ir-button-icon"><i class="fas fa-fan"></i></div>
@@ -1131,7 +1345,6 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-FAN">Not learned</div>
                     </div>
 
-                    <!-- Mode -->
                     <div class="ir-button" data-button="MODE">
                         <div class="ir-button-name">MODE</div>
                         <div class="ir-button-icon"><i class="fas fa-cog"></i></div>
@@ -1140,7 +1353,6 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-MODE">Not learned</div>
                     </div>
 
-                    <!-- Swing -->
                     <div class="ir-button" data-button="SWING">
                         <div class="ir-button-name">SWING</div>
                         <div class="ir-button-icon"><i class="fas fa-arrows-alt-v"></i></div>
@@ -1176,7 +1388,6 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="log-container" id="log-container">
-                <!-- Logs will be inserted here -->
             </div>
         </div>
     </div>
@@ -1200,166 +1411,72 @@ HTML_TEMPLATE = '''
 
         let learnedCodes = {};
 
+        // ==================== CHARTS ====================
         function initCharts() {
             const chartConfig = {
                 type: 'line',
                 options: {
                     responsive: true,
                     maintainAspectRatio: true,
-                    plugins: {
-                        legend: {
-                            display: false
-                        }
-                    },
+                    plugins: { legend: { display: false } },
                     scales: {
-                        y: {
-                            beginAtZero: false,
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#94a3b8'
-                            }
-                        },
-                        x: {
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#94a3b8'
-                            }
-                        }
+                        y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
                     }
                 }
             };
 
             charts.temp = new Chart(document.getElementById('tempChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Temperature (°C)',
-                        data: [],
-                        borderColor: '#ef4444',
-                        backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'Temperature (°C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.hum = new Chart(document.getElementById('humChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Humidity (%)',
-                        data: [],
-                        borderColor: '#3b82f6',
-                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'Humidity (%)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'AC Target Temp (°C)',
-                        data: [],
-                        borderColor: '#6366f1',
-                        backgroundColor: 'rgba(99, 102, 241, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'AC Target Temp (°C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Light Intensity (lux)',
-                        data: [],
-                        borderColor: '#f59e0b',
-                        backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'Light Intensity (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Brightness (%)',
-                        data: [],
-                        borderColor: '#10b981',
-                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.power = new Chart(document.getElementById('powerChart'), {
                 ...chartConfig,
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Total Power (W)',
-                        data: [],
-                        borderColor: '#a855f7',
-                        backgroundColor: 'rgba(168, 85, 247, 0.1)',
-                        tension: 0.4,
-                        fill: true
-                    }]
-                }
+                data: { labels: [], datasets: [{ label: 'Total Power (W)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
             });
         }
 
-        function updateChart(chartName, hours) {
+        function updateChartData(chartName, hours) {
             let endpoint = '';
-            
             switch(chartName) {
-                case 'temp':
-                    endpoint = '/api/chart/ac_sensor/temperature/' + hours;
-                    break;
-                case 'hum':
-                    endpoint = '/api/chart/ac_sensor/humidity/' + hours;
-                    break;
-                case 'acTemp':
-                    endpoint = '/api/chart/ac_sensor/ac_temp/' + hours;
-                    break;
-                case 'lampLux':
-                    endpoint = '/api/chart/lamp_sensor/lux/' + hours;
-                    break;
-                case 'lampBright':
-                    endpoint = '/api/chart/lamp_sensor/brightness/' + hours;
-                    break;
+                case 'temp': endpoint = '/api/chart/ac_sensor/temperature/' + hours; break;
+                case 'hum': endpoint = '/api/chart/ac_sensor/humidity/' + hours; break;
+                case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
+                case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
+                case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
             }
 
             fetch(endpoint)
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
                     if (data && data.length > 0) {
-                        const labels = data.map(d => d.time);
-                        const values = data.map(d => d.value);
-                        
-                        charts[chartName].data.labels = labels;
-                        charts[chartName].data.datasets[0].data = values;
+                        charts[chartName].data.labels = data.map(d => d.time);
+                        charts[chartName].data.datasets[0].data = data.map(d => d.value);
                         charts[chartName].update();
                     }
                 })
-                .catch(error => {
-                    console.error('Error fetching chart data:', error);
-                });
+                .catch(e => console.error('Chart error:', e));
         }
 
         function changeChartRange(chartName, hours) {
@@ -1370,9 +1487,10 @@ HTML_TEMPLATE = '''
             buttons.forEach(btn => btn.classList.remove('active'));
             event.target.classList.add('active');
             
-            updateChart(chartName, hours);
+            updateChartData(chartName, hours);
         }
 
+        // ==================== NAVIGATION ====================
         function showPage(pageId) {
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
@@ -1381,8 +1499,65 @@ HTML_TEMPLATE = '''
             event.target.closest('.nav-item').classList.add('active');
             
             localStorage.setItem('currentPage', pageId);
+
+            // Check camera status when camera page is opened
+            if (pageId === 'camera') {
+                checkCameraStatus();
+            }
         }
 
+        // ==================== CAMERA ====================
+        function retryCamera() {
+            const img = document.getElementById('camera-img');
+            const error = document.getElementById('camera-error');
+            
+            // Restart camera on backend
+            fetch('/api/camera/restart', { method: 'POST' })
+                .then(r => r.json())
+                .then(result => {
+                    if (result.status === 'success') {
+                        img.src = '/video_feed?' + new Date().getTime();
+                        img.style.display = 'block';
+                        error.style.display = 'none';
+                        showToast('Camera restarted successfully!');
+                        checkCameraStatus();
+                    } else {
+                        showToast('Camera restart failed', 'error');
+                    }
+                })
+                .catch(e => {
+                    showToast('Camera restart error', 'error');
+                });
+        }
+
+        function checkCameraStatus() {
+            fetch('/api/camera/status')
+                .then(r => r.json())
+                .then(data => {
+                    const statusEl = document.getElementById('cam-status');
+                    if (data.status === 'active') {
+                        statusEl.textContent = 'Active';
+                        statusEl.style.color = '#10b981';
+                        document.getElementById('cam-resolution').textContent = data.width + ' x ' + data.height;
+                        document.getElementById('cam-fps').textContent = data.fps + ' FPS';
+                    } else {
+                        statusEl.textContent = 'Inactive';
+                        statusEl.style.color = '#ef4444';
+                    }
+                })
+                .catch(e => {
+                    document.getElementById('cam-status').textContent = 'Error';
+                    document.getElementById('cam-status').style.color = '#ef4444';
+                });
+        }
+
+        function updateCameraTime() {
+            const el = document.getElementById('camera-time');
+            if (el) el.textContent = new Date().toLocaleTimeString();
+        }
+        setInterval(updateCameraTime, 1000);
+
+        // ==================== AC CONTROLS ====================
         function updateACTemp(value) {
             document.getElementById('ac-temp-display').textContent = value;
         }
@@ -1392,46 +1567,31 @@ HTML_TEMPLATE = '''
         }
 
         function sendACCommand(command) {
-            const data = { command: command };
-            
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
+                body: JSON.stringify({ command: command })
             })
-            .then(response => response.json())
-            .then(result => {
-                showToast(result.message);
-            })
-            .catch(error => {
-                showToast('Error: ' + error, 'error');
-            });
+            .then(r => r.json())
+            .then(result => showToast(result.message))
+            .catch(e => showToast('Error: ' + e, 'error'));
         }
 
         function applyACSettings() {
             const temp = document.getElementById('ac-temp-slider').value;
             const fan = document.getElementById('fan-speed-slider').value;
             
-            const data = {
-                command: 'SET',
-                temperature: parseInt(temp),
-                fan_speed: parseInt(fan)
-            };
-            
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
+                body: JSON.stringify({ command: 'SET', temperature: parseInt(temp), fan_speed: parseInt(fan) })
             })
-            .then(response => response.json())
-            .then(result => {
-                showToast('AC settings applied!');
-            })
-            .catch(error => {
-                showToast('Error: ' + error, 'error');
-            });
+            .then(r => r.json())
+            .then(result => showToast('AC settings applied!'))
+            .catch(e => showToast('Error: ' + e, 'error'));
         }
 
+        // ==================== LAMP CONTROLS ====================
         function updateBrightness(value) {
             document.getElementById('brightness-display').textContent = value;
         }
@@ -1439,73 +1599,52 @@ HTML_TEMPLATE = '''
         function applyLampSettings() {
             const brightness = document.getElementById('brightness-slider').value;
             
-            const data = {
-                brightness: parseInt(brightness)
-            };
-            
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
+                body: JSON.stringify({ brightness: parseInt(brightness) })
             })
-            .then(response => response.json())
-            .then(result => {
-                showToast('Lamp brightness set!');
-            })
-            .catch(error => {
-                showToast('Error: ' + error, 'error');
-            });
+            .then(r => r.json())
+            .then(result => showToast('Lamp brightness set!'))
+            .catch(e => showToast('Error: ' + e, 'error'));
         }
 
+        // ==================== MODE TOGGLES ====================
         function toggleACMode() {
             fetch('/api/data')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
-                    const currentMode = data.ac.mode;
-                    const newMode = currentMode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    
+                    const newMode = data.ac.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
                     fetch('/api/ac/mode', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mode: newMode })
                     })
-                    .then(response => response.json())
-                    .then(result => {
-                        updateModeBadges();
-                        showToast('AC Mode: ' + newMode);
-                    })
-                    .catch(error => {
-                        showToast('Error: ' + error, 'error');
-                    });
+                    .then(r => r.json())
+                    .then(result => { updateModeBadges(); showToast('AC Mode: ' + newMode); })
+                    .catch(e => showToast('Error: ' + e, 'error'));
                 });
         }
 
         function toggleLampMode() {
             fetch('/api/data')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
-                    const currentMode = data.lamp.mode;
-                    const newMode = currentMode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    
+                    const newMode = data.lamp.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
                     fetch('/api/lamp/mode', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ mode: newMode })
                     })
-                    .then(response => response.json())
-                    .then(result => {
-                        updateModeBadges();
-                        showToast('Lamp Mode: ' + newMode);
-                    })
-                    .catch(error => {
-                        showToast('Error: ' + error, 'error');
-                    });
+                    .then(r => r.json())
+                    .then(result => { updateModeBadges(); showToast('Lamp Mode: ' + newMode); })
+                    .catch(e => showToast('Error: ' + e, 'error'));
                 });
         }
 
         function updateModeBadges() {
             fetch('/api/data')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
                     const acBadge = document.getElementById('ac-mode-badge');
                     const lampBadge = document.getElementById('lamp-mode-badge');
@@ -1518,9 +1657,9 @@ HTML_TEMPLATE = '''
                 });
         }
 
-        // IR Learning Functions
+        // ==================== IR REMOTE ====================
         function learnIRCode(buttonName) {
-            const buttonElement = document.querySelector(`[data-button="${buttonName}"]`);
+            const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
             buttonElement.classList.add('learning');
             
             fetch('/api/ir/learn', {
@@ -1528,19 +1667,12 @@ HTML_TEMPLATE = '''
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ button: buttonName })
             })
-            .then(response => response.json())
+            .then(r => r.json())
             .then(result => {
-                showToast(`Learning ${buttonName}... Press remote button now!`, 'info');
-                
-                // Auto-remove learning state after 15 seconds
-                setTimeout(() => {
-                    buttonElement.classList.remove('learning');
-                }, 15000);
+                showToast('Learning ' + buttonName + '... Press remote button now!', 'info');
+                setTimeout(() => { buttonElement.classList.remove('learning'); }, 15000);
             })
-            .catch(error => {
-                buttonElement.classList.remove('learning');
-                showToast('Error: ' + error, 'error');
-            });
+            .catch(e => { buttonElement.classList.remove('learning'); showToast('Error: ' + e, 'error'); });
         }
 
         function sendIRCode(buttonName) {
@@ -1549,55 +1681,45 @@ HTML_TEMPLATE = '''
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ button: buttonName })
             })
-            .then(response => response.json())
-            .then(result => {
-                showToast(`IR Code sent: ${buttonName}`);
-            })
-            .catch(error => {
-                showToast('Error: ' + error.message || error, 'error');
-            });
+            .then(r => r.json())
+            .then(result => showToast('IR Code sent: ' + buttonName))
+            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
         }
 
         function loadIRCodes() {
             fetch('/api/ir/codes')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(codes => {
                     learnedCodes = codes;
-                    
-                    // Update UI
                     Object.keys(codes).forEach(buttonName => {
-                        const buttonElement = document.querySelector(`[data-button="${buttonName}"]`);
-                        const statusElement = document.getElementById(`status-${buttonName}`);
-                        
+                        const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
+                        const statusElement = document.getElementById('status-' + buttonName);
                         if (buttonElement && statusElement) {
                             buttonElement.classList.add('learned');
                             statusElement.textContent = 'Learned ✓';
                             statusElement.style.color = '#10b981';
                         }
                     });
-                    
                     showToast('IR codes loaded');
                 })
-                .catch(error => {
-                    console.error('Error loading IR codes:', error);
-                });
+                .catch(e => console.error('Error loading IR codes:', e));
         }
 
+        // ==================== TOAST ====================
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
             const toastMessage = document.getElementById('toast-message');
+            const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
             
-            toastMessage.innerHTML = `<i class="fas fa-${type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation')}-circle"></i> ${message}`;
+            toastMessage.innerHTML = '<i class="fas fa-' + icon + '-circle"></i> ' + message;
             toast.classList.add('show');
-            
-            setTimeout(() => {
-                toast.classList.remove('show');
-            }, 3000);
+            setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
 
+        // ==================== DATA UPDATES ====================
         function updateDashboard() {
             fetch('/api/data')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
                     document.getElementById('dash-temp').textContent = data.ac.temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
@@ -1608,13 +1730,15 @@ HTML_TEMPLATE = '''
                     document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
                     
-                    document.getElementById('person-detected').textContent = data.camera.person_detected ? 'Yes' : 'No';
-                    document.getElementById('person-count').textContent = data.camera.count;
-                    document.getElementById('person-confidence').textContent = data.camera.confidence.toFixed(0);
+                    // Camera detection data
+                    document.getElementById('cam-person').textContent = data.camera.person_detected ? 'Yes' : 'No';
+                    document.getElementById('cam-count').textContent = data.camera.count;
+                    document.getElementById('cam-confidence').textContent = data.camera.confidence.toFixed ? data.camera.confidence.toFixed(0) : data.camera.confidence;
                     
-                    document.getElementById('ga-fitness').textContent = data.system.ga_fitness.toFixed(2);
-                    document.getElementById('pso-fitness').textContent = data.system.pso_fitness.toFixed(2);
+                    document.getElementById('ga-fitness').textContent = data.system.ga_fitness.toFixed ? data.system.ga_fitness.toFixed(2) : data.system.ga_fitness;
+                    document.getElementById('pso-fitness').textContent = data.system.pso_fitness.toFixed ? data.system.pso_fitness.toFixed(2) : data.system.pso_fitness;
                     
+                    // Power calculations
                     let acPower = 0;
                     if (data.ac.ac_state === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
@@ -1634,20 +1758,20 @@ HTML_TEMPLATE = '''
 
         function updateLogs() {
             fetch('/api/logs')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(logs => {
                     const container = document.getElementById('log-container');
                     container.innerHTML = '';
-                    
                     logs.reverse().forEach(log => {
                         const entry = document.createElement('div');
                         entry.className = 'log-entry ' + log.level;
-                        entry.innerHTML = `<strong>[${log.time}]</strong> ${log.msg}`;
+                        entry.innerHTML = '<strong>[' + log.time + ']</strong> ' + log.msg;
                         container.appendChild(entry);
                     });
                 });
         }
 
+        // ==================== SOCKET.IO EVENTS ====================
         socket.on('mqtt_update', function(data) {
             updateDashboard();
             
@@ -1660,7 +1784,6 @@ HTML_TEMPLATE = '''
                     charts.temp.data.datasets[0].data.push(data.data.temperature);
                     charts.temp.update();
                 }
-                
                 if (charts.hum && charts.hum.data.labels.length < 50) {
                     charts.hum.data.labels.push(timeStr);
                     charts.hum.data.datasets[0].data.push(data.data.humidity);
@@ -1677,7 +1800,6 @@ HTML_TEMPLATE = '''
                     charts.lampLux.data.datasets[0].data.push(data.data.lux);
                     charts.lampLux.update();
                 }
-                
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(data.data.brightness / 255 * 100));
@@ -1687,8 +1809,8 @@ HTML_TEMPLATE = '''
         });
 
         socket.on('ir_learned', function(data) {
-            const buttonElement = document.querySelector(`[data-button="${data.button}"]`);
-            const statusElement = document.getElementById(`status-${data.button}`);
+            const buttonElement = document.querySelector('[data-button="' + data.button + '"]');
+            const statusElement = document.getElementById('status-' + data.button);
             
             if (buttonElement && statusElement) {
                 buttonElement.classList.remove('learning');
@@ -1697,10 +1819,11 @@ HTML_TEMPLATE = '''
                 statusElement.style.color = '#10b981';
             }
             
-            showToast(`IR Code learned: ${data.button}`);
+            showToast('IR Code learned: ' + data.button);
             learnedCodes[data.button] = data.code;
         });
 
+        // ==================== INIT ====================
         function loadSavedPreferences() {
             const savedPage = localStorage.getItem('currentPage');
             if (savedPage) {
@@ -1708,14 +1831,12 @@ HTML_TEMPLATE = '''
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
                 
                 document.getElementById(savedPage).classList.add('active');
-                const navItem = document.querySelector(`[onclick="showPage('${savedPage}')"]`);
+                const navItem = document.querySelector('[onclick="showPage(\\''+savedPage+'\\')"]');
                 if (navItem) navItem.classList.add('active');
             }
             
             const savedRanges = localStorage.getItem('chartRanges');
-            if (savedRanges) {
-                chartRanges = JSON.parse(savedRanges);
-            }
+            if (savedRanges) chartRanges = JSON.parse(savedRanges);
         }
 
         window.onload = function() {
@@ -1724,9 +1845,10 @@ HTML_TEMPLATE = '''
             updateDashboard();
             updateLogs();
             loadIRCodes();
+            checkCameraStatus();
             
             Object.keys(chartRanges).forEach(chartName => {
-                updateChart(chartName, chartRanges[chartName]);
+                updateChartData(chartName, chartRanges[chartName]);
             });
             
             setInterval(updateDashboard, 1000);
@@ -1734,7 +1856,7 @@ HTML_TEMPLATE = '''
             
             setInterval(() => {
                 Object.keys(chartRanges).forEach(chartName => {
-                    updateChart(chartName, chartRanges[chartName]);
+                    updateChartData(chartName, chartRanges[chartName]);
                 });
             }, 30000);
         };
@@ -1744,6 +1866,9 @@ HTML_TEMPLATE = '''
 '''
 
 if __name__ == '__main__':
-    print("Starting Smart Room Dashboard...")
-    print("Dashboard URL: http://172.20.0.65:5000")
+    print("=" * 50)
+    print("  Smart Room Dashboard + Camera")
+    print("  Dashboard: http://172.20.0.65:5000")
+    print("  Camera:    http://172.20.0.65:5000/video_feed")
+    print("=" * 50)
     socketio.run(app, host='0.0.0.0', port=5000, debug=False)
