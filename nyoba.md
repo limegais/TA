@@ -52,32 +52,34 @@ def load_yolo_model():
     global yolo_net, yolo_classes, yolo_output_layers
     try:
         import os
-        import urllib.request
         
         yolo_dir = '/home/iotlab/smartroom/yolo'
-        os.makedirs(yolo_dir, exist_ok=True)
         
-        weights_path = f'{yolo_dir}/yolov3-tiny.weights'
-        config_path = f'{yolo_dir}/yolov3-tiny.cfg'
+        # YOLOv4-tiny paths
+        weights_path = f'{yolo_dir}/yolov4-tiny.weights'
+        config_path = f'{yolo_dir}/yolov4-tiny.cfg'
         names_path = f'{yolo_dir}/coco.names'
         
-        # Download files if not exist
+        # Check if files exist
         if not os.path.exists(weights_path):
-            print("📥 Downloading YOLO weights (35MB)...")
-            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
-                               'msg': 'Downloading YOLO weights...', 'level': 'info'})
-            urllib.request.urlretrieve('https://pjreddie.com/media/files/yolov3-tiny.weights', weights_path)
+            print(f"❌ YOLO weights not found: {weights_path}")
+            print("Please download:")
+            print("cd ~/smartroom/yolo")
+            print("wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights")
+            return False
         
         if not os.path.exists(config_path):
-            print("📥 Downloading YOLO config...")
-            urllib.request.urlretrieve('https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg', config_path)
+            print(f"❌ YOLO config not found: {config_path}")
+            print("wget https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg")
+            return False
         
         if not os.path.exists(names_path):
-            print("📥 Downloading COCO names...")
-            urllib.request.urlretrieve('https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names', names_path)
+            print(f"❌ COCO names not found: {names_path}")
+            print("wget https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names")
+            return False
         
         # Load YOLO
-        print("🧠 Loading YOLO model...")
+        print(f"🧠 Loading YOLOv4-tiny from {weights_path}...")
         yolo_net = cv2.dnn.readNet(weights_path, config_path)
         yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
         yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
@@ -89,11 +91,16 @@ def load_yolo_model():
         yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
         
         print("✅ YOLO model loaded successfully!")
+        print(f"   - Classes loaded: {len(yolo_classes)}")
+        print(f"   - Output layers: {len(yolo_output_layers)}")
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
-                           'msg': 'YOLO model loaded successfully', 'level': 'success'})
+                           'msg': 'YOLOv4-tiny loaded successfully', 'level': 'success'})
         return True
+        
     except Exception as e:
         print(f"❌ YOLO loading error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                            'msg': f'YOLO error: {str(e)}', 'level': 'error'})
         return False
@@ -131,7 +138,7 @@ def detect_persons(frame):
                     confidence = scores[class_id]
                     
                     # Filter for "person" class (class_id == 0)
-                    if class_id == 0 and confidence > 0.5:
+                    if class_id == 0 and confidence > 0.3:
                         center_x = int(detection[0] * detect_width)
                         center_y = int(detection[1] * detect_height)
                         w = int(detection[2] * detect_width)
@@ -146,13 +153,18 @@ def detect_persons(frame):
                         confidences.append(float(confidence))
                         class_ids.append(class_id)
             
+            # Debug print
+            if len(boxes) > 0:
+                print(f"🔍 YOLO: Found {len(boxes)} raw detections, confidence > 0.3")
+            
             # Apply non-max suppression
-            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.3, 0.4)
             
             person_count = 0
             max_confidence = 0.0
             
             if len(indexes) > 0:
+                print(f"✅ After NMS: {len(indexes)} persons detected")
                 for i in indexes.flatten():
                     x, y, w, h = boxes[i]
                     confidence = confidences[i]
@@ -169,7 +181,9 @@ def detect_persons(frame):
             return frame, person_count, max_confidence
             
     except Exception as e:
-        print(f"YOLO detection error: {str(e)}")
+        print(f"❌ YOLO detection error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return frame, 0, 0.0
 
 # ==================== CAMERA FUNCTIONS ====================
@@ -1327,8 +1341,8 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLO Detection</h1>
-                <p>Real-time person detection menggunakan YOLO v3</p>
+                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv4 Detection</h1>
+                <p>Real-time person detection menggunakan YOLOv4-tiny</p>
             </div>
 
             <div class="camera-view">
@@ -1578,7 +1592,6 @@ HTML_TEMPLATE = '''
                 lampBrightness: document.getElementById('brightness-slider')?.value || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
-            console.log('Settings saved:', settings);
         }
 
         function loadSavedSettings() {
@@ -1605,8 +1618,6 @@ HTML_TEMPLATE = '''
                         brightnessSlider.value = settings.lampBrightness || 0;
                         document.getElementById('brightness-display').textContent = brightnessSlider.value;
                     }
-                    
-                    console.log('Settings loaded:', settings);
                 } catch (e) {
                     console.error('Error loading settings:', e);
                 }
@@ -1933,7 +1944,6 @@ HTML_TEMPLATE = '''
                     document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
                     
-                    // Camera detection data
                     const personDetected = data.camera.person_detected;
                     const personCount = data.camera.count || 0;
                     const confidence = data.camera.confidence || 0;
@@ -1959,7 +1969,6 @@ HTML_TEMPLATE = '''
                     document.getElementById('ga-fitness').textContent = (data.system.ga_fitness || 0).toFixed ? (data.system.ga_fitness || 0).toFixed(2) : (data.system.ga_fitness || 0);
                     document.getElementById('pso-fitness').textContent = (data.system.pso_fitness || 0).toFixed ? (data.system.pso_fitness || 0).toFixed(2) : (data.system.pso_fitness || 0);
                     
-                    // Power calculations
                     let acPower = 0;
                     if (data.ac.ac_state === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
@@ -2092,21 +2101,26 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  🏠 Smart Room Dashboard - 4K Camera + YOLO Detection")
+    print("  🏠 Smart Room Dashboard - 4K Camera + YOLOv4 Detection")
     print("=" * 60)
-    print("  📥 Initializing YOLO model (auto-download if needed)...")
+    print("  📥 Loading YOLO model (please wait)...")
+    
+    # Load YOLO SYNCHRONOUSLY
+    yolo_loaded = load_yolo_model()
+    
+    if yolo_loaded:
+        print("  ✅ YOLO ready for person detection!")
+    else:
+        print("  ⚠️  YOLO failed to load, running without detection")
+    
     print("=" * 60)
-    
-    # Load YOLO in background thread
-    yolo_thread = threading.Thread(target=load_yolo_model, daemon=True)
-    yolo_thread.start()
-    
     print("  🌐 Dashboard URL: http://172.20.0.65:5000")
     print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
     print("  ✨ Features:")
-    print("     - YOLO Person Detection with bounding boxes")
-    print("     - 4K Camera support (auto-fallback to 1080p)")
-    print("     - localStorage - Settings persist after refresh")
-    print("     - Real-time person counting & confidence display")
+    print("     - YOLOv4-tiny Person Detection")
+    print("     - 4K Camera (fallback 1080p)")
+    print("     - localStorage Settings Persistence")
+    print("     - Real-time Person Count & Confidence")
     print("=" * 60)
+    
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
