@@ -8,6 +8,7 @@ from influxdb_client import InfluxDBClient
 import threading
 import time
 import cv2
+import numpy as np
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -27,6 +28,12 @@ MQTT_PORT = 1883
 camera = None
 camera_lock = threading.Lock()
 
+# YOLO Configuration
+yolo_net = None
+yolo_classes = []
+yolo_output_layers = []
+yolo_lock = threading.Lock()
+
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
@@ -40,20 +47,165 @@ log_messages = deque(maxlen=100)
 ir_learning_mode = False
 ir_learning_button = ""
 
+# ==================== YOLO INITIALIZATION ====================
+def load_yolo_model():
+    global yolo_net, yolo_classes, yolo_output_layers
+    try:
+        import os
+        import urllib.request
+        
+        yolo_dir = '/home/iotlab/smartroom/yolo'
+        os.makedirs(yolo_dir, exist_ok=True)
+        
+        weights_path = f'{yolo_dir}/yolov3-tiny.weights'
+        config_path = f'{yolo_dir}/yolov3-tiny.cfg'
+        names_path = f'{yolo_dir}/coco.names'
+        
+        # Download files if not exist
+        if not os.path.exists(weights_path):
+            print("📥 Downloading YOLO weights (35MB)...")
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
+                               'msg': 'Downloading YOLO weights...', 'level': 'info'})
+            urllib.request.urlretrieve('https://pjreddie.com/media/files/yolov3-tiny.weights', weights_path)
+        
+        if not os.path.exists(config_path):
+            print("📥 Downloading YOLO config...")
+            urllib.request.urlretrieve('https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg', config_path)
+        
+        if not os.path.exists(names_path):
+            print("📥 Downloading COCO names...")
+            urllib.request.urlretrieve('https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names', names_path)
+        
+        # Load YOLO
+        print("🧠 Loading YOLO model...")
+        yolo_net = cv2.dnn.readNet(weights_path, config_path)
+        yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        
+        with open(names_path, 'r') as f:
+            yolo_classes = [line.strip() for line in f.readlines()]
+        
+        layer_names = yolo_net.getLayerNames()
+        yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
+        
+        print("✅ YOLO model loaded successfully!")
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
+                           'msg': 'YOLO model loaded successfully', 'level': 'success'})
+        return True
+    except Exception as e:
+        print(f"❌ YOLO loading error: {str(e)}")
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
+                           'msg': f'YOLO error: {str(e)}', 'level': 'error'})
+        return False
+
+def detect_persons(frame):
+    """Detect persons using YOLO"""
+    global yolo_net, yolo_classes, yolo_output_layers
+    
+    if yolo_net is None:
+        return frame, 0, 0.0
+    
+    try:
+        with yolo_lock:
+            height, width = frame.shape[:2]
+            
+            # Resize for faster detection
+            detect_width = min(width, 1280)
+            detect_height = int(height * (detect_width / width))
+            resized = cv2.resize(frame, (detect_width, detect_height))
+            
+            # YOLO detection
+            blob = cv2.dnn.blobFromImage(resized, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+            yolo_net.setInput(blob)
+            outs = yolo_net.forward(yolo_output_layers)
+            
+            # Process detections
+            class_ids = []
+            confidences = []
+            boxes = []
+            
+            for out in outs:
+                for detection in out:
+                    scores = detection[5:]
+                    class_id = np.argmax(scores)
+                    confidence = scores[class_id]
+                    
+                    # Filter for "person" class (class_id == 0)
+                    if class_id == 0 and confidence > 0.5:
+                        center_x = int(detection[0] * detect_width)
+                        center_y = int(detection[1] * detect_height)
+                        w = int(detection[2] * detect_width)
+                        h = int(detection[3] * detect_height)
+                        
+                        x = int(center_x - w / 2)
+                        y = int(center_y - h / 2)
+                        
+                        # Scale back to original frame
+                        scale = width / detect_width
+                        boxes.append([int(x*scale), int(y*scale), int(w*scale), int(h*scale)])
+                        confidences.append(float(confidence))
+                        class_ids.append(class_id)
+            
+            # Apply non-max suppression
+            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+            
+            person_count = 0
+            max_confidence = 0.0
+            
+            if len(indexes) > 0:
+                for i in indexes.flatten():
+                    x, y, w, h = boxes[i]
+                    confidence = confidences[i]
+                    
+                    # Draw bounding box
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                    label = f"Person {confidence*100:.0f}%"
+                    cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    
+                    person_count += 1
+                    if confidence > max_confidence:
+                        max_confidence = confidence
+            
+            return frame, person_count, max_confidence
+            
+    except Exception as e:
+        print(f"YOLO detection error: {str(e)}")
+        return frame, 0, 0.0
+
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
     global camera
     if camera is None:
         camera = cv2.VideoCapture(0)
         if camera.isOpened():
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            camera.set(cv2.CAP_PROP_FPS, 30)
+            # Try 4K or best available
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+            camera.set(cv2.CAP_PROP_FPS, 60)
+            
+            # Get actual values
+            actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Fallback to 1080p if 4K not supported
+            if actual_w < 1920:
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+                camera.set(cv2.CAP_PROP_FPS, 30)
+                actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            actual_fps = int(camera.get(cv2.CAP_PROP_FPS))
+            
             mqtt_data['camera']['status'] = 'active'
-            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'Camera initialized successfully', 'level': 'success'})
+            print(f"✅ Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
+                               'msg': f'Camera: {actual_w}x{actual_h} @ {actual_fps}fps', 
+                               'level': 'success'})
         else:
             mqtt_data['camera']['status'] = 'error'
-            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'Camera failed to open', 'level': 'error'})
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
+                               'msg': 'Camera failed to open', 'level': 'error'})
     return camera
 
 def generate_frames():
@@ -72,12 +224,30 @@ def generate_frames():
                 mqtt_data['camera']['status'] = 'error'
                 break
             
-            # Add timestamp overlay on frame
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, 'Smart Room Camera', (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            # YOLO person detection
+            frame, person_count, confidence = detect_persons(frame)
             
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Update MQTT data
+            mqtt_data['camera']['person_detected'] = person_count > 0
+            mqtt_data['camera']['count'] = person_count
+            mqtt_data['camera']['confidence'] = int(confidence * 100)
+            
+            # Emit to WebSocket
+            socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            
+            # Add timestamp overlay
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cv2.putText(frame, timestamp, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+            cv2.putText(frame, 'Smart Room Camera - YOLO Detection', (20, frame.shape[0] - 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            
+            # Add detection info overlay
+            if person_count > 0:
+                cv2.putText(frame, f'Persons Detected: {person_count}', (20, 100), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            
+            # Encode with high quality
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -838,7 +1008,7 @@ HTML_TEMPLATE = '''
 
         .camera-feed-container img {
             width: 100%;
-            max-height: 500px;
+            max-height: 800px;
             object-fit: contain;
             display: block;
             margin: 0 auto;
@@ -913,17 +1083,6 @@ HTML_TEMPLATE = '''
             font-size: 18px;
             font-weight: bold;
             color: var(--text-primary);
-        }
-
-        .camera-placeholder {
-            background: var(--bg-dark);
-            height: 400px;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--text-secondary);
-            font-size: 18px;
         }
 
         @media (max-width: 768px) {
@@ -1168,8 +1327,8 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed</h1>
-                <p>Real-time room monitoring via USB Camera</p>
+                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLO Detection</h1>
+                <p>Real-time person detection menggunakan YOLO v3</p>
             </div>
 
             <div class="camera-view">
@@ -1199,23 +1358,23 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="camera-info-card">
                         <div class="camera-info-label"><i class="fas fa-expand"></i> Resolution</div>
-                        <div class="camera-info-value" id="cam-resolution">640 x 480</div>
+                        <div class="camera-info-value" id="cam-resolution">Loading...</div>
                     </div>
                     <div class="camera-info-card">
                         <div class="camera-info-label"><i class="fas fa-tachometer-alt"></i> Frame Rate</div>
-                        <div class="camera-info-value" id="cam-fps">30 FPS</div>
+                        <div class="camera-info-value" id="cam-fps">Loading...</div>
                     </div>
                     <div class="camera-info-card">
                         <div class="camera-info-label"><i class="fas fa-walking"></i> Person Detected</div>
-                        <div class="camera-info-value"><span id="cam-person">No</span></div>
+                        <div class="camera-info-value" id="cam-person" style="color: var(--danger);">No</div>
                     </div>
                     <div class="camera-info-card">
                         <div class="camera-info-label"><i class="fas fa-users"></i> Person Count</div>
-                        <div class="camera-info-value"><span id="cam-count">0</span></div>
+                        <div class="camera-info-value" id="cam-count">0</div>
                     </div>
                     <div class="camera-info-card">
                         <div class="camera-info-label"><i class="fas fa-percentage"></i> Confidence</div>
-                        <div class="camera-info-value"><span id="cam-confidence">0</span>%</div>
+                        <div class="camera-info-value" id="cam-confidence">0%</div>
                     </div>
                 </div>
             </div>
@@ -1411,6 +1570,49 @@ HTML_TEMPLATE = '''
 
         let learnedCodes = {};
 
+        // ==================== LOCALSTORAGE PERSISTENCE ====================
+        function saveSettings() {
+            const settings = {
+                acTemp: document.getElementById('ac-temp-slider')?.value || 24,
+                fanSpeed: document.getElementById('fan-speed-slider')?.value || 1,
+                lampBrightness: document.getElementById('brightness-slider')?.value || 0
+            };
+            localStorage.setItem('smartroom_settings', JSON.stringify(settings));
+            console.log('Settings saved:', settings);
+        }
+
+        function loadSavedSettings() {
+            const saved = localStorage.getItem('smartroom_settings');
+            if (saved) {
+                try {
+                    const settings = JSON.parse(saved);
+                    
+                    const acTempSlider = document.getElementById('ac-temp-slider');
+                    const fanSpeedSlider = document.getElementById('fan-speed-slider');
+                    const brightnessSlider = document.getElementById('brightness-slider');
+                    
+                    if (acTempSlider) {
+                        acTempSlider.value = settings.acTemp || 24;
+                        document.getElementById('ac-temp-display').textContent = acTempSlider.value;
+                    }
+                    
+                    if (fanSpeedSlider) {
+                        fanSpeedSlider.value = settings.fanSpeed || 1;
+                        document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
+                    }
+                    
+                    if (brightnessSlider) {
+                        brightnessSlider.value = settings.lampBrightness || 0;
+                        document.getElementById('brightness-display').textContent = brightnessSlider.value;
+                    }
+                    
+                    console.log('Settings loaded:', settings);
+                } catch (e) {
+                    console.error('Error loading settings:', e);
+                }
+            }
+        }
+
         // ==================== CHARTS ====================
         function initCharts() {
             const chartConfig = {
@@ -1500,7 +1702,6 @@ HTML_TEMPLATE = '''
             
             localStorage.setItem('currentPage', pageId);
 
-            // Check camera status when camera page is opened
             if (pageId === 'camera') {
                 checkCameraStatus();
             }
@@ -1511,7 +1712,6 @@ HTML_TEMPLATE = '''
             const img = document.getElementById('camera-img');
             const error = document.getElementById('camera-error');
             
-            // Restart camera on backend
             fetch('/api/camera/restart', { method: 'POST' })
                 .then(r => r.json())
                 .then(result => {
@@ -1560,10 +1760,12 @@ HTML_TEMPLATE = '''
         // ==================== AC CONTROLS ====================
         function updateACTemp(value) {
             document.getElementById('ac-temp-display').textContent = value;
+            saveSettings();
         }
 
         function updateFanSpeed(value) {
             document.getElementById('fan-speed-display').textContent = value;
+            saveSettings();
         }
 
         function sendACCommand(command) {
@@ -1594,6 +1796,7 @@ HTML_TEMPLATE = '''
         // ==================== LAMP CONTROLS ====================
         function updateBrightness(value) {
             document.getElementById('brightness-display').textContent = value;
+            saveSettings();
         }
 
         function applyLampSettings() {
@@ -1731,12 +1934,30 @@ HTML_TEMPLATE = '''
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
                     
                     // Camera detection data
-                    document.getElementById('cam-person').textContent = data.camera.person_detected ? 'Yes' : 'No';
-                    document.getElementById('cam-count').textContent = data.camera.count;
-                    document.getElementById('cam-confidence').textContent = data.camera.confidence.toFixed ? data.camera.confidence.toFixed(0) : data.camera.confidence;
+                    const personDetected = data.camera.person_detected;
+                    const personCount = data.camera.count || 0;
+                    const confidence = data.camera.confidence || 0;
                     
-                    document.getElementById('ga-fitness').textContent = data.system.ga_fitness.toFixed ? data.system.ga_fitness.toFixed(2) : data.system.ga_fitness;
-                    document.getElementById('pso-fitness').textContent = data.system.pso_fitness.toFixed ? data.system.pso_fitness.toFixed(2) : data.system.pso_fitness;
+                    const camPersonEl = document.getElementById('cam-person');
+                    if (camPersonEl) {
+                        camPersonEl.textContent = personDetected ? 'Yes' : 'No';
+                        camPersonEl.style.color = personDetected ? '#10b981' : '#ef4444';
+                    }
+                    
+                    const camCountEl = document.getElementById('cam-count');
+                    if (camCountEl) {
+                        camCountEl.textContent = personCount;
+                        camCountEl.style.color = personCount > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    
+                    const camConfEl = document.getElementById('cam-confidence');
+                    if (camConfEl) {
+                        camConfEl.textContent = confidence + '%';
+                        camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
+                    }
+                    
+                    document.getElementById('ga-fitness').textContent = (data.system.ga_fitness || 0).toFixed ? (data.system.ga_fitness || 0).toFixed(2) : (data.system.ga_fitness || 0);
+                    document.getElementById('pso-fitness').textContent = (data.system.pso_fitness || 0).toFixed ? (data.system.pso_fitness || 0).toFixed(2) : (data.system.pso_fitness || 0);
                     
                     // Power calculations
                     let acPower = 0;
@@ -1840,8 +2061,10 @@ HTML_TEMPLATE = '''
         }
 
         window.onload = function() {
+            console.log('🚀 Smart Room Dashboard Loading...');
             initCharts();
             loadSavedPreferences();
+            loadSavedSettings();
             updateDashboard();
             updateLogs();
             loadIRCodes();
@@ -1859,6 +2082,8 @@ HTML_TEMPLATE = '''
                     updateChartData(chartName, chartRanges[chartName]);
                 });
             }, 30000);
+            
+            console.log('✅ Dashboard Ready!');
         };
     </script>
 </body>
@@ -1866,9 +2091,22 @@ HTML_TEMPLATE = '''
 '''
 
 if __name__ == '__main__':
-    print("=" * 50)
-    print("  Smart Room Dashboard + Camera")
-    print("  Dashboard: http://172.20.0.65:5000")
-    print("  Camera:    http://172.20.0.65:5000/video_feed")
-    print("=" * 50)
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    print("=" * 60)
+    print("  🏠 Smart Room Dashboard - 4K Camera + YOLO Detection")
+    print("=" * 60)
+    print("  📥 Initializing YOLO model (auto-download if needed)...")
+    print("=" * 60)
+    
+    # Load YOLO in background thread
+    yolo_thread = threading.Thread(target=load_yolo_model, daemon=True)
+    yolo_thread.start()
+    
+    print("  🌐 Dashboard URL: http://172.20.0.65:5000")
+    print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
+    print("  ✨ Features:")
+    print("     - YOLO Person Detection with bounding boxes")
+    print("     - 4K Camera support (auto-fallback to 1080p)")
+    print("     - localStorage - Settings persist after refresh")
+    print("     - Real-time person counting & confidence display")
+    print("=" * 60)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
