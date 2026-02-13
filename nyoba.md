@@ -4,7 +4,8 @@ import paho.mqtt.client as mqtt
 import json
 from datetime import datetime, timedelta
 from collections import deque
-from influxdb_client import InfluxDBClient
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
 import threading
 import time
 import cv2
@@ -46,6 +47,119 @@ mqtt_data = {
 log_messages = deque(maxlen=100)
 ir_learning_mode = False
 ir_learning_button = ""
+
+# ==================== INFLUXDB WRITE FUNCTIONS ====================
+def write_to_influxdb(measurement, fields, tags=None):
+    """Write data point to InfluxDB"""
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        write_api = client.write_api(write_options=SYNCHRONOUS)
+        
+        point = Point(measurement)
+        
+        # Add tags if provided
+        if tags:
+            for key, value in tags.items():
+                point = point.tag(key, str(value))
+        
+        # Add fields
+        for key, value in fields.items():
+            if isinstance(value, (int, float)):
+                point = point.field(key, float(value))
+            elif isinstance(value, bool):
+                point = point.field(key, value)
+            else:
+                point = point.field(key, str(value))
+        
+        # Write to InfluxDB
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+        write_api.close()
+        client.close()
+        return True
+    except Exception as e:
+        print(f"❌ InfluxDB Write Error: {e}")
+        return False
+
+def save_sensor_data(temperature, humidity, heat_index):
+    """Save temperature and humidity data to InfluxDB"""
+    try:
+        write_to_influxdb(
+            measurement="ac_sensor",
+            fields={
+                "temperature": float(temperature),
+                "humidity": float(humidity),
+                "heat_index": float(heat_index)
+            },
+            tags={"device": "esp32_ac", "location": "room"}
+        )
+        print(f"✅ Sensor data saved: {temperature}°C, {humidity}%")
+    except Exception as e:
+        print(f"❌ Error saving sensor data: {e}")
+
+def save_lamp_data(lux, brightness, motion):
+    """Save lamp sensor data to InfluxDB"""
+    try:
+        write_to_influxdb(
+            measurement="lamp_sensor",
+            fields={
+                "lux": float(lux),
+                "brightness": float(brightness),
+                "motion": bool(motion)
+            },
+            tags={"device": "esp32_lamp", "location": "room"}
+        )
+        print(f"✅ Lamp data saved: {lux} lux, {brightness}%")
+    except Exception as e:
+        print(f"❌ Error saving lamp data: {e}")
+
+def save_person_detection(person_count, confidence):
+    """Save person detection data to InfluxDB"""
+    try:
+        write_to_influxdb(
+            measurement="camera_detection",
+            fields={
+                "person_count": int(person_count),
+                "confidence": float(confidence),
+                "person_detected": bool(person_count > 0)
+            },
+            tags={"device": "camera_yolo", "model": "yolov4-tiny"}
+        )
+        if person_count > 0:
+            print(f"✅ Detection saved: {person_count} person(s), {confidence:.2f} confidence")
+    except Exception as e:
+        print(f"❌ Error saving detection data: {e}")
+
+def save_ir_command(device, command, signal_length):
+    """Save IR remote command to InfluxDB"""
+    try:
+        write_to_influxdb(
+            measurement="ir_remote",
+            fields={
+                "command": str(command),
+                "signal_length": int(signal_length),
+                "learned": True
+            },
+            tags={"device": str(device), "type": "ir_code"}
+        )
+        print(f"✅ IR command saved: {device} - {command}")
+    except Exception as e:
+        print(f"❌ Error saving IR command: {e}")
+
+def save_ac_control(ac_temp, fan_speed, ac_state):
+    """Save AC control settings to InfluxDB"""
+    try:
+        write_to_influxdb(
+            measurement="ac_sensor",
+            fields={
+                "ac_temp": float(ac_temp),
+                "fan_speed": int(fan_speed),
+                "ac_state": str(ac_state)
+            },
+            tags={"device": "esp32_ac", "type": "control"}
+        )
+        print(f"✅ AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
+    except Exception as e:
+        print(f"❌ Error saving AC control: {e}")
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -223,6 +337,9 @@ def get_camera():
     return camera
 
 def generate_frames():
+    last_save_time = time.time()
+    save_interval = 5  # Save to InfluxDB every 5 seconds
+    
     while True:
         with camera_lock:
             cam = get_camera()
@@ -245,6 +362,12 @@ def generate_frames():
             mqtt_data['camera']['person_detected'] = person_count > 0
             mqtt_data['camera']['count'] = person_count
             mqtt_data['camera']['confidence'] = int(confidence * 100)
+            
+            # Save to InfluxDB every 5 seconds
+            current_time = time.time()
+            if current_time - last_save_time >= save_interval:
+                save_person_detection(person_count, confidence)
+                last_save_time = current_time
             
             # Emit to WebSocket
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
@@ -299,6 +422,18 @@ def on_message(client, userdata, msg):
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
+            # Save sensor data to InfluxDB
+            save_sensor_data(
+                mqtt_data['ac']['temperature'],
+                mqtt_data['ac']['humidity'],
+                mqtt_data['ac']['heat_index']
+            )
+            # Save AC control state
+            save_ac_control(
+                mqtt_data['ac']['ac_temp'],
+                mqtt_data['ac']['fan_speed'],
+                mqtt_data['ac']['ac_state']
+            )
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
             
         elif 'lamp/sensors' in topic:
@@ -309,6 +444,12 @@ def on_message(client, userdata, msg):
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
+            # Save lamp data to InfluxDB
+            save_lamp_data(
+                mqtt_data['lamp']['lux'],
+                mqtt_data['lamp']['brightness'],
+                mqtt_data['lamp']['motion']
+            )
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             
         elif 'camera/detection' in topic:
@@ -341,6 +482,8 @@ def on_message(client, userdata, msg):
             
             if button_name and ir_code:
                 mqtt_data['ir_codes'][button_name] = ir_code
+                # Save IR command to InfluxDB
+                save_ir_command('remote', button_name, len(ir_code))
                 log_messages.append({
                     'time': datetime.now().strftime('%H:%M:%S'),
                     'msg': f'IR Code learned: {button_name}',
