@@ -416,19 +416,39 @@ def release_camera():
 mqtt_client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
-    log_message = f"MQTT Connected! RC: {rc}"
-    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': log_message, 'level': 'success'})
-    print(f"\u2705 MQTT Connected! Return Code: {rc}")
+    print("\n" + "="*70)
+    print("  🔵 FLASK MQTT CONNECTION EVENT")
+    print("="*70)
+    print(f"Return Code: {rc}")
+    print(f"RC Meaning: {['Success', 'Protocol version', 'Client ID', 'Server unavailable', 'Bad credentials', 'Not authorized'][rc] if rc < 6 else 'Unknown'}")
+    print(f"Flags: {flags}")
+    print("="*70)
     
-    # Subscribe to all smartroom topics
-    client.subscribe("smartroom/#")
-    print("\ud83d\udce1 Subscribed to: smartroom/#")
-    
-    # Also subscribe to alternative IR topics
-    client.subscribe("ir/#")
-    client.subscribe("IR/#") 
-    client.subscribe("+/ir/#")  # Catch any prefix
-    print("\ud83d\udce1 Subscribed to IR topics")
+    if rc == 0:
+        print("✅ MQTT CONNECTED SUCCESSFULLY!\n")
+        
+        # Subscribe to all smartroom topics
+        result1, mid1 = client.subscribe("smartroom/#")
+        print(f"📡 Subscribe smartroom/# - Result: {result1} (MID: {mid1})")
+        
+        # Also subscribe to alternative IR topics
+        result2, mid2 = client.subscribe("ir/#")
+        print(f"📡 Subscribe ir/# - Result: {result2} (MID: {mid2})")
+        
+        result3, mid3 = client.subscribe("IR/#")
+        print(f"📡 Subscribe IR/# - Result: {result3} (MID: {mid3})")
+        
+        result4, mid4 = client.subscribe("+/ir/#")
+        print(f"📡 Subscribe +/ir/# - Result: {result4} (MID: {mid4})")
+        
+        print("\n✅ All subscriptions sent!")
+        print("Waiting for messages from ESP32...\n")
+        print("="*70 + "\n")
+        
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {rc}', 'level': 'success'})
+    else:
+        print(f"❌ MQTT CONNECTION FAILED! RC={rc}")
+        print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
     global ir_learning_mode, ir_learning_button, ir_learning_device
@@ -436,8 +456,12 @@ def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         
-        # Debug: Print all incoming MQTT messages
-        print(f"\ud83d\udce1 MQTT Received - Topic: {topic}")
+        # Debug: Print ALL incoming MQTT messages with timestamp
+        print("\n" + "─"*70)
+        print(f"📨 [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
+        print(f"Topic: {topic}")
+        print(f"Payload Length: {len(msg.payload)} bytes")
+        print(f"QoS: {msg.qos} | Retain: {msg.retain}")
         
         # Broadcast to frontend for debugging
         try:
@@ -461,6 +485,11 @@ def on_message(client, userdata, msg):
             payload = {'raw': payload_text}
         
         if 'ac/sensors' in topic:
+            print("🌡️  Processing AC Sensor Data:")
+            print(f"   Temperature: {payload.get('temperature', 0)}°C")
+            print(f"   Humidity: {payload.get('humidity', 0)}%")
+            print(f"   Heat Index: {payload.get('heat_index', 0)}°C")
+            
             mqtt_data['ac'].update({
                 'temperature': payload.get('temperature', 0),
                 'humidity': payload.get('humidity', 0),
@@ -472,6 +501,7 @@ def on_message(client, userdata, msg):
                 'uptime': payload.get('uptime', 0)
             })
             # Save sensor data to InfluxDB
+            print("   💾 Saving to InfluxDB...")
             save_sensor_data(
                 mqtt_data['ac']['temperature'],
                 mqtt_data['ac']['humidity'],
@@ -483,7 +513,9 @@ def on_message(client, userdata, msg):
                 mqtt_data['ac']['fan_speed'],
                 mqtt_data['ac']['ac_state']
             )
+            print("   ✅ AC data updated in memory & InfluxDB")
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+            print("   📡 Sent to frontend via WebSocket")
             
         elif 'lamp/sensors' in topic:
             mqtt_data['lamp'].update({
@@ -612,13 +644,57 @@ def on_message(client, userdata, msg):
                     'message': 'Invalid IR data received'
                 })
             
+        print("─"*70 + "\n")
+        
     except Exception as e:
+        print(f"❌ MQTT Message Handler Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
+
+def on_disconnect(client, userdata, rc):
+    print("\n" + "="*70)
+    print("  ⚠️  FLASK MQTT DISCONNECTION EVENT")
+    print("="*70)
+    print(f"Disconnect Reason Code: {rc}")
+    if rc != 0:
+        print("❌ Unexpected disconnection!")
+        print("Will attempt to reconnect...")
+    else:
+        print("✅ Clean disconnection")
+    print("="*70 + "\n")
+    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {rc}', 'level': 'warning'})
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-mqtt_client.loop_start()
+mqtt_client.on_disconnect = on_disconnect
+
+print("\n" + "="*70)
+print("  🚀 INITIALIZING FLASK MQTT CLIENT")
+print("="*70)
+print(f"Broker: {MQTT_BROKER}:{MQTT_PORT}")
+print(f"Attempting connection...")
+print("="*70 + "\n")
+
+try:
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    mqtt_client.loop_start()
+    
+    # Wait a bit for connection to establish
+    import time
+    time.sleep(2)
+    
+    if mqtt_client.is_connected():
+        print("✅ MQTT Client connected and running!")
+        print("📡 Loop thread started\n")
+    else:
+        print("⚠️  MQTT Client started but not yet connected")
+        print("Waiting for on_connect callback...\n")
+        
+except Exception as e:
+    print(f"❌ MQTT Connection Error: {e}")
+    import traceback
+    traceback.print_exc()
 
 # ==================== INFLUXDB ====================
 def get_influx_data(measurement, field, hours=1):
