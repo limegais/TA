@@ -18,8 +18,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
 INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb_I0leIREUnMhvQQXtgETfg=="
-INFLUX_ORG = "iotlab"
-INFLUX_BUCKET = "sensordata"
+INFLUX_ORG = "IOTLAB"
+INFLUX_BUCKET = "SENSORDATA"
 
 # MQTT Configuration
 MQTT_BROKER = "localhost"
@@ -52,10 +52,13 @@ ir_learning_button = ""
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
     try:
+        print(f"🔄 Attempting to write to InfluxDB: {measurement}")
+        print(f"   URL: {INFLUX_URL}, ORG: {INFLUX_ORG}, BUCKET: {INFLUX_BUCKET}")
+        
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = client.write_api(write_options=SYNCHRONOUS)
         
-        point = Point(measurement)
+        point = Point(measurement).time(datetime.utcnow(), WritePrecision.NS)
         
         # Add tags if provided
         if tags:
@@ -71,19 +74,24 @@ def write_to_influxdb(measurement, fields, tags=None):
             else:
                 point = point.field(key, str(value))
         
+        print(f"   Data: {fields}")
+        
         # Write to InfluxDB
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
         write_api.close()
         client.close()
+        print(f"✅ Successfully written to InfluxDB: {measurement}")
         return True
     except Exception as e:
-        print(f"❌ InfluxDB Write Error: {e}")
+        print(f"❌ InfluxDB Write Error ({measurement}): {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def save_sensor_data(temperature, humidity, heat_index):
     """Save temperature and humidity data to InfluxDB"""
     try:
-        write_to_influxdb(
+        result = write_to_influxdb(
             measurement="ac_sensor",
             fields={
                 "temperature": float(temperature),
@@ -92,14 +100,17 @@ def save_sensor_data(temperature, humidity, heat_index):
             },
             tags={"device": "esp32_ac", "location": "room"}
         )
-        print(f"✅ Sensor data saved: {temperature}°C, {humidity}%")
+        if result:
+            print(f"✅ Sensor data saved: {temperature}°C, {humidity}%")
     except Exception as e:
         print(f"❌ Error saving sensor data: {e}")
+        import traceback
+        traceback.print_exc()
 
 def save_lamp_data(lux, brightness, motion):
     """Save lamp sensor data to InfluxDB"""
     try:
-        write_to_influxdb(
+        result = write_to_influxdb(
             measurement="lamp_sensor",
             fields={
                 "lux": float(lux),
@@ -108,9 +119,12 @@ def save_lamp_data(lux, brightness, motion):
             },
             tags={"device": "esp32_lamp", "location": "room"}
         )
-        print(f"✅ Lamp data saved: {lux} lux, {brightness}%")
+        if result:
+            print(f"✅ Lamp data saved: {lux} lux, {brightness}%")
     except Exception as e:
         print(f"❌ Error saving lamp data: {e}")
+        import traceback
+        traceback.print_exc()
 
 def save_person_detection(person_count, confidence):
     """Save person detection data to InfluxDB"""
