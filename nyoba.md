@@ -484,6 +484,17 @@ def on_message(client, userdata, msg):
             print(f"   Data (Text): {payload_text}")
             payload = {'raw': payload_text}
         
+        # DEBUG: Check which condition will match
+        print(f"\n🔍 Topic Routing Check:")
+        print(f"   'ac/sensors' in topic: {'ac/sensors' in topic}")
+        print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
+        print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
+        print(f"   'dashboard/state' in topic: {'dashboard/state' in topic}")
+        print(f"   'ac/mode' in topic: {'ac/mode' in topic}")
+        print(f"   'lamp/mode' in topic: {'lamp/mode' in topic}")
+        print(f"   'ir/learned' in topic: {'ir/learned' in topic}")
+        print(f"   'IR/learned' in topic.lower(): {'IR/learned' in topic.lower()}")
+        
         if 'ac/sensors' in topic:
             print("🌡️  Processing AC Sensor Data:")
             print(f"   Temperature: {payload.get('temperature', 0)}°C")
@@ -558,9 +569,15 @@ def on_message(client, userdata, msg):
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
         
         elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
-            print(f"\ud83d\udd34 IR LEARNED TOPIC DETECTED!")
-            print(f"   ir_learning_mode: {ir_learning_mode}")
-            print(f"   ir_learning_button: {ir_learning_button}")
+            print("\n" + "="*70)
+            print("🔴🔴🔴 IR LEARNED TOPIC DETECTED! 🔴🔴🔴")
+            print("="*70)
+            print(f"Topic received: {topic}")
+            print(f"ir_learning_mode: {ir_learning_mode}")
+            print(f"ir_learning_button: {ir_learning_button}")
+            print(f"ir_learning_device: {ir_learning_device}")
+            print(f"Payload: {payload}")
+            print("="*70)
             
             # Handle different payload formats
             button_name = ''
@@ -624,6 +641,9 @@ def on_message(client, userdata, msg):
                 })
                 
                 # Emit to frontend
+                print("\n📡 Emitting 'ir_learned' event to frontend via WebSocket...")
+                print(f"   Event data: button={button_name}, device={device}, is_toggle={is_power_toggle}")
+                
                 socketio.emit('ir_learned', {
                     'button': button_name, 
                     'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,  # Truncate for display
@@ -631,6 +651,10 @@ def on_message(client, userdata, msg):
                     'is_toggle': is_power_toggle,
                     'status': 'success'
                 })
+                
+                print("✅ WebSocket event emitted successfully!")
+                print("   Frontend should update NOW!")
+                print("="*70)
                 
                 print(f"\u2705 IR learning completed for: {button_name}")
                 
@@ -643,6 +667,12 @@ def on_message(client, userdata, msg):
                     'status': 'error',
                     'message': 'Invalid IR data received'
                 })
+        
+        else:
+            # No handler matched this topic
+            print(f"⚠️  UNHANDLED TOPIC: {topic}")
+            print(f"   No matching handler found for this topic!")
+            print(f"   Available handlers: ac/sensors, lamp/sensors, camera/detection, ir/learned, etc.")
             
         print("─"*70 + "\n")
         
