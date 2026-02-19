@@ -418,14 +418,36 @@ mqtt_client = mqtt.Client()
 def on_connect(client, userdata, flags, rc):
     log_message = f"MQTT Connected! RC: {rc}"
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': log_message, 'level': 'success'})
+    print(f"\u2705 MQTT Connected! Return Code: {rc}")
+    
+    # Subscribe to all smartroom topics
     client.subscribe("smartroom/#")
+    print("\ud83d\udce1 Subscribed to: smartroom/#")
+    
+    # Also subscribe to alternative IR topics
+    client.subscribe("ir/#")
+    client.subscribe("IR/#") 
+    client.subscribe("+/ir/#")  # Catch any prefix
+    print("\ud83d\udce1 Subscribed to IR topics")
 
 def on_message(client, userdata, msg):
-    global ir_learning_mode, ir_learning_button
+    global ir_learning_mode, ir_learning_button, ir_learning_device
     
     try:
         topic = msg.topic
-        payload = json.loads(msg.payload.decode())
+        
+        # Debug: Print all incoming MQTT messages
+        print(f"\ud83d\udce1 MQTT Received - Topic: {topic}")
+        
+        # Try to parse as JSON first
+        try:
+            payload = json.loads(msg.payload.decode())
+            print(f"   Data (JSON): {payload}")
+        except:
+            # If not JSON, treat as plain text
+            payload_text = msg.payload.decode()
+            print(f"   Data (Text): {payload_text}")
+            payload = {'raw': payload_text}
         
         if 'ac/sensors' in topic:
             mqtt_data['ac'].update({
@@ -492,12 +514,33 @@ def on_message(client, userdata, msg):
             mqtt_data['lamp']['mode'] = payload.get('mode', 'ADAPTIVE')
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
         
-        elif 'ir/learned' in topic:
-            button_name = payload.get('button', '')
-            ir_code = payload.get('code', '')
-            device = payload.get('device', 'remote')  # Get device name if provided
+        elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
+            print(f"\ud83d\udd34 IR LEARNED TOPIC DETECTED!")
+            print(f"   ir_learning_mode: {ir_learning_mode}")
+            print(f"   ir_learning_button: {ir_learning_button}")
             
-            if button_name and ir_code:
+            # Handle different payload formats
+            button_name = ''
+            ir_code = ''
+            device = ir_learning_device or 'remote'
+            
+            # Format 1: {"button": "...", "code": "..."}
+            if isinstance(payload, dict):
+                button_name = payload.get('button', ir_learning_button)
+                ir_code = payload.get('code', payload.get('ir_code', payload.get('raw', '')))
+                device = payload.get('device', device)
+            # Format 2: Plain text IR code
+            elif isinstance(payload, str):
+                button_name = ir_learning_button
+                ir_code = payload
+            # Format 3: Raw data
+            else:
+                button_name = ir_learning_button
+                ir_code = str(payload)
+            
+            print(f"   Parsed - Button: {button_name}, Device: {device}, Code length: {len(ir_code)}")
+            
+            if button_name and ir_code and len(ir_code) > 0:
                 # Check if this is a power toggle (same code for ON/OFF)
                 is_power_toggle = False
                 if 'power' in button_name.lower():
@@ -512,10 +555,11 @@ def on_message(client, userdata, msg):
                         is_power_toggle = True
                         button_name = f"{device}_power_toggle"
                         mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
-                        print(f"⚠️ Power toggle detected for {device}: Same code for ON/OFF")
+                        print(f"\u26a0\ufe0f Power toggle detected for {device}: Same code for ON/OFF")
                 
                 # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
+                print(f"\u2705 IR code saved to memory: {button_name}")
                 
                 # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
@@ -526,9 +570,9 @@ def on_message(client, userdata, msg):
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
-                    print(f"💾 IR codes saved to file: {ir_file}")
+                    print(f"\ud83d\udcbe IR codes saved to file: {ir_file}")
                 except Exception as e:
-                    print(f"❌ Error saving IR codes to file: {e}")
+                    print(f"\u274c Error saving IR codes to file: {e}")
                 
                 log_messages.append({
                     'time': datetime.now().strftime('%H:%M:%S'),
@@ -536,16 +580,26 @@ def on_message(client, userdata, msg):
                     'level': 'success'
                 })
                 
+                # Emit to frontend
                 socketio.emit('ir_learned', {
                     'button': button_name, 
-                    'code': ir_code,
+                    'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,  # Truncate for display
                     'device': device,
-                    'is_toggle': is_power_toggle
+                    'is_toggle': is_power_toggle,
+                    'status': 'success'
                 })
+                
+                print(f"\u2705 IR learning completed for: {button_name}")
                 
                 ir_learning_mode = False
                 ir_learning_button = ""
                 ir_learning_device = ""
+            else:
+                print(f"\u274c IR learning failed: Missing button name or code")
+                socketio.emit('ir_learned', {
+                    'status': 'error',
+                    'message': 'Invalid IR data received'
+                })
             
     except Exception as e:
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
