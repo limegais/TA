@@ -41,12 +41,14 @@ mqtt_data = {
     'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0},
-    'ir_codes': {}
+    'ir_codes': {},
+    'ir_states': {}  # Track toggle states for power buttons
 }
 
 log_messages = deque(maxlen=100)
 ir_learning_mode = False
 ir_learning_button = ""
+ir_learning_device = ""  # Track device name
 
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
@@ -493,19 +495,57 @@ def on_message(client, userdata, msg):
         elif 'ir/learned' in topic:
             button_name = payload.get('button', '')
             ir_code = payload.get('code', '')
+            device = payload.get('device', 'remote')  # Get device name if provided
             
             if button_name and ir_code:
+                # Check if this is a power toggle (same code for ON/OFF)
+                is_power_toggle = False
+                if 'power' in button_name.lower():
+                    # Check if we already have a power code for this device
+                    existing_power_codes = {
+                        k: v for k, v in mqtt_data['ir_codes'].items() 
+                        if 'power' in k.lower() and device in k
+                    }
+                    
+                    if existing_power_codes and ir_code in existing_power_codes.values():
+                        # Same code detected - this is a toggle button
+                        is_power_toggle = True
+                        button_name = f"{device}_power_toggle"
+                        mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
+                        print(f"⚠️ Power toggle detected for {device}: Same code for ON/OFF")
+                
+                # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
-                # Save IR command to InfluxDB
-                save_ir_command('remote', button_name, len(ir_code))
+                
+                # Auto-save to InfluxDB immediately
+                save_ir_command(device, button_name, len(ir_code))
+                
+                # Save to file for persistence
+                try:
+                    import os
+                    ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
+                    with open(ir_file, 'w') as f:
+                        json.dump(mqtt_data['ir_codes'], f, indent=2)
+                    print(f"💾 IR codes saved to file: {ir_file}")
+                except Exception as e:
+                    print(f"❌ Error saving IR codes to file: {e}")
+                
                 log_messages.append({
                     'time': datetime.now().strftime('%H:%M:%S'),
-                    'msg': f'IR Code learned: {button_name}',
+                    'msg': f'IR Code learned: {button_name}{" (TOGGLE)" if is_power_toggle else ""}',
                     'level': 'success'
                 })
-                socketio.emit('ir_learned', {'button': button_name, 'code': ir_code})
+                
+                socketio.emit('ir_learned', {
+                    'button': button_name, 
+                    'code': ir_code,
+                    'device': device,
+                    'is_toggle': is_power_toggle
+                })
+                
                 ir_learning_mode = False
                 ir_learning_button = ""
+                ir_learning_device = ""
             
     except Exception as e:
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
@@ -640,26 +680,35 @@ def set_lamp_mode():
 
 @app.route('/api/ir/learn', methods=['POST'])
 def learn_ir():
-    global ir_learning_mode, ir_learning_button
+    global ir_learning_mode, ir_learning_button, ir_learning_device
     try:
         data = request.json
         button_name = data.get('button', '')
+        device_name = data.get('device', 'remote')  # Get device name (AC, TV, etc)
         
         if not button_name:
             return jsonify({'status': 'error', 'message': 'Button name required'}), 400
         
         ir_learning_mode = True
         ir_learning_button = button_name
+        ir_learning_device = device_name
         
-        mqtt_client.publish('smartroom/ir/learn', json.dumps({'button': button_name, 'action': 'start'}))
+        mqtt_client.publish('smartroom/ir/learn', json.dumps({
+            'button': button_name, 
+            'device': device_name,
+            'action': 'start'
+        }))
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
-            'msg': f'IR Learning started for: {button_name}',
+            'msg': f'IR Learning started for: {device_name} - {button_name}',
             'level': 'info'
         })
         
-        return jsonify({'status': 'success', 'message': f'Learning mode activated for {button_name}'})
+        return jsonify({
+            'status': 'success', 
+            'message': f'Learning mode activated for {device_name} - {button_name}'
+        })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -674,21 +723,69 @@ def send_ir():
         
         ir_code = mqtt_data['ir_codes'][button_name]
         
-        mqtt_client.publish('smartroom/ir/send', json.dumps({'button': button_name, 'code': ir_code}))
+        # Handle toggle buttons (power ON/OFF with same code)
+        action_suffix = ''
+        if 'toggle' in button_name.lower() or button_name in mqtt_data['ir_states']:
+            # Toggle the state
+            current_state = mqtt_data['ir_states'].get(button_name, 'OFF')
+            new_state = 'ON' if current_state == 'OFF' else 'OFF'
+            mqtt_data['ir_states'][button_name] = new_state
+            action_suffix = f' ({new_state})'
+            print(f"🔄 Toggle button {button_name}: {current_state} → {new_state}")
+        
+        mqtt_client.publish('smartroom/ir/send', json.dumps({
+            'button': button_name, 
+            'code': ir_code
+        }))
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
-            'msg': f'IR Code sent: {button_name}',
+            'msg': f'IR Code sent: {button_name}{action_suffix}',
             'level': 'info'
         })
         
-        return jsonify({'status': 'success', 'message': f'IR code sent for {button_name}'})
+        return jsonify({
+            'status': 'success', 
+            'message': f'IR command sent: {button_name}{action_suffix}',
+            'state': mqtt_data['ir_states'].get(button_name, None)
+        })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/codes')
 def get_ir_codes():
-    return jsonify(mqtt_data['ir_codes'])
+    return jsonify({
+        'codes': mqtt_data['ir_codes'],
+        'states': mqtt_data['ir_states']
+    })
+
+@app.route('/api/ir/delete', methods=['POST'])
+def delete_ir_code():
+    try:
+        data = request.json
+        button_name = data.get('button', '')
+        
+        if button_name in mqtt_data['ir_codes']:
+            del mqtt_data['ir_codes'][button_name]
+            
+            # Also delete state if exists
+            if button_name in mqtt_data['ir_states']:
+                del mqtt_data['ir_states'][button_name]
+            
+            # Update file
+            try:
+                import os
+                ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
+                with open(ir_file, 'w') as f:
+                    json.dump(mqtt_data['ir_codes'], f, indent=2)
+            except Exception as e:
+                print(f"❌ Error updating IR codes file: {e}")
+            
+            return jsonify({'status': 'success', 'message': f'IR code {button_name} deleted'})
+        else:
+            return jsonify({'status': 'error', 'message': 'IR code not found'}), 404
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/logs')
 def get_logs():
@@ -2260,6 +2357,21 @@ if __name__ == '__main__':
     print("=" * 60)
     print("  🏠 Smart Room Dashboard - 4K Camera + YOLOv4 Detection")
     print("=" * 60)
+    
+    # Load saved IR codes from file
+    print("  📡 Loading saved IR codes...")
+    try:
+        import os
+        ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
+        if os.path.exists(ir_file):
+            with open(ir_file, 'r') as f:
+                mqtt_data['ir_codes'] = json.load(f)
+            print(f"  ✅ Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
+        else:
+            print("  ℹ️  No saved IR codes found")
+    except Exception as e:
+        print(f"  ⚠️  Error loading IR codes: {e}")
+    
     print("  📥 Loading YOLO model (please wait)...")
     
     # Load YOLO SYNCHRONOUSLY
