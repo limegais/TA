@@ -917,10 +917,22 @@ def send_ir():
         data = request.json
         button_name = data.get('button', '')
         
+        print("\n" + "="*70)
+        print("📤 IR SEND REQUEST RECEIVED")
+        print("="*70)
+        print(f"Button requested: {button_name}")
+        print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
+        
         if button_name not in mqtt_data['ir_codes']:
+            print(f"❌ ERROR: Button '{button_name}' not found in learned codes!")
+            print("="*70 + "\n")
             return jsonify({'status': 'error', 'message': 'IR code not learned yet'}), 400
         
         ir_code = mqtt_data['ir_codes'][button_name]
+        
+        print(f"✅ IR code found!")
+        print(f"Code preview: {ir_code[:80]}...")
+        print(f"Code length: {len(ir_code)} chars")
         
         # Handle toggle buttons (power ON/OFF with same code)
         action_suffix = ''
@@ -930,25 +942,46 @@ def send_ir():
             new_state = 'ON' if current_state == 'OFF' else 'OFF'
             mqtt_data['ir_states'][button_name] = new_state
             action_suffix = f' ({new_state})'
-            print(f"🔄 Toggle button {button_name}: {current_state} → {new_state}")
+            print(f"🔄 Toggle button: {current_state} → {new_state}")
         
-        mqtt_client.publish('smartroom/ir/send', json.dumps({
+        # MQTT Payload
+        mqtt_payload = {
             'button': button_name, 
             'code': ir_code
-        }))
+        }
+        mqtt_payload_str = json.dumps(mqtt_payload)
+        
+        print(f"\n📡 Publishing to MQTT...")
+        print(f"Topic: smartroom/ir/send")
+        print(f"Payload size: {len(mqtt_payload_str)} bytes")
+        print(f"MQTT Connected: {mqtt_client.is_connected()}")
+        
+        result = mqtt_client.publish('smartroom/ir/send', mqtt_payload_str)
+        
+        print(f"Publish Result: {result.rc}")
+        if result.rc == 0:
+            print("✅ MQTT PUBLISH SUCCESS!")
+            print("ESP32 should transmit IR signal NOW!")
+        else:
+            print(f"❌ MQTT PUBLISH FAILED! RC={result.rc}")
+        print("="*70 + "\n")
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
             'msg': f'IR Code sent: {button_name}{action_suffix}',
-            'level': 'info'
+            'level': 'success' if result.rc == 0 else 'error'
         })
         
         return jsonify({
-            'status': 'success', 
+            'status': 'success' if result.rc == 0 else 'error', 
             'message': f'IR command sent: {button_name}{action_suffix}',
-            'state': mqtt_data['ir_states'].get(button_name, None)
+            'state': mqtt_data['ir_states'].get(button_name, None),
+            'mqtt_published': result.rc == 0
         })
     except Exception as e:
+        print(f"❌ EXCEPTION in send_ir(): {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/codes')
