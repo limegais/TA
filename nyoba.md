@@ -439,6 +439,17 @@ def on_message(client, userdata, msg):
         # Debug: Print all incoming MQTT messages
         print(f"\ud83d\udce1 MQTT Received - Topic: {topic}")
         
+        # Broadcast to frontend for debugging
+        try:
+            payload_str = msg.payload.decode()[:100]
+            socketio.emit('mqtt_debug', {
+                'topic': topic,
+                'payload': payload_str,
+                'time': datetime.now().strftime('%H:%M:%S')
+            })
+        except Exception as e:
+            pass
+        
         # Try to parse as JSON first
         try:
             payload = json.loads(msg.payload.decode())
@@ -838,6 +849,57 @@ def delete_ir_code():
             return jsonify({'status': 'success', 'message': f'IR code {button_name} deleted'})
         else:
             return jsonify({'status': 'error', 'message': 'IR code not found'}), 404
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/ir/status')
+def get_ir_status():
+    """Get current IR learning status"""
+    return jsonify({
+        'learning_mode': ir_learning_mode,
+        'learning_button': ir_learning_button,
+        'learning_device': ir_learning_device,
+        'total_codes': len(mqtt_data['ir_codes']),
+        'codes': list(mqtt_data['ir_codes'].keys())
+    })
+
+@app.route('/api/ir/manual_save', methods=['POST'])
+def manual_save_ir():
+    """Fallback: Manually save IR code if MQTT fails"""
+    try:
+        data = request.json
+        button_name = data.get('button', '')
+        ir_code = data.get('code', '')
+        device = data.get('device', 'remote')
+        
+        if not button_name or not ir_code:
+            return jsonify({'status': 'error', 'message': 'Button name and code required'}), 400
+        
+        # Save to memory
+        mqtt_data['ir_codes'][button_name] = ir_code
+        
+        # Save to InfluxDB
+        save_ir_command(device, button_name, len(ir_code))
+        
+        # Save to file
+        try:
+            import os
+            ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
+            with open(ir_file, 'w') as f:
+                json.dump(mqtt_data['ir_codes'], f, indent=2)
+        except Exception as e:
+            print(f"❌ Error saving to file: {e}")
+        
+        # Notify frontend
+        socketio.emit('ir_learned', {
+            'button': button_name,
+            'code': ir_code[:50] + '...',
+            'device': device,
+            'status': 'success',
+            'is_toggle': False
+        })
+        
+        return jsonify({'status': 'success', 'message': f'IR code manually saved: {button_name}'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -2180,21 +2242,86 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== IR REMOTE ====================
-        function learnIRCode(buttonName) {
+        let currentLearningButton = null;
+        let learningCheckInterval = null;
+        
+        function learnIRCode(buttonName, deviceName = 'remote') {
             const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
-            buttonElement.classList.add('learning');
+            const statusElement = document.getElementById('status-' + buttonName);
+            
+            currentLearningButton = buttonName;
+            
+            if (buttonElement) {
+                buttonElement.classList.add('learning');
+            }
+            
+            if (statusElement) {
+                statusElement.textContent = 'Ready! Press remote...';
+                statusElement.style.color = '#f59e0b';
+            }
             
             fetch('/api/ir/learn', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: buttonName })
+                body: JSON.stringify({ 
+                    button: buttonName,
+                    device: deviceName 
+                })
             })
             .then(r => r.json())
             .then(result => {
-                showToast('Learning ' + buttonName + '... Press remote button now!', 'info');
-                setTimeout(() => { buttonElement.classList.remove('learning'); }, 15000);
+                console.log('Learning mode activated:', result);
+                showToast('Press remote button for: ' + buttonName, 'info');
+                
+                // Auto-check status every 500ms
+                let checkCount = 0;
+                learningCheckInterval = setInterval(() => {
+                    checkCount++;
+                    
+                    fetch('/api/ir/codes')
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.codes && data.codes[buttonName]) {
+                                // Code learned!
+                                clearInterval(learningCheckInterval);
+                                
+                                if (buttonElement) {
+                                    buttonElement.classList.remove('learning');
+                                    buttonElement.classList.add('learned');
+                                }
+                                
+                                if (statusElement) {
+                                    statusElement.textContent = 'Learned OK';
+                                    statusElement.style.color = '#10b981';
+                                }
+                                
+                                showToast('IR Code learned: ' + buttonName, 'success');
+                                currentLearningButton = null;
+                            }
+                            
+                            // Stop after 60 checks (30 seconds)
+                            if (checkCount > 60) {
+                                clearInterval(learningCheckInterval);
+                                if (buttonElement) buttonElement.classList.remove('learning');
+                                if (statusElement) {
+                                    statusElement.textContent = 'Timeout';
+                                    statusElement.style.color = '#ef4444';
+                                }
+                                showToast('Learning timeout - no signal', 'error');
+                                currentLearningButton = null;
+                            }
+                        })
+                        .catch(e => console.error('Status check error:', e));
+                }, 500);
             })
-            .catch(e => { buttonElement.classList.remove('learning'); showToast('Error: ' + e, 'error'); });
+            .catch(e => { 
+                if (buttonElement) buttonElement.classList.remove('learning'); 
+                if (statusElement) {
+                    statusElement.textContent = 'Error';
+                    statusElement.style.color = '#ef4444';
+                }
+                showToast('Error: ' + e, 'error'); 
+            });
         }
 
         function sendIRCode(buttonName) {
@@ -2347,18 +2474,58 @@ HTML_TEMPLATE = '''
         });
 
         socket.on('ir_learned', function(data) {
-            const buttonElement = document.querySelector('[data-button="' + data.button + '"]');
-            const statusElement = document.getElementById('status-' + data.button);
+            console.log('🎉 IR Learned event received:', data);
             
-            if (buttonElement && statusElement) {
+            let buttonName = data.button;
+            let buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
+            let statusElement = document.getElementById('status-' + buttonName);
+            
+            // Try alternative button names if not found
+            if (!buttonElement && currentLearningButton) {
+                buttonName = currentLearningButton;
+                buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
+                statusElement = document.getElementById('status-' + buttonName);
+            }
+            
+            if (data.status === 'error') {
+                showToast('❌ IR Learning failed: ' + (data.message || 'Unknown error'), 'error');
+                if (buttonElement) buttonElement.classList.remove('learning');
+                if (statusElement) {
+                    statusElement.textContent = 'Failed';
+                    statusElement.style.color = '#ef4444';
+                }
+                return;
+            }
+            
+            // Success!
+            if (buttonElement) {
                 buttonElement.classList.remove('learning');
                 buttonElement.classList.add('learned');
+            }
+            
+            if (statusElement) {
                 statusElement.textContent = 'Learned ✓';
                 statusElement.style.color = '#10b981';
             }
             
-            showToast('IR Code learned: ' + data.button);
-            learnedCodes[data.button] = data.code;
+            let message = '✅ IR Code learned: ' + buttonName;
+            if (data.is_toggle) {
+                message += ' (Power Toggle)';
+            }
+            
+            showToast(message, 'success');
+            learnedCodes[buttonName] = data.code;
+            currentLearningButton = null;
+        });
+
+        // Debug: Listen to all MQTT messages
+        socket.on('mqtt_debug', function(data) {
+            console.log('[MQTT Debug]', data.time, '-', data.topic, ':', data.payload);
+            
+            // If learning mode and IR topic detected, show notification
+            if (currentLearningButton && (data.topic.includes('ir') || data.topic.includes('IR'))) {
+                console.log('⚠️ IR-related MQTT message while in learning mode!');
+            }
         });
 
         // ==================== INIT ====================
