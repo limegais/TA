@@ -414,6 +414,7 @@ def release_camera():
 
 # ==================== MQTT ====================
 mqtt_client = mqtt.Client()
+mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW IR codes
 
 def on_connect(client, userdata, flags, rc):
     print("\n" + "="*70)
@@ -476,12 +477,21 @@ def on_message(client, userdata, msg):
         
         # Try to parse as JSON first
         try:
-            payload = json.loads(msg.payload.decode())
-            print(f"   Data (JSON): {payload}")
+            full_payload_str = msg.payload.decode()  # Decode ONCE, use full string
+            payload = json.loads(full_payload_str)
+            # Don't print full payload (RAW IR codes are 1000+ chars), show summary
+            if isinstance(payload, dict) and 'code' in payload:
+                code_val = payload['code']
+                code_len = len(code_val) if isinstance(code_val, str) else 0
+                raw_count = code_val.count(',') + 1 if isinstance(code_val, str) and code_val.startswith('RAW:') else 0
+                print(f"   Data (JSON): code length={code_len} chars, RAW values={raw_count}")
+                print(f"   Code preview: {code_val[:80]}..." if code_len > 80 else f"   Code: {code_val}")
+            else:
+                print(f"   Data (JSON): {payload}")
         except:
             # If not JSON, treat as plain text
             payload_text = msg.payload.decode()
-            print(f"   Data (Text): {payload_text}")
+            print(f"   Data (Text): {payload_text[:200]}..." if len(payload_text) > 200 else f"   Data (Text): {payload_text}")
             payload = {'raw': payload_text}
         
         # DEBUG: Check which condition will match
@@ -552,12 +562,14 @@ def on_message(client, userdata, msg):
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
             
-        elif 'dashboard/state' in topic:
+        elif 'dashboard/state' in topic or 'optimization/stats' in topic:
+            # Update from optimization algorithm (GA/PSO)
             mqtt_data['system'].update({
-                'ga_fitness': payload.get('ga_best_fitness', 0),
-                'pso_fitness': payload.get('pso_best_fitness', 0),
-                'optimization_runs': payload.get('optimization_count', 0)
+                'ga_fitness': payload.get('ga_best_fitness', payload.get('ga_fitness', 0)),
+                'pso_fitness': payload.get('pso_best_fitness', payload.get('pso_fitness', 0)),
+                'optimization_runs': payload.get('optimization_count', payload.get('runs', 0))
             })
+            print(f"📊 Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         elif 'ac/mode' in topic:
@@ -598,7 +610,18 @@ def on_message(client, userdata, msg):
                 button_name = ir_learning_button
                 ir_code = str(payload)
             
-            print(f"   Parsed - Button: {button_name}, Device: {device}, Code length: {len(ir_code)}")
+            # Count actual RAW values to verify completeness
+            raw_value_count = 0
+            if ir_code.startswith('RAW:'):
+                raw_part = ir_code[4:]  # Skip 'RAW:'
+                raw_value_count = raw_part.count(',') + 1 if raw_part else 0
+            print(f"   Parsed - Button: {button_name}, Device: {device}")
+            print(f"   Code length: {len(ir_code)} chars")
+            if raw_value_count > 0:
+                print(f"   ✅ RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
+                if raw_value_count < 100:
+                    print(f"   ⚠️  WARNING: Only {raw_value_count} values! Signal mungkin tidak lengkap!")
+                    print(f"   ⚠️  Mitsubishi SRK AC butuh ~200+ values (2 frame)")
             
             if button_name and ir_code and len(ir_code) > 0:
                 # Check if this is a power toggle (same code for ON/OFF)
@@ -849,6 +872,29 @@ def set_lamp_mode():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/optimization/update', methods=['POST'])
+def update_optimization():
+    """Receive optimization data from main.py GA/PSO algorithm"""
+    try:
+        data = request.json
+        
+        # Update system data
+        mqtt_data['system'].update({
+            'ga_fitness': data.get('ga_fitness', 0),
+            'pso_fitness': data.get('pso_fitness', 0),
+            'optimization_runs': data.get('runs', 0)
+        })
+        
+        # Broadcast to all connected clients
+        socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+        
+        print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f}, PSO={data.get('pso_fitness', 0):.2f}")
+        
+        return jsonify({'status': 'success', 'message': 'Optimization data updated'})
+    except Exception as e:
+        print(f"❌ Optimization update error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/ir/learn', methods=['POST'])
 def learn_ir():
     global ir_learning_mode, ir_learning_button, ir_learning_device
@@ -930,9 +976,19 @@ def send_ir():
         
         ir_code = mqtt_data['ir_codes'][button_name]
         
+        # Verify code completeness before sending
+        raw_value_count = 0
+        if isinstance(ir_code, str) and ir_code.startswith('RAW:'):
+            raw_part = ir_code[4:]
+            raw_value_count = raw_part.count(',') + 1 if raw_part else 0
+        
         print(f"✅ IR code found!")
-        print(f"Code preview: {ir_code[:80]}...")
         print(f"Code length: {len(ir_code)} chars")
+        if raw_value_count > 0:
+            print(f"RAW values: {raw_value_count} values")
+            if raw_value_count < 100:
+                print(f"⚠️  WARNING: Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
+        print(f"Code preview: {ir_code[:100]}..." if len(ir_code) > 100 else f"Code: {ir_code}")
         
         # Handle toggle buttons (power ON/OFF with same code)
         action_suffix = ''
@@ -944,16 +1000,25 @@ def send_ir():
             action_suffix = f' ({new_state})'
             print(f"🔄 Toggle button: {current_state} → {new_state}")
         
-        # MQTT Payload
+        # MQTT Payload - send COMPLETE code, no truncation!
         mqtt_payload = {
             'button': button_name, 
-            'code': ir_code
+            'code': ir_code  # FULL code, no slicing!
         }
         mqtt_payload_str = json.dumps(mqtt_payload)
+        
+        # Verify the JSON payload still contains the full code
+        verify_payload = json.loads(mqtt_payload_str)
+        verify_code = verify_payload.get('code', '')
+        verify_raw_count = 0
+        if verify_code.startswith('RAW:'):
+            verify_raw_count = verify_code[4:].count(',') + 1
         
         print(f"\n📡 Publishing to MQTT...")
         print(f"Topic: smartroom/ir/send")
         print(f"Payload size: {len(mqtt_payload_str)} bytes")
+        if verify_raw_count > 0:
+            print(f"RAW values in payload: {verify_raw_count} (verified after JSON encode)")
         print(f"MQTT Connected: {mqtt_client.is_connected()}")
         
         result = mqtt_client.publish('smartroom/ir/send', mqtt_payload_str)
@@ -1636,6 +1701,91 @@ HTML_TEMPLATE = '''
             color: var(--text-primary);
         }
 
+        .detection-alert {
+            position: fixed;
+            top: 100px;
+            right: 30px;
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+            padding: 20px 25px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(239, 68, 68, 0.5);
+            display: none;
+            z-index: 8888;
+            animation: slideInRight 0.5s, pulse 2s infinite;
+            max-width: 300px;
+        }
+
+        .detection-alert.show {
+            display: block;
+        }
+
+        @keyframes slideInRight {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .detection-alert-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .detection-alert-icon {
+            font-size: 24px;
+            animation: bounce 1s infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+
+        .detection-alert-body {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .detection-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .person-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 2px;
+            animation: fadeIn 0.3s;
+        }
+
+        .person-badge.detected {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+        }
+
+        .person-badge.not-detected {
+            background: linear-gradient(135deg, #64748b, #475569);
+            color: rgba(255,255,255,0.7);
+        }
+
         @media (max-width: 768px) {
             .sidebar { display: none; }
             .main-content { margin-left: 0; }
@@ -1773,6 +1923,21 @@ HTML_TEMPLATE = '''
 
                 <div class="stat-card">
                     <div class="stat-header">
+                        <span class="stat-title">Person Detection</span>
+                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
+                            <i class="fas fa-user-friends"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value" style="font-size: 32px;">
+                        <span id="cam-count" style="color: #ef4444;">0</span> Person(s)
+                    </div>
+                    <div class="stat-change">
+                        <span><i class="fas fa-brain"></i> YOLO: <span id="cam-confidence" style="font-weight: bold;">0%</span></span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
                         <span class="stat-title">GA Optimization</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
                             <i class="fas fa-dna"></i>
@@ -1885,7 +2050,12 @@ HTML_TEMPLATE = '''
             <div class="camera-view">
                 <div class="camera-feed-container" id="camera-feed-container">
                     <div class="camera-overlay-bar">
-                        <span class="camera-rec-badge"><i class="fas fa-circle"></i> REC</span>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <span class="camera-rec-badge"><i class="fas fa-circle"></i> LIVE</span>
+                            <span class="person-badge not-detected" id="overlay-person-badge">
+                                <i class="fas fa-user-slash"></i> No Person
+                            </span>
+                        </div>
                         <span class="camera-time-badge" id="camera-time">00:00:00</span>
                     </div>
                     <img id="camera-img" src="/video_feed" alt="Camera Feed"
@@ -1915,18 +2085,27 @@ HTML_TEMPLATE = '''
                         <div class="camera-info-label"><i class="fas fa-tachometer-alt"></i> Frame Rate</div>
                         <div class="camera-info-value" id="cam-fps">Loading...</div>
                     </div>
-                    <div class="camera-info-card">
+                    <div class="camera-info-card" id="person-detected-card" style="transition: all 0.3s;">
                         <div class="camera-info-label"><i class="fas fa-walking"></i> Person Detected</div>
                         <div class="camera-info-value" id="cam-person" style="color: var(--danger);">No</div>
                     </div>
-                    <div class="camera-info-card">
+                    <div class="camera-info-card" style="transition: all 0.3s;">
                         <div class="camera-info-label"><i class="fas fa-users"></i> Person Count</div>
-                        <div class="camera-info-value" id="cam-count">0</div>
+                        <div class="camera-info-value" id="cam-count-display">0</div>
                     </div>
-                    <div class="camera-info-card">
+                    <div class="camera-info-card" style="transition: all 0.3s;">
                         <div class="camera-info-label"><i class="fas fa-percentage"></i> Confidence</div>
-                        <div class="camera-info-value" id="cam-confidence">0%</div>
+                        <div class="camera-info-value" id="cam-confidence-display">0%</div>
                     </div>
+                </div>
+                
+                <div style="margin-top: 20px; text-align: center;">
+                    <button class="btn btn-primary" onclick="toggleDetectionSound()">
+                        <i class="fas fa-volume-up"></i> Toggle Sound Alerts
+                    </button>
+                    <button class="btn btn-success" onclick="retryCamera()" style="margin-left: 10px;">
+                        <i class="fas fa-sync"></i> Refresh Feed
+                    </button>
                 </div>
             </div>
         </div>
@@ -2012,10 +2191,55 @@ HTML_TEMPLATE = '''
 
             <div class="control-panel">
                 <div class="control-title">
-                    <span>IR Remote Learning</span>
-                    <button class="btn btn-warning btn-sm" onclick="loadIRCodes()">
-                        <i class="fas fa-sync"></i> Refresh
-                    </button>
+                    <span><i class="fas fa-satellite-dish"></i> IR Remote Learning - AC Mitsubishi</span>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-success btn-sm" onclick="saveAllIRCodes()">
+                            <i class="fas fa-save"></i> Save
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="resetAllIRCodes()">
+                            <i class="fas fa-trash-alt"></i> Reset
+                        </button>
+                        <button class="btn btn-warning btn-sm" onclick="loadIRCodes()">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="control-group" style="background: rgba(239, 68, 68, 0.1); padding: 15px; border-radius: 8px; border: 1px solid #ef4444; margin-bottom: 20px;">
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                        <i class="fas fa-exclamation-triangle" style="color: #ef4444; font-size: 20px;"></i>
+                        <strong style="color: #ef4444;">AC Mitsubishi Troubleshooting</strong>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                        <p><strong>Jika AC tidak merespon:</strong></p>
+                        <ol style="margin: 10px 0; padding-left: 20px;">
+                            <li>Pilih protokol "MITSUBISHI AC" atau "RAW" di bawah</li>
+                            <li>Pastikan IR LED <strong style="color: #ef4444;">menyala merah</strong> saat kirim</li>
+                            <li>Arahkan IR ke AC (jarak 1-3 meter, langsung ke sensor AC)</li>
+                            <li>Tekan remote <strong>2-3 detik</strong> saat learning</li>
+                            <li>Test pakai tombol POWER terlebih dahulu</li>
+                            <li>Jika gagal, coba protokol RAW (lebih universal)</li>
+                        </ol>
+                        <p><strong>IR Transmitter Status:</strong> <span id="ir-tx-status" style="color: #10b981;">✓ Ready</span></p>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label class="control-label">
+                        <i class="fas fa-microchip"></i> IR Protocol Override
+                    </label>
+                    <select id="ir-protocol-selector" class="slider" style="height: 40px; padding: 8px; cursor: pointer; background: var(--bg-card); color: var(--text-primary);">
+                        <option value=\"AUTO\">AUTO (Detect from Remote)</option>
+                        <option value=\"MITSUBISHI_AC\">MITSUBISHI AC ⭐ Recommended</option>
+                        <option value=\"MITSUBISHI_HEAVY\">MITSUBISHI HEAVY</option>
+                        <option value=\"RAW\" selected>RAW (Universal - Use This!)</option>
+                        <option value=\"NEC\">NEC</option>
+                        <option value=\"SAMSUNG\">SAMSUNG</option>
+                        <option value=\"LG\">LG</option>
+                    </select>
+                    <div style="font-size: 12px; color: var(--warning); margin-top: 5px;">
+                        💡 Untuk AC Mitsubishi yang tidak merespon, gunakan <strong>RAW</strong> mode
+                    </div>
                 </div>
                 
                 <div class="control-label">
@@ -2071,6 +2295,26 @@ HTML_TEMPLATE = '''
                         <div class="ir-status" id="status-SWING">Not learned</div>
                     </div>
                 </div>
+                
+                <div style="margin-top: 20px; padding: 15px; background: rgba(99, 102, 241, 0.1); border-radius: 8px; border: 1px solid var(--primary);">
+                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px;">
+                        <i class="fas fa-book"></i> IR Codes Summary
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">
+                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 6 buttons
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-primary btn-sm" onclick="exportIRCodes()">
+                            <i class="fas fa-download"></i> Export JSON
+                        </button>
+                        <button class="btn btn-warning btn-sm" onclick="showIRDebugInfo()">
+                            <i class="fas fa-bug"></i> Debug Info
+                        </button>
+                        <button class="btn btn-success btn-sm" onclick="testAllIRCodes()">
+                            <i class="fas fa-play"></i> Test All
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <div class="control-panel">
@@ -2105,6 +2349,24 @@ HTML_TEMPLATE = '''
     <!-- Toast Notification -->
     <div id="toast" class="toast">
         <div id="toast-message"></div>
+    </div>
+
+    <!-- Detection Alert -->
+    <div id="detection-alert" class="detection-alert">
+        <button class="detection-close" onclick="closeDetectionAlert()">
+            <i class="fas fa-times"></i>
+        </button>
+        <div class="detection-alert-header">
+            <i class="fas fa-exclamation-triangle detection-alert-icon"></i>
+            <span>Person Detected!</span>
+        </div>
+        <div class="detection-alert-body">
+            <div><strong id="alert-person-count">0</strong> person(s) detected</div>
+            <div>Confidence: <strong id="alert-person-confidence">0%</strong></div>
+            <div style="margin-top: 8px; font-size: 12px; opacity: 0.8;">
+                <i class="fas fa-clock"></i> <span id="alert-time">--:--:--</span>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -2505,9 +2767,19 @@ HTML_TEMPLATE = '''
         function loadIRCodes() {
             fetch('/api/ir/codes')
                 .then(r => r.json())
-                .then(codes => {
-                    learnedCodes = codes;
-                    Object.keys(codes).forEach(buttonName => {
+                .then(data => {
+                    learnedCodes = data.codes || data;
+                    const codeCount = Object.keys(learnedCodes).length;
+                    
+                    // Update summary
+                    const summaryEl = document.getElementById('ir-total-learned');
+                    if (summaryEl) {
+                        summaryEl.textContent = codeCount;
+                        summaryEl.style.color = codeCount > 0 ? '#10b981' : '#ef4444';
+                    }
+                    
+                    // Update button status
+                    Object.keys(learnedCodes).forEach(buttonName => {
                         const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
                         const statusElement = document.getElementById('status-' + buttonName);
                         if (buttonElement && statusElement) {
@@ -2516,9 +2788,250 @@ HTML_TEMPLATE = '''
                             statusElement.style.color = '#10b981';
                         }
                     });
-                    showToast('IR codes loaded');
+                    
+                    if (codeCount > 0) {
+                        showToast(`IR codes loaded: ${codeCount} button(s)`, 'success');
+                    }
                 })
-                .catch(e => console.error('Error loading IR codes:', e));
+                .catch(e => {
+                    console.error('Error loading IR codes:', e);
+                    showToast('Error loading IR codes', 'error');
+                });
+        }
+
+        function resetAllIRCodes() {
+            if (!confirm('⚠️ Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
+                return;
+            }
+            
+            // Clear UI
+            const buttons = ['POWER', 'TEMP_UP', 'TEMP_DOWN', 'FAN', 'MODE', 'SWING'];
+            buttons.forEach(buttonName => {
+                const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
+                const statusElement = document.getElementById('status-' + buttonName);
+                
+                if (buttonElement) {
+                    buttonElement.classList.remove('learned');
+                }
+                if (statusElement) {
+                    statusElement.textContent = 'Not learned';
+                    statusElement.style.color = '#94a3b8';
+                }
+                
+                // Delete from server
+                fetch('/api/ir/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ button: buttonName })
+                }).catch(e => console.log('Delete error:', e));
+            });
+            
+            // Update summary
+            const summaryEl = document.getElementById('ir-total-learned');
+            if (summaryEl) {
+                summaryEl.textContent = '0';
+                summaryEl.style.color = '#ef4444';
+            }
+            
+            learnedCodes = {};
+            showToast('All IR codes reset!', 'success');
+        }
+
+        function saveAllIRCodes() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const count = Object.keys(codes).length;
+                    
+                    if (count === 0) {
+                        showToast('No IR codes to save yet', 'warning');
+                        return;
+                    }
+                    
+                    showToast(`${count} IR codes saved to server`, 'success');
+                    console.log('IR Codes saved:', codes);
+                })
+                .catch(e => showToast('Save error: ' + e, 'error'));
+        }
+
+        function exportIRCodes() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const count = Object.keys(codes).length;
+                    
+                    if (count === 0) {
+                        showToast('No IR codes to export', 'warning');
+                        return;
+                    }
+                    
+                    // Create JSON file and download
+                    const jsonStr = JSON.stringify(codes, null, 2);
+                    const blob = new Blob([jsonStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'ir_codes_' + new Date().toISOString().slice(0, 10) + '.json';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    showToast(`Exported ${count} IR codes`, 'success');
+                })
+                .catch(e => showToast('Export error: ' + e, 'error'));
+        }
+
+        function showIRDebugInfo() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    
+                    let debugInfo = '═══════════════════════════════════\\n';
+                    debugInfo += '  IR CODES DEBUG INFO\\n';
+                    debugInfo += '═══════════════════════════════════\\n\\n';
+                    
+                    if (Object.keys(codes).length === 0) {
+                        debugInfo += '⚠️ No IR codes learned yet\\n\\n';
+                        debugInfo += 'Steps to learn:\\n';
+                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
+                        debugInfo += '2. Click \"Learn\" button\\n';
+                        debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
+                        debugInfo += '4. Wait for \"Learned ✓\" status\\n';
+                        debugInfo += '5. Click \"Send\" to test\\n';
+                    } else {
+                        Object.keys(codes).forEach(button => {
+                            const codeStr = codes[button];
+                            const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
+                            debugInfo += `📡 ${button}:\\n`;
+                            debugInfo += `   Code: ${codePreview}\\n`;
+                            debugInfo += `   Length: ${codeStr.length} chars\\n`;
+                            
+                            // Parse protocol
+                            if (codeStr.includes(':')) {
+                                const protocol = codeStr.split(':')[0];
+                                debugInfo += `   Protocol: ${protocol}\\n`;
+                            }
+                            debugInfo += '\\n';
+                        });
+                        
+                        debugInfo += '═══════════════════════════════════\\n';
+                        debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
+                    }
+                    
+                    debugInfo += '\\n💡 TROUBLESHOOTING:\\n';
+                    debugInfo += '- If AC not responding: Use RAW protocol\\n';
+                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
+                    debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
+                    debugInfo += '- Distance to AC: 1-3 meters, direct line\\n';
+                    
+                    alert(debugInfo);
+                    console.log('IR Debug Info:', codes);
+                })
+                .catch(e => showToast('Debug error: ' + e, 'error'));
+        }
+
+        function testAllIRCodes() {
+            if (!confirm('Test all learned IR codes?\\n\\nThis will send all codes one by one with 2 second delay.')) {
+                return;
+            }
+            
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const buttons = Object.keys(codes);
+                    
+                    if (buttons.length === 0) {
+                        showToast('No codes to test', 'warning');
+                        return;
+                    }
+                    
+                    showToast(`Testing ${buttons.length} codes...`, 'info');
+                    
+                    let index = 0;
+                    const testInterval = setInterval(() => {
+                        if (index >= buttons.length) {
+                            clearInterval(testInterval);
+                            showToast('Test complete!', 'success');
+                            return;
+                        }
+                        
+                        const button = buttons[index];
+                        console.log(`Testing ${button}...`);
+                        sendIRCode(button);
+                        showToast(`Testing: ${button}`, 'info');
+                        
+                        index++;
+                    }, 2000); // 2 second delay between tests
+                })
+                .catch(e => showToast('Test error: ' + e, 'error'));
+        }
+
+        // ==================== DETECTION ALERT ====================
+        let lastDetectionTime = 0;
+        const DETECTION_COOLDOWN = 8000; // 8 seconds between alerts
+        let detectionSoundEnabled = true; // Toggle for sound
+
+        function showDetectionAlert(count, confidence) {
+            const now = Date.now();
+            if (now - lastDetectionTime < DETECTION_COOLDOWN) return;
+            
+            lastDetectionTime = now;
+            
+            document.getElementById('alert-person-count').textContent = count;
+            document.getElementById('alert-person-confidence').textContent = confidence + '%';
+            document.getElementById('alert-time').textContent = new Date().toLocaleTimeString();
+            
+            const alertBox = document.getElementById('detection-alert');
+            alertBox.classList.add('show');
+            
+            // Play sound notification (optional)
+            if (detectionSoundEnabled) {
+                try {
+                    // Create a simple beep sound
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    oscillator.frequency.value = 800; // Hz
+                    oscillator.type = 'sine';
+                    
+                    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                    
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.5);
+                } catch(e) {
+                    console.log('Audio notification not available:', e);
+                }
+            }
+            
+            // Auto hide after 5 seconds
+            setTimeout(() => {
+                alertBox.classList.remove('show');
+            }, 5000);
+            
+            console.log('🚨 PERSON DETECTED:', {
+                count: count,
+                confidence: confidence + '%',
+                time: new Date().toLocaleTimeString()
+            });
+        }
+
+        function closeDetectionAlert() {
+            document.getElementById('detection-alert').classList.remove('show');
+        }
+
+        function toggleDetectionSound() {
+            detectionSoundEnabled = !detectionSoundEnabled;
+            showToast(detectionSoundEnabled ? 'Sound alerts enabled' : 'Sound alerts disabled', 'info');
         }
 
         // ==================== TOAST ====================
@@ -2537,9 +3050,24 @@ HTML_TEMPLATE = '''
             fetch('/api/data')
                 .then(r => r.json())
                 .then(data => {
-                    document.getElementById('dash-temp').textContent = data.ac.temperature.toFixed(1);
+                    const temperature = data.ac.temperature;
+                    document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
-                    document.getElementById('dash-ac-state').textContent = data.ac.ac_state;
+                    
+                    // AC State Logic: < 30°C = ON, >= 30°C = OFF
+                    const acStateEl = document.getElementById('dash-ac-state');
+                    let acState = data.ac.ac_state;
+                    
+                    // Override AC state based on temperature logic
+                    if (temperature < 30) {
+                        acState = 'ON';
+                        acStateEl.style.color = '#10b981'; // Green
+                    } else {
+                        acState = 'OFF';
+                        acStateEl.style.color = '#ef4444'; // Red
+                    }
+                    
+                    acStateEl.textContent = acState;
                     document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp;
                     
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
@@ -2568,11 +3096,32 @@ HTML_TEMPLATE = '''
                         camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
                     }
                     
-                    document.getElementById('ga-fitness').textContent = (data.system.ga_fitness || 0).toFixed ? (data.system.ga_fitness || 0).toFixed(2) : (data.system.ga_fitness || 0);
-                    document.getElementById('pso-fitness').textContent = (data.system.pso_fitness || 0).toFixed ? (data.system.pso_fitness || 0).toFixed(2) : (data.system.pso_fitness || 0);
+                    // Show detection alert if person detected
+                    if (personDetected && personCount > 0) {
+                        showDetectionAlert(personCount, confidence);
+                    }
                     
+                    // Update GA/PSO Fitness (from optimization algorithm)
+                    const gaFitness = parseFloat(data.system.ga_fitness) || 0;
+                    const psoFitness = parseFloat(data.system.pso_fitness) || 0;
+                    
+                    const gaEl = document.getElementById('ga-fitness');
+                    const psoEl = document.getElementById('pso-fitness');
+                    
+                    if (gaEl) {
+                        gaEl.textContent = gaFitness.toFixed(2);
+                        gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    if (psoEl) {
+                        psoEl.textContent = psoFitness.toFixed(2);
+                        psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    
+                    // Calculate AC power based on temperature logic
                     let acPower = 0;
-                    if (data.ac.ac_state === 'ON') {
+                    const actualACState = temperature < 30 ? 'ON' : 'OFF';
+                    
+                    if (actualACState === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
                     }
                     let lampPower = (data.lamp.brightness / 255) * 10;
@@ -2637,6 +3186,143 @@ HTML_TEMPLATE = '''
                     charts.lampBright.data.datasets[0].data.push(Math.round(data.data.brightness / 255 * 100));
                     charts.lampBright.update();
                 }
+            }
+            
+            // Real-time optimization (GA/PSO) updates
+            if (data.type === 'system') {
+                const gaFitness = parseFloat(data.data.ga_fitness) || 0;
+                const psoFitness = parseFloat(data.data.pso_fitness) || 0;
+                const runs = data.data.optimization_runs || 0;
+                
+                const gaEl = document.getElementById('ga-fitness');
+                const psoEl = document.getElementById('pso-fitness');
+                
+                if (gaEl) {
+                    gaEl.textContent = gaFitness.toFixed(2);
+                    gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
+                    if (gaFitness > 0) {
+                        gaEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    }
+                }
+                
+                if (psoEl) {
+                    psoEl.textContent = psoFitness.toFixed(2);
+                    psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                    if (psoFitness > 0) {
+                        psoEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    }
+                }
+                
+                console.log('📊 Optimization Update:', {
+                    ga: gaFitness.toFixed(2),
+                    pso: psoFitness.toFixed(2),
+                    runs: runs
+                });
+                
+                // Show toast for significant fitness updates
+                if (gaFitness > 0 || psoFitness > 0) {
+                    const winner = gaFitness > psoFitness ? 'GA' : 'PSO';
+                    const winnerFitness = Math.max(gaFitness, psoFitness);
+                    showToast(`${winner} Optimization: ${winnerFitness.toFixed(2)}`, 'success');
+                }
+            }
+            
+            // Real-time camera/person detection update
+            if (data.type === 'camera') {
+                const personCount = data.data.count || 0;
+                const confidence = data.data.confidence || 0;
+                const personDetected = data.data.person_detected || false;
+                
+                // Update count display with color coding
+                const countEl = document.getElementById('cam-count');
+                const countDisplayEl = document.getElementById('cam-count-display');
+                if (countEl) {
+                    countEl.textContent = personCount;
+                    if (personCount > 0) {
+                        countEl.style.color = '#10b981';
+                        countEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    } else {
+                        countEl.style.color = '#94a3b8';
+                        countEl.style.textShadow = 'none';
+                    }
+                }
+                if (countDisplayEl) {
+                    countDisplayEl.textContent = personCount;
+                    countDisplayEl.style.color = personCount > 0 ? '#10b981' : '#94a3b8';
+                    if (personCount > 0) {
+                        countDisplayEl.parentElement.style.background = 'rgba(16, 185, 129, 0.1)';
+                        countDisplayEl.parentElement.style.borderColor = '#10b981';
+                    } else {
+                        countDisplayEl.parentElement.style.background = '';
+                        countDisplayEl.parentElement.style.borderColor = 'var(--border)';
+                    }
+                }
+                
+                // Update confidence with color coding
+                const confEl = document.getElementById('cam-confidence');
+                const confDisplayEl = document.getElementById('cam-confidence-display');
+                const confText = confidence + '%';
+                
+                [confEl, confDisplayEl].forEach(el => {
+                    if (el) {
+                        el.textContent = confText;
+                        if (confidence > 70) {
+                            el.style.color = '#10b981';
+                        } else if (confidence > 50) {
+                            el.style.color = '#f59e0b';
+                        } else {
+                            el.style.color = '#ef4444';
+                        }
+                    }
+                });
+                
+                if (confDisplayEl && personCount > 0) {
+                    confDisplayEl.parentElement.style.background = 'rgba(16, 185, 129, 0.1)';
+                    confDisplayEl.parentElement.style.borderColor = '#10b981';
+                } else if (confDisplayEl) {
+                    confDisplayEl.parentElement.style.background = '';
+                    confDisplayEl.parentElement.style.borderColor = 'var(--border)';
+                }
+                
+                // Update person detected card
+                const personEl = document.getElementById('cam-person');
+                const personCard = document.getElementById('person-detected-card');
+                if (personEl) {
+                    personEl.textContent = personDetected ? 'Yes' : 'No';
+                    personEl.style.color = personDetected ? '#10b981' : '#ef4444';
+                }
+                if (personCard) {
+                    if (personDetected) {
+                        personCard.style.background = 'rgba(16, 185, 129, 0.1)';
+                        personCard.style.borderColor = '#10b981';
+                    } else {
+                        personCard.style.background = '';
+                        personCard.style.borderColor = 'var(--border)';
+                    }
+                }
+                
+                // Update overlay badge
+                const overlayBadge = document.getElementById('overlay-person-badge');
+                if (overlayBadge) {
+                    if (personDetected && personCount > 0) {
+                        overlayBadge.className = 'person-badge detected';
+                        overlayBadge.innerHTML = `<i class="fas fa-user-check"></i> ${personCount} Person(s) - ${confidence}%`;
+                    } else {
+                        overlayBadge.className = 'person-badge not-detected';
+                        overlayBadge.innerHTML = '<i class="fas fa-user-slash"></i> No Person';
+                    }
+                }
+                
+                // Show alert when person detected
+                if (personDetected && personCount > 0) {
+                    showDetectionAlert(personCount, confidence);
+                }
+                
+                console.log('📹 Camera Update:', {
+                    count: personCount,
+                    confidence: confidence,
+                    detected: personDetected
+                });
             }
         });
 
@@ -2755,6 +3441,14 @@ if __name__ == '__main__':
             with open(ir_file, 'r') as f:
                 mqtt_data['ir_codes'] = json.load(f)
             print(f"  ✅ Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
+            # Verify each code's completeness
+            for btn_name, code in mqtt_data['ir_codes'].items():
+                if isinstance(code, str) and code.startswith('RAW:'):
+                    raw_count = code[4:].count(',') + 1
+                    status = '✅' if raw_count >= 100 else '⚠️ '
+                    print(f"    {status} {btn_name}: RAW {raw_count} values, {len(code)} chars")
+                else:
+                    print(f"    📡 {btn_name}: {len(code)} chars")
         else:
             print("  ℹ️  No saved IR codes found")
     except Exception as e:
