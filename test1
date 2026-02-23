@@ -1,10 +1,18 @@
+"""
+Smart Room Controller - Production System
+With modular GA & PSO optimization
+Includes: Camera, IR Learning, Data Collector, Auto Optimization
+"""
+
 import json
 import time
 import threading
 import logging
 import os
 import sys
+import paho.mqtt.client as mqtt
 
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -15,24 +23,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SmartRoom")
 
-from services.data_collector import DataCollector
-from services.mqtt_handler import MQTTHandler
-from ml.person_detector import PersonDetector
-from ml.ac_genetic_algorithm import ACGeneticOptimizer
-from ml.lamp_pso import LampPSOOptimizer
+# Import old services (if exist)
+try:
+    from services.data_collector import DataCollector
+    from services.mqtt_handler import MQTTHandler
+    from ml.person_detector import PersonDetector
+    HAS_OLD_SERVICES = True
+except ImportError:
+    logger.warning("Old services not found, using simplified mode")
+    HAS_OLD_SERVICES = False
 
+# Import NEW modular GA & PSO
+from fitness import calculate_fitness, update_sensor_data, get_current_conditions
+from genetic_algorithm import GeneticAlgorithm
+from pso import ParticleSwarmOptimization
+
+# Configuration
 OPTIMIZATION_INTERVAL = 30
 IR_CODES_FILE = "data/ir_codes.json"
-
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
 
 class SmartRoomController:
     def __init__(self):
         logger.info("Initializing Smart Room Controller...")
-        self.mqtt_handler = MQTTHandler(client_id="MainController")
-        self.ac_optimizer = ACGeneticOptimizer()
-        self.lamp_optimizer = LampPSOOptimizer()
-        self.camera = PersonDetector(mqtt_handler=self.mqtt_handler)
-        self.data_collector = DataCollector()
+        
+        # State management
         self.state = {
             "ac": {"temperature": 0.0, "humidity": 0.0, "ac_state": "off",
                    "ac_temp_setting": 24, "last_update": 0},
@@ -41,76 +57,318 @@ class SmartRoomController:
             "camera": {"person_count": 0, "occupancy": False,
                        "inference_ms": 0, "last_update": 0}
         }
-        self.last_ac_result = {}
-        self.last_lamp_result = {}
+        
+        # NEW: GA & PSO instances
+        self.ga = GeneticAlgorithm(
+            population_size=20,
+            generations=50,
+            mutation_rate=0.1,
+            crossover_rate=0.7
+        )
+        self.pso = ParticleSwarmOptimization(
+            swarm_size=30,
+            iterations=100,
+            w=0.7,
+            c1=1.5,
+            c2=1.5
+        )
+        
+        # MQTT Client (NEW simplified version)
+        self.mqtt_client = mqtt.Client(client_id="SmartRoomController")
+        self.mqtt_client.on_connect = self._on_mqtt_connect
+        self.mqtt_client.on_message = self._on_mqtt_message
+        self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
+        
+        # IR Codes
+        self.ir_codes = {}
+        self._load_ir_codes()
+        
+        # Runtime flags
         self.running = False
         self.optimization_enabled = True
         self.camera_enabled = True
         self.target_mode = "work"
-        self.ir_codes = {}
-        self._load_ir_codes()
+        self.use_algorithm = "both"  # NEW: 'ga', 'pso', 'both'
+        
+        # Statistics
         self.stats = {
-            "start_time": 0, "optimization_count": 0,
-            "ac_commands_sent": 0, "lamp_commands_sent": 0, "errors": 0
+            "start_time": 0,
+            "optimization_count": 0,
+            "ga_wins": 0,
+            "pso_wins": 0,
+            "ties": 0,
+            "ac_commands_sent": 0,
+            "lamp_commands_sent": 0,
+            "errors": 0
         }
+        
+        # OLD services (if available)
+        if HAS_OLD_SERVICES:
+            try:
+                self.mqtt_handler = MQTTHandler(client_id="MainController")
+                self.data_collector = DataCollector()
+                self.camera = PersonDetector(mqtt_handler=self.mqtt_handler)
+                self.old_services_active = True
+            except Exception as e:
+                logger.warning(f"Could not initialize old services: {e}")
+                self.old_services_active = False
+        else:
+            self.old_services_active = False
+        
         logger.info("Smart Room Controller initialized!")
-
+    
+    # ==================== MQTT HANDLERS ====================
+    def _on_mqtt_connect(self, client, userdata, flags, rc):
+        """Handle MQTT connection"""
+        if rc == 0:
+            logger.info("✅ Connected to MQTT broker")
+            
+            # Subscribe to topics
+            topics = [
+                "smartroom/ac/sensors",
+                "smartroom/lamp/sensors",
+                "smartroom/camera/detection",
+                "smartroom/ac/status",
+                "smartroom/lamp/status",
+                "smartroom/ac/ir_learned",
+                "smartroom/dashboard/command"
+            ]
+            
+            for topic in topics:
+                client.subscribe(topic)
+                logger.info(f"   Subscribed: {topic}")
+        else:
+            logger.error(f"❌ MQTT connection failed (RC: {rc})")
+    
+    def _on_mqtt_message(self, client, userdata, msg):
+        """Handle incoming MQTT messages"""
+        try:
+            topic = msg.topic
+            payload = json.loads(msg.payload.decode())
+            
+            # Update sensor data for fitness calculation
+            if 'ac/sensors' in topic:
+                self.state["ac"]["temperature"] = payload.get("temperature", 0)
+                self.state["ac"]["humidity"] = payload.get("humidity", 0)
+                self.state["ac"]["ac_state"] = payload.get("ac_state", "unknown")
+                self.state["ac"]["ac_temp_setting"] = payload.get("ac_temp_setting", 0)
+                self.state["ac"]["last_update"] = time.time()
+                
+                # Update fitness module
+                update_sensor_data(
+                    temperature=payload.get('temperature'),
+                    humidity=payload.get('humidity')
+                )
+            
+            elif 'lamp/sensors' in topic:
+                self.state["lamp"]["lux"] = payload.get("lux", 0)
+                self.state["lamp"]["occupancy"] = payload.get("occupancy", False)
+                self.state["lamp"]["brightness"] = payload.get("current_brightness", 0)
+                self.state["lamp"]["last_update"] = time.time()
+                
+                # Update fitness module
+                update_sensor_data(lux=payload.get('lux'))
+            
+            elif 'camera/detection' in topic:
+                self.state["camera"]["person_count"] = payload.get("person_count", 0)
+                self.state["camera"]["occupancy"] = payload.get("occupancy", False)
+                self.state["camera"]["inference_ms"] = payload.get("inference_ms", 0)
+                self.state["camera"]["last_update"] = time.time()
+                
+                # Update fitness module
+                update_sensor_data(
+                    person_detected=payload.get("person_detected", False)
+                )
+            
+            elif 'ac/status' in topic:
+                logger.info(f"[AC Status] {payload}")
+                if payload.get("status") == "sent":
+                    self.stats["ac_commands_sent"] += 1
+            
+            elif 'lamp/status' in topic:
+                logger.info(f"[Lamp Status] {payload}")
+                self.stats["lamp_commands_sent"] += 1
+            
+            elif 'ir_learned' in topic:
+                self._handle_ir_learned(payload)
+            
+            elif 'dashboard/command' in topic:
+                self._handle_dashboard_command(payload)
+        
+        except Exception as e:
+            logger.error(f"Error processing MQTT message: {e}")
+    
+    def _on_mqtt_disconnect(self, client, userdata, rc):
+        """Handle MQTT disconnection"""
+        if rc != 0:
+            logger.warning(f"Unexpected MQTT disconnection (RC: {rc})")
+        else:
+            logger.info("MQTT disconnected cleanly")
+    
+    # ==================== OPTIMIZATION LOGIC ====================
+    def _run_optimization(self):
+        """Run GA/PSO optimization based on current settings"""
+        try:
+            logger.info("=" * 70)
+            logger.info("🤖 STARTING OPTIMIZATION CYCLE")
+            logger.info("=" * 70)
+            
+            # Get current conditions
+            conditions = get_current_conditions()
+            logger.info(f"📊 Conditions: {conditions['temperature']}°C, "
+                       f"{conditions['humidity']}%, {conditions['lux']}lux, "
+                       f"Person: {conditions['person_detected']}")
+            
+            ga_solution, ga_fitness = None, 0
+            pso_solution, pso_fitness = None, 0
+            
+            # Run selected algorithm(s)
+            if self.use_algorithm in ['ga', 'both']:
+                logger.info("\n🧬 Running Genetic Algorithm...")
+                ga_solution, ga_fitness = self.ga.optimize(verbose=False)
+                logger.info(f"   GA Result: Temp={ga_solution[0]}°C, Fan={ga_solution[1]}, "
+                          f"Brightness={ga_solution[2]}%, Fitness={ga_fitness:.2f}")
+            
+            if self.use_algorithm in ['pso', 'both']:
+                logger.info("\n🐦 Running Particle Swarm Optimization...")
+                pso_solution, pso_fitness = self.pso.optimize(verbose=False, adaptive_inertia=True)
+                logger.info(f"   PSO Result: Temp={pso_solution[0]}°C, Fan={pso_solution[1]}, "
+                          f"Brightness={pso_solution[2]}%, Fitness={pso_fitness:.2f}")
+            
+            # Determine best solution
+            if self.use_algorithm == 'ga':
+                best_solution = ga_solution
+                best_fitness = ga_fitness
+                winner = 'GA'
+            elif self.use_algorithm == 'pso':
+                best_solution = pso_solution
+                best_fitness = pso_fitness
+                winner = 'PSO'
+            else:  # both - compare
+                if ga_fitness > pso_fitness:
+                    best_solution = ga_solution
+                    best_fitness = ga_fitness
+                    winner = 'GA'
+                    self.stats['ga_wins'] += 1
+                    logger.info(f"\n🏆 Winner: GA (Fitness: {ga_fitness:.2f} > {pso_fitness:.2f})")
+                elif pso_fitness > ga_fitness:
+                    best_solution = pso_solution
+                    best_fitness = pso_fitness
+                    winner = 'PSO'
+                    self.stats['pso_wins'] += 1
+                    logger.info(f"\n🏆 Winner: PSO (Fitness: {pso_fitness:.2f} > {ga_fitness:.2f})")
+                else:
+                    best_solution = ga_solution  # Use either
+                    best_fitness = ga_fitness
+                    winner = 'TIE'
+                    self.stats['ties'] += 1
+                    logger.info(f"\n🤝 Tie: Both achieved {ga_fitness:.2f}")
+            
+            # Apply best solution
+            self._apply_optimization_result(best_solution, winner, best_fitness)
+            
+            self.stats['optimization_count'] += 1
+            logger.info("=" * 70 + "\n")
+            
+        except Exception as e:
+            logger.error(f"Optimization error: {e}", exc_info=True)
+            self.stats['errors'] += 1
+    
+    def _apply_optimization_result(self, solution, algorithm, fitness):
+        """Apply optimization results to devices"""
+        temp, fan, brightness = solution
+        
+        logger.info(f"\n📤 Applying {algorithm} solution:")
+        logger.info(f"   AC: {temp}°C, Fan: {fan}")
+        logger.info(f"   Lamp: {brightness}%")
+        logger.info(f"   Fitness: {fitness:.2f}")
+        
+        # Send AC control
+        ac_command = {
+            'temperature': int(temp),
+            'fan_speed': int(fan),
+            'action': 'set_temp'
+        }
+        
+        result = self.mqtt_client.publish('smartroom/ac/control', json.dumps(ac_command))
+        if result.rc == 0:
+            logger.info(f"   ✅ AC command sent")
+            self.stats['ac_commands_sent'] += 1
+        else:
+            logger.error(f"   ❌ AC command failed")
+        
+        # Send Lamp control
+        lamp_command = {
+            'brightness': int(brightness),
+            'action': 'set_brightness'
+        }
+        
+        result = self.mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_command))
+        if result.rc == 0:
+            logger.info(f"   ✅ Lamp command sent")
+            self.stats['lamp_commands_sent'] += 1
+        else:
+            logger.error(f"   ❌ Lamp command failed")
+        
+        # Update dashboard
+        dashboard_update = {
+            'ga_fitness': fitness if algorithm == 'GA' else 0,
+            'pso_fitness': fitness if algorithm == 'PSO' else 0,
+            'winner': algorithm,
+            'optimization_count': self.stats['optimization_count'],
+            'optimized_settings': {
+                'temperature': int(temp),
+                'fan_speed': int(fan),
+                'brightness': int(brightness)
+            },
+            'stats': self.stats
+        }
+        
+        self.mqtt_client.publish('smartroom/dashboard/state', json.dumps(dashboard_update), retain=True)
+    
+    def _optimization_loop(self):
+        """Continuous optimization loop"""
+        logger.info(f"Optimization loop started (interval={OPTIMIZATION_INTERVAL}s)")
+        time.sleep(10)  # Wait for initial sensor data
+        
+        while self.running:
+            if not self.optimization_enabled:
+                time.sleep(OPTIMIZATION_INTERVAL)
+                continue
+            
+            # Check if sensor data is fresh
+            ac_fresh = (time.time() - self.state["ac"]["last_update"]) < 60
+            lamp_fresh = (time.time() - self.state["lamp"]["last_update"]) < 60
+            
+            if ac_fresh and lamp_fresh:
+                self._run_optimization()
+            else:
+                logger.warning("⚠️  Sensor data too old, skipping optimization")
+            
+            time.sleep(OPTIMIZATION_INTERVAL)
+    
+    # ==================== IR & DASHBOARD HANDLERS ====================
     def _load_ir_codes(self):
+        """Load IR codes from file"""
         try:
             if os.path.exists(IR_CODES_FILE):
                 with open(IR_CODES_FILE, 'r') as f:
                     self.ir_codes = json.load(f)
-                logger.info("IR codes loaded")
+                logger.info(f"IR codes loaded: {len(self.ir_codes)} codes")
         except Exception as e:
             logger.error(f"Failed to load IR codes: {e}")
-
+    
     def _save_ir_codes(self):
+        """Save IR codes to file"""
         try:
             os.makedirs(os.path.dirname(IR_CODES_FILE), exist_ok=True)
             with open(IR_CODES_FILE, 'w') as f:
                 json.dump(self.ir_codes, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save IR codes: {e}")
-
-    def _setup_mqtt_callbacks(self):
-        self.mqtt_handler.register_callback("smartroom/ac/sensors", self._on_ac_sensors)
-        self.mqtt_handler.register_callback("smartroom/lamp/sensors", self._on_lamp_sensors)
-        self.mqtt_handler.register_callback("smartroom/camera/detection", self._on_camera_detection)
-        self.mqtt_handler.register_callback("smartroom/ac/status", self._on_ac_status)
-        self.mqtt_handler.register_callback("smartroom/lamp/status", self._on_lamp_status)
-        self.mqtt_handler.register_callback("smartroom/ac/ir_learned", self._on_ir_learned)
-        self.mqtt_handler.register_callback("smartroom/dashboard/command", self._on_dashboard_command)
-        logger.info("MQTT callbacks registered")
-
-    def _on_ac_sensors(self, topic, data):
-        self.state["ac"]["temperature"] = data.get("temperature", 0)
-        self.state["ac"]["humidity"] = data.get("humidity", 0)
-        self.state["ac"]["ac_state"] = data.get("ac_state", "unknown")
-        self.state["ac"]["ac_temp_setting"] = data.get("ac_temp_setting", 0)
-        self.state["ac"]["last_update"] = time.time()
-
-    def _on_lamp_sensors(self, topic, data):
-        self.state["lamp"]["lux"] = data.get("lux", 0)
-        self.state["lamp"]["occupancy"] = data.get("occupancy", False)
-        self.state["lamp"]["brightness"] = data.get("current_brightness", 0)
-        self.state["lamp"]["last_update"] = time.time()
-
-    def _on_camera_detection(self, topic, data):
-        self.state["camera"]["person_count"] = data.get("person_count", 0)
-        self.state["camera"]["occupancy"] = data.get("occupancy", False)
-        self.state["camera"]["inference_ms"] = data.get("inference_ms", 0)
-        self.state["camera"]["last_update"] = time.time()
-
-    def _on_ac_status(self, topic, data):
-        logger.info(f"[AC Status] {data}")
-        if data.get("status") == "sent":
-            self.stats["ac_commands_sent"] += 1
-
-    def _on_lamp_status(self, topic, data):
-        logger.info(f"[Lamp Status] {data}")
-        self.stats["lamp_commands_sent"] += 1
-
-    def _on_ir_learned(self, topic, data):
+    
+    def _handle_ir_learned(self, data):
+        """Handle IR learned event"""
         target = data.get("target", "unknown")
         if data.get("status") == "learned":
             self.ir_codes[target] = {
@@ -122,156 +380,111 @@ class SmartRoomController:
             }
             self._save_ir_codes()
             logger.info(f"[IR] Code saved for: {target}")
-
-    def _on_dashboard_command(self, topic, data):
+    
+    def _handle_dashboard_command(self, data):
+        """Handle dashboard commands"""
         command = data.get("command", "")
+        
         if command == "set_mode":
             self.target_mode = data.get("mode", "work")
             logger.info(f"Mode changed to: {self.target_mode}")
+        
         elif command == "toggle_optimization":
             self.optimization_enabled = not self.optimization_enabled
             logger.info(f"Optimization: {self.optimization_enabled}")
+        
+        elif command == "set_algorithm":
+            # NEW: Change algorithm
+            self.use_algorithm = data.get("algorithm", "both")  # 'ga', 'pso', 'both'
+            logger.info(f"Algorithm changed to: {self.use_algorithm}")
+        
+        elif command == "manual_optimize":
+            # NEW: Manual trigger optimization
+            logger.info("Manual optimization triggered")
+            threading.Thread(target=self._run_optimization, daemon=True).start()
+        
         elif command == "manual_ac":
             action = data.get("action", "")
             if action == "set_temp":
-                self.mqtt_handler.publish_ac_control("set_temp",
-                    temperature=data.get("temperature", 24))
+                self.mqtt_client.publish("smartroom/ac/control",
+                    json.dumps({"action": "set_temp", "temperature": data.get("temperature", 24)}))
             elif action in ("turn_off", "turn_on"):
-                self.mqtt_handler.publish_ac_control(action)
+                self.mqtt_client.publish("smartroom/ac/control",
+                    json.dumps({"action": action}))
+        
         elif command == "manual_lamp":
-            self.mqtt_handler.publish_lamp_control(
-                brightness=data.get("brightness", 0))
+            self.mqtt_client.publish("smartroom/lamp/control",
+                json.dumps({"brightness": data.get("brightness", 0)}))
+        
         elif command == "ir_learn":
-            self.mqtt_handler.publish_ir_learn_command(data.get("target", ""))
-
-    def _optimization_loop(self):
-        logger.info(f"Optimization loop started (interval={OPTIMIZATION_INTERVAL}s)")
-        time.sleep(10)
-        while self.running:
-            if not self.optimization_enabled:
-                time.sleep(OPTIMIZATION_INTERVAL)
-                continue
-            try:
-                occupancy = (self.state["camera"]["occupancy"] or
-                             self.state["lamp"]["occupancy"])
-                person_count = self.state["camera"]["person_count"]
-                ac_fresh = (time.time() - self.state["ac"]["last_update"]) < 60
-                lamp_fresh = (time.time() - self.state["lamp"]["last_update"]) < 60
-
-                logger.info("=" * 40)
-                logger.info("Running ML Optimization...")
-                logger.info(f"  Occupancy: {occupancy} | Persons: {person_count}")
-
-                if ac_fresh:
-                    ac_result = self.ac_optimizer.optimize(
-                        self.state["ac"]["temperature"],
-                        self.state["ac"]["humidity"],
-                        occupancy, max(person_count, 1)
-                    )
-                    self.last_ac_result = ac_result
-                    self.ac_optimizer.publish_control(ac_result, self.mqtt_handler.client)
-                    logger.info(f"  [AC] Temp:{ac_result['ac_temperature']}C "
-                                f"On:{ac_result['should_turn_on']}")
-                else:
-                    logger.warning("  [AC] Sensor data stale, skipping")
-
-                if lamp_fresh:
-                    lamp_result = self.lamp_optimizer.optimize(
-                        self.state["lamp"]["lux"], occupancy, self.target_mode
-                    )
-                    self.last_lamp_result = lamp_result
-                    self.lamp_optimizer.publish_control(lamp_result, self.mqtt_handler.client)
-                    logger.info(f"  [Lamp] Brightness:{lamp_result['brightness']} "
-                                f"On:{lamp_result['should_turn_on']}")
-                else:
-                    logger.warning("  [Lamp] Sensor data stale, skipping")
-
-                self.stats["optimization_count"] += 1
-                self._publish_full_status()
-                logger.info("=" * 40)
-
-            except Exception as e:
-                logger.error(f"Optimization error: {e}", exc_info=True)
-                self.stats["errors"] += 1
-            time.sleep(OPTIMIZATION_INTERVAL)
-
-    def _publish_full_status(self):
-        try:
-            uptime = time.time() - self.stats["start_time"]
-            h = int(uptime // 3600)
-            m = int((uptime % 3600) // 60)
-            s = int(uptime % 60)
-            payload = {
-                "state": self.state,
-                "ac_optimization": self.last_ac_result,
-                "lamp_optimization": self.last_lamp_result,
-                "settings": {
-                    "mode": self.target_mode,
-                    "optimization_enabled": self.optimization_enabled,
-                    "camera_enabled": self.camera_enabled
-                },
-                "stats": {
-                    "uptime": f"{h}h {m}m {s}s",
-                    "optimization_count": self.stats["optimization_count"],
-                    "ac_commands_sent": self.stats["ac_commands_sent"],
-                    "lamp_commands_sent": self.stats["lamp_commands_sent"],
-                    "errors": self.stats["errors"]
-                },
-                "timestamp": time.time()
-            }
-            self.mqtt_handler.publish("smartroom/dashboard/state", payload, retain=True)
-        except Exception as e:
-            logger.error(f"Failed to publish status: {e}")
-
+            self.mqtt_client.publish("smartroom/ir/learn",
+                json.dumps({"target": data.get("target", "")}))
+    
+    # ==================== START/STOP ====================
     def start(self):
-        print()
-        print("=" * 50)
-        print("  SMART ROOM CONTROLLER")
-        print("  Adaptive AC (GA) + Adaptive Lamp (PSO)")
-        print("  Raspberry Pi 5 Server")
-        print("=" * 50)
-        print()
+        """Start the Smart Room Controller"""
+        print("\n" + "=" * 70)
+        print("  🏠 SMART ROOM CONTROLLER")
+        print("  Genetic Algorithm + Particle Swarm Optimization")
+        print("  Raspberry Pi Production System")
+        print("=" * 70 + "\n")
+        
         self.running = True
         self.stats["start_time"] = time.time()
-
-        logger.info("[1/5] Starting MQTT Handler...")
-        self._setup_mqtt_callbacks()
-        if not self.mqtt_handler.start():
-            logger.error("Cannot connect to MQTT broker!")
-            logger.error("Run: sudo systemctl start mosquitto")
-            return False
-        time.sleep(1)
-
-        logger.info("[2/5] Starting Data Collector...")
+        
+        # Start MQTT
+        logger.info("[1/5] Starting MQTT Client...")
         try:
-            self.data_collector.start()
+            self.mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            self.mqtt_client.loop_start()
+            logger.info("   ✅ MQTT client started")
+            time.sleep(2)
         except Exception as e:
-            logger.warning(f"Data Collector failed: {e}")
-
-        if self.camera_enabled:
-            logger.info("[3/5] Starting Person Detector...")
+            logger.error(f"   ❌ MQTT connection error: {e}")
+            return False
+        
+        # Start old services (if available)
+        if self.old_services_active:
+            logger.info("[2/5] Starting Data Collector...")
             try:
-                if not self.camera.start_continuous(interval=5):
-                    logger.warning("Camera failed, continuing without it")
-                    self.camera_enabled = False
+                self.data_collector.start()
+                logger.info("   ✅ Data Collector started")
             except Exception as e:
-                logger.warning(f"Camera error: {e}")
-                self.camera_enabled = False
+                logger.warning(f"   ⚠️  Data Collector failed: {e}")
+            
+            if self.camera_enabled:
+                logger.info("[3/5] Starting Person Detector...")
+                try:
+                    if not self.camera.start_continuous(interval=5):
+                        logger.warning("   ⚠️  Camera failed")
+                        self.camera_enabled = False
+                except Exception as e:
+                    logger.warning(f"   ⚠️  Camera error: {e}")
+                    self.camera_enabled = False
+            else:
+                logger.info("[3/5] Camera disabled")
         else:
-            logger.info("[3/5] Camera disabled")
-
+            logger.info("[2/5] Old services not available, using simplified mode")
+            logger.info("[3/5] Camera not available")
+        
+        # Start optimization loop
         logger.info("[4/5] Starting Optimization Loop...")
         opt_thread = threading.Thread(target=self._optimization_loop, daemon=True)
         opt_thread.start()
-
-        logger.info("[5/5] System ready!")
-        self.mqtt_handler.publish("smartroom/server/status",
-                                  {"status": "online", "timestamp": time.time()},
-                                  retain=True)
+        logger.info("   ✅ Optimization loop started")
+        
+        # Publish online status
+        logger.info("[5/5] System Ready!")
+        self.mqtt_client.publish("smartroom/server/status",
+                                json.dumps({"status": "online", "timestamp": time.time()}),
+                                retain=True)
+        
         print()
-        logger.info("All services started. Press Ctrl+C to stop.")
+        logger.info("🚀 All services started! Press Ctrl+C to stop.")
+        logger.info(f"📊 Algorithm mode: {self.use_algorithm.upper()}")
         print()
-
+        
+        # Main loop
         try:
             last_status = time.time()
             while self.running:
@@ -283,55 +496,74 @@ class SmartRoomController:
             print()
             logger.info("Shutting down...")
             self.stop()
+        
         return True
-
+    
     def stop(self):
+        """Stop the controller"""
         self.running = False
-        if self.camera_enabled:
+        
+        # Stop camera
+        if self.camera_enabled and self.old_services_active:
             try:
                 self.camera.stop()
             except:
                 pass
+        
+        # Publish offline status
         try:
-            self.mqtt_handler.publish("smartroom/server/status",
-                                      {"status": "offline", "timestamp": time.time()},
-                                      retain=True)
+            self.mqtt_client.publish("smartroom/server/status",
+                                    json.dumps({"status": "offline", "timestamp": time.time()}),
+                                    retain=True)
         except:
             pass
+        
+        # Stop MQTT
         try:
-            self.mqtt_handler.stop()
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
         except:
             pass
+        
+        # Print statistics
         uptime = time.time() - self.stats["start_time"]
         h = int(uptime // 3600)
         m = int((uptime % 3600) // 60)
-        print()
-        print("=" * 40)
+        
+        print("\n" + "=" * 70)
+        print("  📊 SESSION STATISTICS")
+        print("=" * 70)
         print(f"  Uptime: {h}h {m}m")
         print(f"  Optimizations: {self.stats['optimization_count']}")
-        print(f"  AC commands: {self.stats['ac_commands_sent']}")
-        print(f"  Lamp commands: {self.stats['lamp_commands_sent']}")
+        print(f"  GA Wins: {self.stats['ga_wins']}")
+        print(f"  PSO Wins: {self.stats['pso_wins']}")
+        print(f"  Ties: {self.stats['ties']}")
+        print(f"  AC Commands: {self.stats['ac_commands_sent']}")
+        print(f"  Lamp Commands: {self.stats['lamp_commands_sent']}")
         print(f"  Errors: {self.stats['errors']}")
-        print("=" * 40)
-        print()
+        print("=" * 70 + "\n")
+        
         logger.info("Goodbye!")
-
+    
     def _print_status(self):
+        """Print periodic status"""
         ac = self.state["ac"]
         lamp = self.state["lamp"]
         cam = self.state["camera"]
-        logger.info(cd ~/smartroom/dashboard
-source ~/smartroom/venv/bin/activate
-python app.py
-            f"STATUS | AC: {ac['temperature']:.1f}C {ac['humidity']:.1f}% "
-            f"| Lamp: {lamp['lux']:.0f}lux br={lamp['brightness']} "
+        
+        logger.info(
+            f"STATUS | AC: {ac['temperature']:.1f}°C {ac['humidity']:.1f}% "
+            f"| Lamp: {lamp['lux']:.0f}lux {lamp['brightness']}% "
             f"| Cam: {cam['person_count']}ppl "
-            f"| Opts: {self.stats['optimization_count']}"
+            f"| Opts: {self.stats['optimization_count']} "
+            f"| GA:{self.stats['ga_wins']} PSO:{self.stats['pso_wins']} TIE:{self.stats['ties']}"
         )
 
 
+# ==================== MAIN ====================
 if __name__ == "__main__":
     import argparse
+    
     parser = argparse.ArgumentParser(description="Smart Room Controller")
     parser.add_argument("--no-camera", action="store_true",
                         help="Start without camera")
@@ -339,17 +571,22 @@ if __name__ == "__main__":
                         help="Start without ML optimization")
     parser.add_argument("--mode", choices=["work", "relax", "sleep"],
                         default="work", help="Lighting mode")
-    parser.add_argument("--broker", type=str, default=None,
+    parser.add_argument("--algorithm", choices=["ga", "pso", "both"],
+                        default="both", help="Optimization algorithm to use")
+    parser.add_argument("--broker", type=str, default="localhost",
                         help="MQTT broker address")
+    
     args = parser.parse_args()
-
+    
     controller = SmartRoomController()
+    
     if args.no_camera:
         controller.camera_enabled = False
     if args.no_optimize:
         controller.optimization_enabled = False
     if args.mode:
         controller.target_mode = args.mode
-    if args.broker:
-        controller.mqtt_handler.broker = args.broker
+    if args.algorithm:
+        controller.use_algorithm = args.algorithm
+    
     controller.start()
