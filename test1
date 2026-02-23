@@ -552,12 +552,14 @@ def on_message(client, userdata, msg):
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
             
-        elif 'dashboard/state' in topic:
+        elif 'dashboard/state' in topic or 'optimization/stats' in topic:
+            # Update from optimization algorithm (GA/PSO)
             mqtt_data['system'].update({
-                'ga_fitness': payload.get('ga_best_fitness', 0),
-                'pso_fitness': payload.get('pso_best_fitness', 0),
-                'optimization_runs': payload.get('optimization_count', 0)
+                'ga_fitness': payload.get('ga_best_fitness', payload.get('ga_fitness', 0)),
+                'pso_fitness': payload.get('pso_best_fitness', payload.get('pso_fitness', 0)),
+                'optimization_runs': payload.get('optimization_count', payload.get('runs', 0))
             })
+            print(f"📊 Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         elif 'ac/mode' in topic:
@@ -847,6 +849,29 @@ def set_lamp_mode():
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Lamp Mode: {mode}', 'level': 'info'})
         return jsonify({'status': 'success', 'mode': mode})
     except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/optimization/update', methods=['POST'])
+def update_optimization():
+    """Receive optimization data from main.py GA/PSO algorithm"""
+    try:
+        data = request.json
+        
+        # Update system data
+        mqtt_data['system'].update({
+            'ga_fitness': data.get('ga_fitness', 0),
+            'pso_fitness': data.get('pso_fitness', 0),
+            'optimization_runs': data.get('runs', 0)
+        })
+        
+        # Broadcast to all connected clients
+        socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+        
+        print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f}, PSO={data.get('pso_fitness', 0):.2f}")
+        
+        return jsonify({'status': 'success', 'message': 'Optimization data updated'})
+    except Exception as e:
+        print(f"❌ Optimization update error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/learn', methods=['POST'])
@@ -2732,9 +2757,24 @@ HTML_TEMPLATE = '''
             fetch('/api/data')
                 .then(r => r.json())
                 .then(data => {
-                    document.getElementById('dash-temp').textContent = data.ac.temperature.toFixed(1);
+                    const temperature = data.ac.temperature;
+                    document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
-                    document.getElementById('dash-ac-state').textContent = data.ac.ac_state;
+                    
+                    // AC State Logic: < 30°C = ON, >= 30°C = OFF
+                    const acStateEl = document.getElementById('dash-ac-state');
+                    let acState = data.ac.ac_state;
+                    
+                    // Override AC state based on temperature logic
+                    if (temperature < 30) {
+                        acState = 'ON';
+                        acStateEl.style.color = '#10b981'; // Green
+                    } else {
+                        acState = 'OFF';
+                        acStateEl.style.color = '#ef4444'; // Red
+                    }
+                    
+                    acStateEl.textContent = acState;
                     document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp;
                     
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
@@ -2768,11 +2808,27 @@ HTML_TEMPLATE = '''
                         showDetectionAlert(personCount, confidence);
                     }
                     
-                    document.getElementById('ga-fitness').textContent = (data.system.ga_fitness || 0).toFixed ? (data.system.ga_fitness || 0).toFixed(2) : (data.system.ga_fitness || 0);
-                    document.getElementById('pso-fitness').textContent = (data.system.pso_fitness || 0).toFixed ? (data.system.pso_fitness || 0).toFixed(2) : (data.system.pso_fitness || 0);
+                    // Update GA/PSO Fitness (from optimization algorithm)
+                    const gaFitness = parseFloat(data.system.ga_fitness) || 0;
+                    const psoFitness = parseFloat(data.system.pso_fitness) || 0;
                     
+                    const gaEl = document.getElementById('ga-fitness');
+                    const psoEl = document.getElementById('pso-fitness');
+                    
+                    if (gaEl) {
+                        gaEl.textContent = gaFitness.toFixed(2);
+                        gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    if (psoEl) {
+                        psoEl.textContent = psoFitness.toFixed(2);
+                        psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    
+                    // Calculate AC power based on temperature logic
                     let acPower = 0;
-                    if (data.ac.ac_state === 'ON') {
+                    const actualACState = temperature < 30 ? 'ON' : 'OFF';
+                    
+                    if (actualACState === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
                     }
                     let lampPower = (data.lamp.brightness / 255) * 10;
@@ -2836,6 +2892,45 @@ HTML_TEMPLATE = '''
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(data.data.brightness / 255 * 100));
                     charts.lampBright.update();
+                }
+            }
+            
+            // Real-time optimization (GA/PSO) updates
+            if (data.type === 'system') {
+                const gaFitness = parseFloat(data.data.ga_fitness) || 0;
+                const psoFitness = parseFloat(data.data.pso_fitness) || 0;
+                const runs = data.data.optimization_runs || 0;
+                
+                const gaEl = document.getElementById('ga-fitness');
+                const psoEl = document.getElementById('pso-fitness');
+                
+                if (gaEl) {
+                    gaEl.textContent = gaFitness.toFixed(2);
+                    gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
+                    if (gaFitness > 0) {
+                        gaEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    }
+                }
+                
+                if (psoEl) {
+                    psoEl.textContent = psoFitness.toFixed(2);
+                    psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                    if (psoFitness > 0) {
+                        psoEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    }
+                }
+                
+                console.log('📊 Optimization Update:', {
+                    ga: gaFitness.toFixed(2),
+                    pso: psoFitness.toFixed(2),
+                    runs: runs
+                });
+                
+                // Show toast for significant fitness updates
+                if (gaFitness > 0 || psoFitness > 0) {
+                    const winner = gaFitness > psoFitness ? 'GA' : 'PSO';
+                    const winnerFitness = Math.max(gaFitness, psoFitness);
+                    showToast(`${winner} Optimization: ${winnerFitness.toFixed(2)}`, 'success');
                 }
             }
             
