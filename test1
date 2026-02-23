@@ -2151,10 +2151,55 @@ HTML_TEMPLATE = '''
 
             <div class="control-panel">
                 <div class="control-title">
-                    <span>IR Remote Learning</span>
-                    <button class="btn btn-warning btn-sm" onclick="loadIRCodes()">
-                        <i class="fas fa-sync"></i> Refresh
-                    </button>
+                    <span><i class="fas fa-satellite-dish"></i> IR Remote Learning - AC Mitsubishi</span>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-success btn-sm" onclick="saveAllIRCodes()">
+                            <i class="fas fa-save"></i> Save
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="resetAllIRCodes()">
+                            <i class="fas fa-trash-alt"></i> Reset
+                        </button>
+                        <button class="btn btn-warning btn-sm" onclick="loadIRCodes()">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="control-group" style="background: rgba(239, 68, 68, 0.1); padding: 15px; border-radius: 8px; border: 1px solid #ef4444; margin-bottom: 20px;">
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                        <i class="fas fa-exclamation-triangle" style="color: #ef4444; font-size: 20px;"></i>
+                        <strong style="color: #ef4444;">AC Mitsubishi Troubleshooting</strong>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                        <p><strong>Jika AC tidak merespon:</strong></p>
+                        <ol style="margin: 10px 0; padding-left: 20px;">
+                            <li>Pilih protokol "MITSUBISHI AC" atau "RAW" di bawah</li>
+                            <li>Pastikan IR LED <strong style="color: #ef4444;">menyala merah</strong> saat kirim</li>
+                            <li>Arahkan IR ke AC (jarak 1-3 meter, langsung ke sensor AC)</li>
+                            <li>Tekan remote <strong>2-3 detik</strong> saat learning</li>
+                            <li>Test pakai tombol POWER terlebih dahulu</li>
+                            <li>Jika gagal, coba protokol RAW (lebih universal)</li>
+                        </ol>
+                        <p><strong>IR Transmitter Status:</strong> <span id="ir-tx-status" style="color: #10b981;">✓ Ready</span></p>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label class="control-label">
+                        <i class="fas fa-microchip"></i> IR Protocol Override
+                    </label>
+                    <select id="ir-protocol-selector" class="slider" style="height: 40px; padding: 8px; cursor: pointer; background: var(--bg-card); color: var(--text-primary);">
+                        <option value=\"AUTO\">AUTO (Detect from Remote)</option>
+                        <option value=\"MITSUBISHI_AC\">MITSUBISHI AC ⭐ Recommended</option>
+                        <option value=\"MITSUBISHI_HEAVY\">MITSUBISHI HEAVY</option>
+                        <option value=\"RAW\" selected>RAW (Universal - Use This!)</option>
+                        <option value=\"NEC\">NEC</option>
+                        <option value=\"SAMSUNG\">SAMSUNG</option>
+                        <option value=\"LG\">LG</option>
+                    </select>
+                    <div style="font-size: 12px; color: var(--warning); margin-top: 5px;">
+                        💡 Untuk AC Mitsubishi yang tidak merespon, gunakan <strong>RAW</strong> mode
+                    </div>
                 </div>
                 
                 <div class="control-label">
@@ -2208,6 +2253,26 @@ HTML_TEMPLATE = '''
                         <button class="btn btn-warning btn-sm" onclick="learnIRCode('SWING')">Learn</button>
                         <button class="btn btn-primary btn-sm" onclick="sendIRCode('SWING')" style="margin-top: 5px;">Send</button>
                         <div class="ir-status" id="status-SWING">Not learned</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; padding: 15px; background: rgba(99, 102, 241, 0.1); border-radius: 8px; border: 1px solid var(--primary);">
+                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px;">
+                        <i class="fas fa-book"></i> IR Codes Summary
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">
+                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 6 buttons
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-primary btn-sm" onclick="exportIRCodes()">
+                            <i class="fas fa-download"></i> Export JSON
+                        </button>
+                        <button class="btn btn-warning btn-sm" onclick="showIRDebugInfo()">
+                            <i class="fas fa-bug"></i> Debug Info
+                        </button>
+                        <button class="btn btn-success btn-sm" onclick="testAllIRCodes()">
+                            <i class="fas fa-play"></i> Test All
+                        </button>
                     </div>
                 </div>
             </div>
@@ -2662,9 +2727,19 @@ HTML_TEMPLATE = '''
         function loadIRCodes() {
             fetch('/api/ir/codes')
                 .then(r => r.json())
-                .then(codes => {
-                    learnedCodes = codes;
-                    Object.keys(codes).forEach(buttonName => {
+                .then(data => {
+                    learnedCodes = data.codes || data;
+                    const codeCount = Object.keys(learnedCodes).length;
+                    
+                    // Update summary
+                    const summaryEl = document.getElementById('ir-total-learned');
+                    if (summaryEl) {
+                        summaryEl.textContent = codeCount;
+                        summaryEl.style.color = codeCount > 0 ? '#10b981' : '#ef4444';
+                    }
+                    
+                    // Update button status
+                    Object.keys(learnedCodes).forEach(buttonName => {
                         const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
                         const statusElement = document.getElementById('status-' + buttonName);
                         if (buttonElement && statusElement) {
@@ -2673,9 +2748,187 @@ HTML_TEMPLATE = '''
                             statusElement.style.color = '#10b981';
                         }
                     });
-                    showToast('IR codes loaded');
+                    
+                    if (codeCount > 0) {
+                        showToast(`IR codes loaded: ${codeCount} button(s)`, 'success');
+                    }
                 })
-                .catch(e => console.error('Error loading IR codes:', e));
+                .catch(e => {
+                    console.error('Error loading IR codes:', e);
+                    showToast('Error loading IR codes', 'error');
+                });
+        }
+
+        function resetAllIRCodes() {
+            if (!confirm('⚠️ Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
+                return;
+            }
+            
+            // Clear UI
+            const buttons = ['POWER', 'TEMP_UP', 'TEMP_DOWN', 'FAN', 'MODE', 'SWING'];
+            buttons.forEach(buttonName => {
+                const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
+                const statusElement = document.getElementById('status-' + buttonName);
+                
+                if (buttonElement) {
+                    buttonElement.classList.remove('learned');
+                }
+                if (statusElement) {
+                    statusElement.textContent = 'Not learned';
+                    statusElement.style.color = '#94a3b8';
+                }
+                
+                // Delete from server
+                fetch('/api/ir/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ button: buttonName })
+                }).catch(e => console.log('Delete error:', e));
+            });
+            
+            // Update summary
+            const summaryEl = document.getElementById('ir-total-learned');
+            if (summaryEl) {
+                summaryEl.textContent = '0';
+                summaryEl.style.color = '#ef4444';
+            }
+            
+            learnedCodes = {};
+            showToast('All IR codes reset!', 'success');
+        }
+
+        function saveAllIRCodes() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const count = Object.keys(codes).length;
+                    
+                    if (count === 0) {
+                        showToast('No IR codes to save yet', 'warning');
+                        return;
+                    }
+                    
+                    showToast(`${count} IR codes saved to server`, 'success');
+                    console.log('IR Codes saved:', codes);
+                })
+                .catch(e => showToast('Save error: ' + e, 'error'));
+        }
+
+        function exportIRCodes() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const count = Object.keys(codes).length;
+                    
+                    if (count === 0) {
+                        showToast('No IR codes to export', 'warning');
+                        return;
+                    }
+                    
+                    // Create JSON file and download
+                    const jsonStr = JSON.stringify(codes, null, 2);
+                    const blob = new Blob([jsonStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'ir_codes_' + new Date().toISOString().slice(0, 10) + '.json';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    showToast(`Exported ${count} IR codes`, 'success');
+                })
+                .catch(e => showToast('Export error: ' + e, 'error'));
+        }
+
+        function showIRDebugInfo() {
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    
+                    let debugInfo = '═══════════════════════════════════\\n';
+                    debugInfo += '  IR CODES DEBUG INFO\\n';
+                    debugInfo += '═══════════════════════════════════\\n\\n';
+                    
+                    if (Object.keys(codes).length === 0) {
+                        debugInfo += '⚠️ No IR codes learned yet\\n\\n';
+                        debugInfo += 'Steps to learn:\\n';
+                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
+                        debugInfo += '2. Click \"Learn\" button\\n';
+                        debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
+                        debugInfo += '4. Wait for \"Learned ✓\" status\\n';
+                        debugInfo += '5. Click \"Send\" to test\\n';
+                    } else {
+                        Object.keys(codes).forEach(button => {
+                            const codeStr = codes[button];
+                            const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
+                            debugInfo += `📡 ${button}:\\n`;
+                            debugInfo += `   Code: ${codePreview}\\n`;
+                            debugInfo += `   Length: ${codeStr.length} chars\\n`;
+                            
+                            // Parse protocol
+                            if (codeStr.includes(':')) {
+                                const protocol = codeStr.split(':')[0];
+                                debugInfo += `   Protocol: ${protocol}\\n`;
+                            }
+                            debugInfo += '\\n';
+                        });
+                        
+                        debugInfo += '═══════════════════════════════════\\n';
+                        debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
+                    }
+                    
+                    debugInfo += '\\n💡 TROUBLESHOOTING:\\n';
+                    debugInfo += '- If AC not responding: Use RAW protocol\\n';
+                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
+                    debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
+                    debugInfo += '- Distance to AC: 1-3 meters, direct line\\n';
+                    
+                    alert(debugInfo);
+                    console.log('IR Debug Info:', codes);
+                })
+                .catch(e => showToast('Debug error: ' + e, 'error'));
+        }
+
+        function testAllIRCodes() {
+            if (!confirm('Test all learned IR codes?\\n\\nThis will send all codes one by one with 2 second delay.')) {
+                return;
+            }
+            
+            fetch('/api/ir/codes')
+                .then(r => r.json())
+                .then(data => {
+                    const codes = data.codes || data;
+                    const buttons = Object.keys(codes);
+                    
+                    if (buttons.length === 0) {
+                        showToast('No codes to test', 'warning');
+                        return;
+                    }
+                    
+                    showToast(`Testing ${buttons.length} codes...`, 'info');
+                    
+                    let index = 0;
+                    const testInterval = setInterval(() => {
+                        if (index >= buttons.length) {
+                            clearInterval(testInterval);
+                            showToast('Test complete!', 'success');
+                            return;
+                        }
+                        
+                        const button = buttons[index];
+                        console.log(`Testing ${button}...`);
+                        sendIRCode(button);
+                        showToast(`Testing: ${button}`, 'info');
+                        
+                        index++;
+                    }, 2000); // 2 second delay between tests
+                })
+                .catch(e => showToast('Test error: ' + e, 'error'));
         }
 
         // ==================== DETECTION ALERT ====================
