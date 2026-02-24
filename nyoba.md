@@ -2164,29 +2164,23 @@ HTML_TEMPLATE = '''
                     <div class="mode-badge adaptive" id="ac-mode-badge" onclick="toggleACMode()">ADAPTIVE MODE</div>
                 </div>
                 
-                <div class="control-group">
-                    <label class="control-label">AC Power</label>
-                    <button class="btn btn-success" onclick="sendACCommand('ON')">
-                        <i class="fas fa-power-off"></i> Turn ON
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
+                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_ON')">
+                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
                     </button>
-                    <button class="btn btn-danger" onclick="sendACCommand('OFF')" style="margin-left: 10px;">
-                        <i class="fas fa-power-off"></i> Turn OFF
+                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_OFF')">
+                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
+                    </button>
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_UP')">
+                        <i class="fas fa-temperature-high" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP +
+                    </button>
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_DOWN')">
+                        <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
                     </button>
                 </div>
-
-                <div class="control-group">
-                    <label class="control-label">Target Temperature: <span id="ac-temp-display">24</span>°C</label>
-                    <input type="range" min="16" max="30" value="24" class="slider" id="ac-temp-slider" oninput="updateACTemp(this.value)">
+                <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
+                    <i class="fas fa-info-circle"></i> Tombol menggunakan kode IR yang sudah dipelajari. Pastikan sudah Learn di bawah.
                 </div>
-
-                <div class="control-group">
-                    <label class="control-label">Fan Speed: <span id="fan-speed-display">1</span></label>
-                    <input type="range" min="1" max="3" value="1" class="slider" id="fan-speed-slider" oninput="updateFanSpeed(this.value)">
-                </div>
-
-                <button class="btn btn-primary" onclick="applyACSettings()">
-                    <i class="fas fa-check"></i> Apply Settings
-                </button>
             </div>
 
             <div class="control-panel">
@@ -2217,7 +2211,7 @@ HTML_TEMPLATE = '''
                             <li>Pastikan IR LED <strong style="color: #ef4444;">menyala merah</strong> saat kirim</li>
                             <li>Arahkan IR ke AC (jarak 1-3 meter, langsung ke sensor AC)</li>
                             <li>Tekan remote <strong>2-3 detik</strong> saat learning</li>
-                            <li>Test pakai tombol POWER terlebih dahulu</li>
+                            <li>Test pakai tombol POWER ON / POWER OFF terlebih dahulu</li>
                             <li>Jika gagal, coba protokol RAW (lebih universal)</li>
                         </ol>
                         <p><strong>IR Transmitter Status:</strong> <span id="ir-tx-status" style="color: #10b981;">✓ Ready</span></p>
@@ -2247,17 +2241,25 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <div class="ir-button-grid" id="ir-button-grid">
-                    <div class="ir-button" data-button="POWER">
-                        <div class="ir-button-name">POWER</div>
-                        <div class="ir-button-icon"><i class="fas fa-power-off"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('POWER')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('POWER')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-POWER">Not learned</div>
+                    <div class="ir-button" data-button="POWER_ON">
+                        <div class="ir-button-name">POWER ON</div>
+                        <div class="ir-button-icon"><i class="fas fa-power-off" style="color: #10b981;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('POWER_ON')">Learn</button>
+                        <button class="btn btn-success btn-sm" onclick="sendIRCode('POWER_ON')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-POWER_ON">Not learned</div>
+                    </div>
+
+                    <div class="ir-button" data-button="POWER_OFF">
+                        <div class="ir-button-name">POWER OFF</div>
+                        <div class="ir-button-icon"><i class="fas fa-power-off" style="color: #ef4444;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('POWER_OFF')">Learn</button>
+                        <button class="btn btn-danger btn-sm" onclick="sendIRCode('POWER_OFF')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-POWER_OFF">Not learned</div>
                     </div>
 
                     <div class="ir-button" data-button="TEMP_UP">
                         <div class="ir-button-name">TEMP +</div>
-                        <div class="ir-button-icon"><i class="fas fa-plus"></i></div>
+                        <div class="ir-button-icon"><i class="fas fa-temperature-high"></i></div>
                         <button class="btn btn-warning btn-sm" onclick="learnIRCode('TEMP_UP')">Learn</button>
                         <button class="btn btn-primary btn-sm" onclick="sendIRCode('TEMP_UP')" style="margin-top: 5px;">Send</button>
                         <div class="ir-status" id="status-TEMP_UP">Not learned</div>
@@ -2265,34 +2267,10 @@ HTML_TEMPLATE = '''
 
                     <div class="ir-button" data-button="TEMP_DOWN">
                         <div class="ir-button-name">TEMP -</div>
-                        <div class="ir-button-icon"><i class="fas fa-minus"></i></div>
+                        <div class="ir-button-icon"><i class="fas fa-temperature-low"></i></div>
                         <button class="btn btn-warning btn-sm" onclick="learnIRCode('TEMP_DOWN')">Learn</button>
                         <button class="btn btn-primary btn-sm" onclick="sendIRCode('TEMP_DOWN')" style="margin-top: 5px;">Send</button>
                         <div class="ir-status" id="status-TEMP_DOWN">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="FAN">
-                        <div class="ir-button-name">FAN SPEED</div>
-                        <div class="ir-button-icon"><i class="fas fa-fan"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('FAN')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('FAN')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-FAN">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="MODE">
-                        <div class="ir-button-name">MODE</div>
-                        <div class="ir-button-icon"><i class="fas fa-cog"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-MODE">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="SWING">
-                        <div class="ir-button-name">SWING</div>
-                        <div class="ir-button-icon"><i class="fas fa-arrows-alt-v"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('SWING')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('SWING')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-SWING">Not learned</div>
                     </div>
                 </div>
                 
@@ -2301,7 +2279,7 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-book"></i> IR Codes Summary
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">
-                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 6 buttons
+                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 4 buttons
                     </div>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <button class="btn btn-primary btn-sm" onclick="exportIRCodes()">
@@ -2805,7 +2783,7 @@ HTML_TEMPLATE = '''
             }
             
             // Clear UI
-            const buttons = ['POWER', 'TEMP_UP', 'TEMP_DOWN', 'FAN', 'MODE', 'SWING'];
+            const buttons = ['POWER_ON', 'POWER_OFF', 'TEMP_UP', 'TEMP_DOWN'];
             buttons.forEach(buttonName => {
                 const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
                 const statusElement = document.getElementById('status-' + buttonName);
