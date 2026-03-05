@@ -1237,12 +1237,25 @@ HTML_TEMPLATE = '''
             --success: #10b981;
             --warning: #f59e0b;
             --danger: #ef4444;
+            --bg-dark: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-card-hover: #f8fafc;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border: #e2e8f0;
+            --shadow: rgba(0, 0, 0, 0.08);
+            --input-bg: #f8fafc;
+        }
+
+        [data-theme="dark"] {
             --bg-dark: #0f172a;
             --bg-card: #1e293b;
             --bg-card-hover: #334155;
             --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
             --border: #334155;
+            --shadow: rgba(0, 0, 0, 0.3);
+            --input-bg: #0f172a;
         }
 
         body {
@@ -1352,7 +1365,7 @@ HTML_TEMPLATE = '''
 
         .stat-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+            box-shadow: 0 10px 30px var(--shadow);
         }
 
         .stat-header {
@@ -1476,7 +1489,7 @@ HTML_TEMPLATE = '''
         .ml-input {
             width: 100%;
             padding: 8px 12px;
-            background: #0f172a;
+            background: var(--input-bg);
             border: 1px solid var(--border);
             border-radius: 8px;
             color: var(--text-primary);
@@ -1643,7 +1656,7 @@ HTML_TEMPLATE = '''
 
         .ir-button {
             padding: 15px;
-            background: var(--bg-dark);
+            background: var(--input-bg);
             border: 2px solid var(--border);
             border-radius: 8px;
             text-align: center;
@@ -1716,7 +1729,7 @@ HTML_TEMPLATE = '''
             padding: 16px 20px;
             border-radius: 8px;
             border: 1px solid var(--border);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            box-shadow: 0 10px 30px var(--shadow);
             display: none;
             z-index: 9999;
             animation: slideIn 0.3s;
@@ -1830,7 +1843,7 @@ HTML_TEMPLATE = '''
         }
 
         .camera-info-card {
-            background: var(--bg-dark);
+            background: var(--input-bg);
             padding: 15px;
             border-radius: 8px;
             border: 1px solid var(--border);
@@ -1938,6 +1951,46 @@ HTML_TEMPLATE = '''
             .main-content { margin-left: 0; }
             .stats-grid { grid-template-columns: 1fr; }
         }
+
+        /* Theme Toggle */
+        .theme-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            background: transparent;
+            width: 100%;
+            font-size: 14px;
+        }
+        .theme-toggle:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+        .theme-toggle i {
+            font-size: 16px;
+            width: 20px;
+            text-align: center;
+        }
+        .theme-divider {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 15px 0;
+        }
+
+        /* Light theme adjustments */
+        .slider {
+            background: var(--border);
+        }
+        select.slider {
+            background: var(--input-bg);
+            color: var(--text-primary);
+        }
     </style>
 </head>
 <body>
@@ -1979,6 +2032,11 @@ HTML_TEMPLATE = '''
             <i class="fas fa-file-alt"></i>
             <span>System Logs</span>
         </div>
+        <hr class="theme-divider">
+        <button class="theme-toggle" onclick="toggleTheme()" id="theme-toggle-btn">
+            <i class="fas fa-moon" id="theme-icon"></i>
+            <span id="theme-label">Dark Mode</span>
+        </button>
     </div>
 
     <!-- Main Content -->
@@ -2331,6 +2389,28 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
                     </button>
                 </div>
+
+                <!-- AC Mode Buttons -->
+                <div style="margin-top: 20px;">
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
+                        <i class="fas fa-cog"></i> AC Mode
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
+                        <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white; flex-direction: column;" onclick="sendACMode('MODE_AUTO', this)">
+                            <i class="fas fa-magic" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Auto
+                        </button>
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white; flex-direction: column;" onclick="sendACMode('MODE_COOL', this)">
+                            <i class="fas fa-snowflake" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Cool
+                        </button>
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white; flex-direction: column;" onclick="sendACMode('MODE_FAN', this)">
+                            <i class="fas fa-fan" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Fan
+                        </button>
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white; flex-direction: column;" onclick="sendACMode('MODE_DRY', this)">
+                            <i class="fas fa-tint-slash" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Dry
+                        </button>
+                    </div>
+                </div>
+
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
                     <i class="fas fa-info-circle"></i> Tombol menggunakan kode IR yang sudah dipelajari. Pastikan sudah Learn di bawah.
                 </div>
@@ -2390,7 +2470,7 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div class="control-label">
-                    <i class="fas fa-info-circle"></i> Click "Learn" button, then press the button on your AC remote within 10 seconds
+                    <i class="fas fa-info-circle"></i> Click "Learn" button, then press the button on your AC remote within 60 seconds
                 </div>
 
                 <div class="ir-button-grid" id="ir-button-grid">
@@ -2425,6 +2505,38 @@ HTML_TEMPLATE = '''
                         <button class="btn btn-primary btn-sm" onclick="sendIRCode('TEMP_DOWN')" style="margin-top: 5px;">Send</button>
                         <div class="ir-status" id="status-TEMP_DOWN">Not learned</div>
                     </div>
+
+                    <div class="ir-button" data-button="MODE_AUTO">
+                        <div class="ir-button-name">MODE AUTO</div>
+                        <div class="ir-button-icon"><i class="fas fa-magic" style="color: #6366f1;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_AUTO')">Learn</button>
+                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_AUTO')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-MODE_AUTO">Not learned</div>
+                    </div>
+
+                    <div class="ir-button" data-button="MODE_COOL">
+                        <div class="ir-button-name">MODE COOL</div>
+                        <div class="ir-button-icon"><i class="fas fa-snowflake" style="color: #0ea5e9;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_COOL')">Learn</button>
+                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_COOL')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-MODE_COOL">Not learned</div>
+                    </div>
+
+                    <div class="ir-button" data-button="MODE_FAN">
+                        <div class="ir-button-name">MODE FAN</div>
+                        <div class="ir-button-icon"><i class="fas fa-fan" style="color: #8b5cf6;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_FAN')">Learn</button>
+                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_FAN')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-MODE_FAN">Not learned</div>
+                    </div>
+
+                    <div class="ir-button" data-button="MODE_DRY">
+                        <div class="ir-button-name">MODE DRY</div>
+                        <div class="ir-button-icon"><i class="fas fa-tint-slash" style="color: #f97316;"></i></div>
+                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_DRY')">Learn</button>
+                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_DRY')" style="margin-top: 5px;">Send</button>
+                        <div class="ir-status" id="status-MODE_DRY">Not learned</div>
+                    </div>
                 </div>
                 
                 <div style="margin-top: 20px; padding: 15px; background: rgba(99, 102, 241, 0.1); border-radius: 8px; border: 1px solid var(--primary);">
@@ -2432,7 +2544,7 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-book"></i> IR Codes Summary
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">
-                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 4 buttons
+                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 8 buttons
                     </div>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <button class="btn btn-primary btn-sm" onclick="exportIRCodes()">
@@ -2851,6 +2963,38 @@ HTML_TEMPLATE = '''
             updateChartData(chartName, hours);
         }
 
+        // ==================== THEME TOGGLE ====================
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            updateThemeUI(savedTheme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            const newTheme = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            updateThemeUI(newTheme);
+        }
+
+        function updateThemeUI(theme) {
+            const icon = document.getElementById('theme-icon');
+            const label = document.getElementById('theme-label');
+            if (icon && label) {
+                if (theme === 'dark') {
+                    icon.className = 'fas fa-sun';
+                    label.textContent = 'Light Mode';
+                } else {
+                    icon.className = 'fas fa-moon';
+                    label.textContent = 'Dark Mode';
+                }
+            }
+        }
+
+        // Initialize theme on load
+        initTheme();
+
         // ==================== NAVIGATION ====================
         function showPage(pageId) {
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -3230,7 +3374,13 @@ HTML_TEMPLATE = '''
         let currentLearningButton = null;
         let learningCheckInterval = null;
         
-        function learnIRCode(buttonName, deviceName = 'remote') {
+        function learnIRCode(buttonName, deviceName = 'AC') {
+            // Clear any previous learning interval
+            if (learningCheckInterval) {
+                clearInterval(learningCheckInterval);
+                learningCheckInterval = null;
+            }
+            
             const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
             const statusElement = document.getElementById('status-' + buttonName);
             
@@ -3284,8 +3434,8 @@ HTML_TEMPLATE = '''
                                 currentLearningButton = null;
                             }
                             
-                            // Stop after 60 checks (30 seconds)
-                            if (checkCount > 60) {
+                            // Stop after 120 checks (60 seconds)
+                            if (checkCount > 120) {
                                 clearInterval(learningCheckInterval);
                                 if (buttonElement) buttonElement.classList.remove('learning');
                                 if (statusElement) {
@@ -3316,8 +3466,64 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify({ button: buttonName })
             })
             .then(r => r.json())
-            .then(result => showToast('IR Code sent: ' + buttonName))
+            .then(result => {
+                if (result.status === 'success') {
+                    showToast('IR Code sent: ' + buttonName, 'success');
+                } else {
+                    showToast(result.message || 'Failed to send', 'error');
+                }
+            })
             .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+        }
+
+        function sendACMode(modeName, btnElement) {
+            // Visual feedback - highlight active mode button
+            document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                btn.style.opacity = '0.6';
+                btn.style.transform = 'scale(0.95)';
+            });
+            if (btnElement) {
+                btnElement.style.opacity = '1';
+                btnElement.style.transform = 'scale(1.05)';
+            }
+
+            // Send IR code for this mode
+            fetch('/api/ir/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ button: modeName })
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.status === 'success') {
+                    const modeLabel = modeName.replace('MODE_', '');
+                    showToast('AC Mode: ' + modeLabel, 'success');
+                    // Reset button styles after delay
+                    setTimeout(() => {
+                        document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                            btn.style.opacity = '1';
+                            btn.style.transform = 'scale(1)';
+                        });
+                        if (btnElement) {
+                            btnElement.style.transform = 'scale(1.05)';
+                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                        }
+                    }, 300);
+                } else {
+                    showToast('Mode belum dipelajari. Learn dulu di IR Remote!', 'error');
+                    document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                        btn.style.opacity = '1';
+                        btn.style.transform = 'scale(1)';
+                    });
+                }
+            })
+            .catch(e => {
+                showToast('Error: ' + (e.message || e), 'error');
+                document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                    btn.style.opacity = '1';
+                    btn.style.transform = 'scale(1)';
+                });
+            });
         }
 
         function loadIRCodes() {
@@ -3361,7 +3567,7 @@ HTML_TEMPLATE = '''
             }
             
             // Clear UI
-            const buttons = ['POWER_ON', 'POWER_OFF', 'TEMP_UP', 'TEMP_DOWN'];
+            const buttons = ['POWER_ON', 'POWER_OFF', 'TEMP_UP', 'TEMP_DOWN', 'MODE_AUTO', 'MODE_COOL', 'MODE_FAN', 'MODE_DRY'];
             buttons.forEach(buttonName => {
                 const buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
                 const statusElement = document.getElementById('status-' + buttonName);
