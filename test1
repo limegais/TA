@@ -1,186 +1,160 @@
 """
-Smart Room IoT - Genetic Algorithm for AC Optimization
-Optimizes AC temperature and fan speed using evolutionary approach
+Smart Room IoT - Particle Swarm Optimization for Lamp Control
+Optimizes lamp brightness using swarm intelligence
 Data from InfluxDB sensor readings
 """
 
 import random
-from fitness import calculate_ac_fitness, TEMP_MIN, TEMP_MAX, FAN_MIN, FAN_MAX
+import numpy as np
+from fitness import calculate_lamp_fitness, BRIGHTNESS_MIN, BRIGHTNESS_MAX
 
-class GeneticAlgorithm:
+class ParticleSwarmOptimization:
     """
-    Genetic Algorithm for AC Control Optimization
+    PSO for Lamp Brightness Optimization
     
-    Chromosome: [temperature, fan_speed]
-    - temperature: 16-30°C
-    - fan_speed: 1-3
+    Particle dimension: [brightness]
+    - brightness: 0-100%
     """
     
-    def __init__(self, population_size=20, generations=50, 
-                 mutation_rate=0.1, crossover_rate=0.7, elitism=True):
-        self.population_size = population_size
-        self.generations = generations
-        self.mutation_rate = mutation_rate
-        self.crossover_rate = crossover_rate
-        self.elitism = elitism
+    def __init__(self, swarm_size=30, iterations=100, w=0.7, c1=1.5, c2=1.5):
+        self.swarm_size = swarm_size
+        self.iterations = iterations
+        self.w = w
+        self.c1 = c1
+        self.c2 = c2
         
         self.best_solution = None
         self.best_fitness = 0
         self.fitness_history = []
-        self.generation_stats = []
+        self.iteration_stats = []
     
-    def create_individual(self):
-        """Create random individual [temp, fan_speed]"""
-        return [
-            random.randint(TEMP_MIN, TEMP_MAX),
-            random.randint(FAN_MIN, FAN_MAX)
-        ]
-    
-    def create_population(self):
-        """Create initial population"""
-        return [self.create_individual() for _ in range(self.population_size)]
-    
-    def evaluate_population(self, population):
-        """Calculate AC fitness for all individuals"""
-        return [calculate_ac_fitness(*individual) for individual in population]
-    
-    def selection_tournament(self, population, fitness_scores, tournament_size=3):
-        """Tournament selection"""
-        selected = []
-        for _ in range(len(population)):
-            contestants = random.sample(range(len(population)), min(tournament_size, len(population)))
-            best_idx = max(contestants, key=lambda i: fitness_scores[i])
-            selected.append(population[best_idx][:])
-        return selected
-    
-    def selection_roulette(self, population, fitness_scores):
-        """Roulette wheel selection"""
-        min_fitness = min(fitness_scores)
-        if min_fitness < 0:
-            adjusted_scores = [f - min_fitness + 1 for f in fitness_scores]
-        else:
-            adjusted_scores = [f + 0.01 for f in fitness_scores]
+    def initialize_swarm(self):
+        """Initialize swarm with random positions and velocities"""
+        positions = []
+        velocities = []
         
-        total_fitness = sum(adjusted_scores)
-        if total_fitness == 0:
-            return random.choices(population, k=len(population))
+        for _ in range(self.swarm_size):
+            pos = [random.randint(BRIGHTNESS_MIN, BRIGHTNESS_MAX)]
+            positions.append(pos)
+            
+            vel = [random.uniform(-10, 10)]  # ±10% of range
+            velocities.append(vel)
         
-        probabilities = [f / total_fitness for f in adjusted_scores]
-        selected = random.choices(population, weights=probabilities, k=len(population))
-        return [ind[:] for ind in selected]
+        return positions, velocities
     
-    def crossover(self, parent1, parent2):
-        """Single-point crossover for 2 genes"""
-        if random.random() < self.crossover_rate:
-            # Swap one gene
-            point = random.randint(0, 1)
-            child1 = parent1[:]
-            child2 = parent2[:]
-            child1[point] = parent2[point]
-            child2[point] = parent1[point]
-            return child1, child2
-        return parent1[:], parent2[:]
+    def clip_position(self, position):
+        """Ensure position stays within bounds"""
+        return [max(BRIGHTNESS_MIN, min(BRIGHTNESS_MAX, int(round(position[0]))))]
     
-    def mutate(self, individual):
-        """Random mutation with bounds checking"""
-        mutated = individual[:]
-        for i in range(len(mutated)):
-            if random.random() < self.mutation_rate:
-                if i == 0:  # Temperature
-                    # Small mutation: ±2°C from current value
-                    delta = random.choice([-2, -1, 1, 2])
-                    mutated[i] = max(TEMP_MIN, min(TEMP_MAX, mutated[i] + delta))
-                elif i == 1:  # Fan speed
-                    mutated[i] = random.randint(FAN_MIN, FAN_MAX)
-        return mutated
+    def clip_velocity(self, velocity):
+        """Limit velocity to prevent overshooting"""
+        max_vel = (BRIGHTNESS_MAX - BRIGHTNESS_MIN) * 0.2  # 20% of range
+        return [max(-max_vel, min(max_vel, velocity[0]))]
     
-    def optimize(self, verbose=True, selection_method='tournament'):
+    def optimize(self, verbose=True, adaptive_inertia=True):
         """
-        Run GA optimization for AC settings
+        Run PSO optimization for Lamp brightness
         
         Returns:
-        - best_solution: [temp, fan_speed]
+        - best_solution: [brightness]
         - best_fitness: fitness score
         """
         if verbose:
             print("\n" + "="*70)
-            print("🧬 GENETIC ALGORITHM - AC OPTIMIZATION")
+            print("🐦 PSO - LAMP BRIGHTNESS OPTIMIZATION")
             print("="*70)
-            print(f"Population: {self.population_size} | Generations: {self.generations}")
-            print(f"Mutation: {self.mutation_rate} | Crossover: {self.crossover_rate}")
-            print(f"Selection: {selection_method} | Elitism: {self.elitism}")
+            print(f"Swarm: {self.swarm_size} | Iterations: {self.iterations}")
+            print(f"w={self.w}, c1={self.c1}, c2={self.c2}")
+            print(f"Adaptive Inertia: {adaptive_inertia}")
             
             from fitness import get_current_conditions
             cond = get_current_conditions()
             print(f"\nSensor Data ({cond.get('data_source', 'unknown')}):")
-            print(f"  Room Temp: {cond['temperature']}°C | Humidity: {cond['humidity']}%")
-            print(f"  Person: {'Yes' if cond['person_detected'] else 'No'}")
+            print(f"  Ambient Lux: {cond['lux']} | Person: {'Yes' if cond['person_detected'] else 'No'}")
             print("="*70 + "\n")
         
         # Reset state
         self.best_solution = None
         self.best_fitness = 0
         self.fitness_history = []
-        self.generation_stats = []
+        self.iteration_stats = []
         
-        # Initialize population
-        population = self.create_population()
+        # Initialize swarm
+        positions, velocities = self.initialize_swarm()
         
-        for gen in range(self.generations):
-            fitness_scores = self.evaluate_population(population)
+        # Personal best
+        personal_best_pos = [pos[:] for pos in positions]
+        personal_best_fit = [calculate_lamp_fitness(pos[0]) for pos in positions]
+        
+        # Global best
+        g_best_idx = personal_best_fit.index(max(personal_best_fit))
+        g_best_pos = personal_best_pos[g_best_idx][:]
+        g_best_fit = personal_best_fit[g_best_idx]
+        
+        for iteration in range(self.iterations):
+            # Adaptive inertia
+            if adaptive_inertia:
+                current_w = self.w - (self.w - 0.4) * (iteration / self.iterations)
+            else:
+                current_w = self.w
             
-            # Track best
-            max_idx = fitness_scores.index(max(fitness_scores))
-            if fitness_scores[max_idx] > self.best_fitness:
-                self.best_fitness = fitness_scores[max_idx]
-                self.best_solution = population[max_idx][:]
+            for i in range(self.swarm_size):
+                r1, r2 = random.random(), random.random()
+                
+                # Update velocity
+                vel_inertia = current_w * velocities[i][0]
+                vel_cognitive = self.c1 * r1 * (personal_best_pos[i][0] - positions[i][0])
+                vel_social = self.c2 * r2 * (g_best_pos[0] - positions[i][0])
+                
+                velocities[i][0] = vel_inertia + vel_cognitive + vel_social
+                velocities[i] = self.clip_velocity(velocities[i])
+                
+                # Update position
+                positions[i][0] += velocities[i][0]
+                positions[i] = self.clip_position(positions[i])
+                
+                # Evaluate
+                fitness = calculate_lamp_fitness(positions[i][0])
+                
+                # Update personal best
+                if fitness > personal_best_fit[i]:
+                    personal_best_fit[i] = fitness
+                    personal_best_pos[i] = positions[i][:]
+                
+                # Update global best
+                if fitness > g_best_fit:
+                    g_best_fit = fitness
+                    g_best_pos = positions[i][:]
             
-            avg_fitness = sum(fitness_scores) / len(fitness_scores)
-            min_fitness = min(fitness_scores)
-            self.fitness_history.append(self.best_fitness)
-            self.generation_stats.append({
-                'generation': gen + 1,
-                'best': self.best_fitness,
-                'avg': round(avg_fitness, 2),
-                'min': round(min_fitness, 2)
+            # Statistics
+            avg_fit = sum(personal_best_fit) / len(personal_best_fit)
+            min_fit = min(personal_best_fit)
+            self.fitness_history.append(g_best_fit)
+            self.iteration_stats.append({
+                'iteration': iteration + 1,
+                'best': g_best_fit,
+                'avg': round(avg_fit, 2),
+                'min': round(min_fit, 2),
+                'inertia': round(current_w, 3)
             })
             
-            if verbose and (gen + 1) % 10 == 0:
-                print(f"Gen {gen+1:3d}/{self.generations} | "
-                      f"Best: {self.best_fitness:6.2f} | "
-                      f"Avg: {avg_fitness:6.2f} | "
-                      f"AC={self.best_solution[0]}°C, Fan={self.best_solution[1]}")
-            
-            # Selection
-            if selection_method == 'tournament':
-                selected = self.selection_tournament(population, fitness_scores)
-            else:
-                selected = self.selection_roulette(population, fitness_scores)
-            
-            # Create next generation
-            next_population = []
-            for i in range(0, len(selected), 2):
-                if i + 1 < len(selected):
-                    child1, child2 = self.crossover(selected[i], selected[i+1])
-                    next_population.append(self.mutate(child1))
-                    next_population.append(self.mutate(child2))
-                else:
-                    next_population.append(self.mutate(selected[i]))
-            
-            # Elitism
-            if self.elitism and self.best_solution is not None:
-                next_population[0] = self.best_solution[:]
-            
-            population = next_population[:self.population_size]
+            if verbose and (iteration + 1) % 20 == 0:
+                print(f"Iter {iteration+1:3d}/{self.iterations} | "
+                      f"Best: {g_best_fit:6.2f} | "
+                      f"Avg: {avg_fit:6.2f} | "
+                      f"w={current_w:.3f} | "
+                      f"Brightness={g_best_pos[0]}%")
+        
+        self.best_solution = g_best_pos
+        self.best_fitness = g_best_fit
         
         if verbose:
             print("\n" + "="*70)
-            print("✅ GA OPTIMIZATION COMPLETED!")
+            print("✅ PSO OPTIMIZATION COMPLETED!")
             print("="*70)
             print(f"Best Fitness: {self.best_fitness:.2f}")
-            print(f"Best AC Setting:")
-            print(f"  Temperature: {self.best_solution[0]}°C")
-            print(f"  Fan Speed:   {self.best_solution[1]}")
+            print(f"Best Lamp Setting:")
+            print(f"  Brightness: {self.best_solution[0]}%")
             print("="*70 + "\n")
         
         return self.best_solution, self.best_fitness
@@ -189,17 +163,17 @@ class GeneticAlgorithm:
         """Return optimization statistics"""
         return {
             'fitness_history': self.fitness_history,
-            'generation_stats': self.generation_stats,
+            'iteration_stats': self.iteration_stats,
             'best_solution': self.best_solution,
             'best_fitness': self.best_fitness
         }
 
 # ==================== STANDALONE TEST ====================
 if __name__ == '__main__':
-    print("\n🧬 Testing GA - AC Optimization")
+    print("\n🐦 Testing PSO - Lamp Optimization")
     print("="*70)
     
-    ga = GeneticAlgorithm(population_size=20, generations=50)
-    solution, fitness = ga.optimize(verbose=True)
+    pso = ParticleSwarmOptimization(swarm_size=30, iterations=100)
+    solution, fitness = pso.optimize(verbose=True, adaptive_inertia=True)
     
-    print(f"\nResult: AC={solution[0]}°C, Fan={solution[1]}, Fitness={fitness:.2f}")
+    print(f"\nResult: Brightness={solution[0]}%, Fitness={fitness:.2f}")
