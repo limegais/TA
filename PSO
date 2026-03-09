@@ -1,0 +1,182 @@
+"""
+Smart Room IoT - Particle Swarm Optimization for Lamp Control
+Optimizes lamp brightness using swarm intelligence
+Data from InfluxDB sensor readings
+"""
+
+import random
+from fitness import calculate_lamp_fitness
+
+# Search space for lamp brightness
+BRIGHTNESS_MIN = 0
+BRIGHTNESS_MAX = 100
+
+class ParticleSwarmOptimization:
+    """
+    PSO for Lamp Brightness Optimization
+    
+    Particle dimension: [brightness]
+    - brightness: 0-100%
+    """
+    
+    def __init__(self, swarm_size=30, iterations=100, w=0.7, c1=1.5, c2=1.5):
+        self.swarm_size = swarm_size
+        self.iterations = iterations
+        self.w = w
+        self.c1 = c1
+        self.c2 = c2
+        
+        self.best_solution = None
+        self.best_fitness = 0
+        self.fitness_history = []
+        self.iteration_stats = []
+    
+    def initialize_swarm(self):
+        """Initialize swarm with random positions and velocities"""
+        positions = []
+        velocities = []
+        
+        for _ in range(self.swarm_size):
+            pos = [random.randint(BRIGHTNESS_MIN, BRIGHTNESS_MAX)]
+            positions.append(pos)
+            
+            vel = [random.uniform(-10, 10)]  # ±10% of range
+            velocities.append(vel)
+        
+        return positions, velocities
+    
+    def clip_position(self, position):
+        """Ensure position stays within bounds"""
+        return [max(BRIGHTNESS_MIN, min(BRIGHTNESS_MAX, int(round(position[0]))))]
+    
+    def clip_velocity(self, velocity):
+        """Limit velocity to prevent overshooting"""
+        max_vel = (BRIGHTNESS_MAX - BRIGHTNESS_MIN) * 0.2  # 20% of range
+        return [max(-max_vel, min(max_vel, velocity[0]))]
+    
+    def optimize(self, verbose=True, adaptive_inertia=True):
+        """
+        Run PSO optimization for Lamp brightness
+        
+        Returns:
+        - best_solution: [brightness]
+        - best_fitness: fitness score
+        """
+        if verbose:
+            print("\n" + "="*70)
+            print("🐦 PSO - LAMP BRIGHTNESS OPTIMIZATION")
+            print("="*70)
+            print(f"Swarm: {self.swarm_size} | Iterations: {self.iterations}")
+            print(f"w={self.w}, c1={self.c1}, c2={self.c2}")
+            print(f"Adaptive Inertia: {adaptive_inertia}")
+            
+            from fitness import get_current_conditions
+            cond = get_current_conditions()
+            print(f"\nSensor Data ({cond.get('data_source', 'unknown')}):")
+            print(f"  Ambient Lux: {cond['lux']} | Person: {'Yes' if cond['person_detected'] else 'No'}")
+            print("="*70 + "\n")
+        
+        # Reset state
+        self.best_solution = None
+        self.best_fitness = 0
+        self.fitness_history = []
+        self.iteration_stats = []
+        
+        # Initialize swarm
+        positions, velocities = self.initialize_swarm()
+        
+        # Personal best
+        personal_best_pos = [pos[:] for pos in positions]
+        personal_best_fit = [calculate_lamp_fitness(pos[0]) for pos in positions]
+        
+        # Global best
+        g_best_idx = personal_best_fit.index(max(personal_best_fit))
+        g_best_pos = personal_best_pos[g_best_idx][:]
+        g_best_fit = personal_best_fit[g_best_idx]
+        
+        for iteration in range(self.iterations):
+            # Adaptive inertia
+            if adaptive_inertia:
+                current_w = self.w - (self.w - 0.4) * (iteration / self.iterations)
+            else:
+                current_w = self.w
+            
+            for i in range(self.swarm_size):
+                r1, r2 = random.random(), random.random()
+                
+                # Update velocity
+                vel_inertia = current_w * velocities[i][0]
+                vel_cognitive = self.c1 * r1 * (personal_best_pos[i][0] - positions[i][0])
+                vel_social = self.c2 * r2 * (g_best_pos[0] - positions[i][0])
+                
+                velocities[i][0] = vel_inertia + vel_cognitive + vel_social
+                velocities[i] = self.clip_velocity(velocities[i])
+                
+                # Update position
+                positions[i][0] += velocities[i][0]
+                positions[i] = self.clip_position(positions[i])
+                
+                # Evaluate
+                fitness = calculate_lamp_fitness(positions[i][0])
+                
+                # Update personal best
+                if fitness > personal_best_fit[i]:
+                    personal_best_fit[i] = fitness
+                    personal_best_pos[i] = positions[i][:]
+                
+                # Update global best
+                if fitness > g_best_fit:
+                    g_best_fit = fitness
+                    g_best_pos = positions[i][:]
+            
+            # Statistics
+            avg_fit = sum(personal_best_fit) / len(personal_best_fit)
+            min_fit = min(personal_best_fit)
+            self.fitness_history.append(g_best_fit)
+            self.iteration_stats.append({
+                'iteration': iteration + 1,
+                'best': g_best_fit,
+                'avg': round(avg_fit, 2),
+                'min': round(min_fit, 2),
+                'inertia': round(current_w, 3)
+            })
+            
+            if verbose and (iteration + 1) % 20 == 0:
+                print(f"Iter {iteration+1:3d}/{self.iterations} | "
+                      f"Best: {g_best_fit:6.2f} | "
+                      f"Avg: {avg_fit:6.2f} | "
+                      f"w={current_w:.3f} | "
+                      f"Brightness={g_best_pos[0]}%")
+        
+        self.best_solution = g_best_pos
+        self.best_fitness = g_best_fit
+        
+        if verbose:
+            print("\n" + "="*70)
+            print("✅ PSO OPTIMIZATION COMPLETED!")
+            print("="*70)
+            print(f"Best Fitness: {self.best_fitness:.2f}")
+            print(f"Best Lamp Setting:")
+            print(f"  Brightness: {self.best_solution[0]}%")
+            print("="*70 + "\n")
+        
+        return self.best_solution, self.best_fitness
+    
+    def get_statistics(self):
+        """Return optimization statistics"""
+        return {
+            'fitness_history': self.fitness_history,
+            'iteration_stats': self.iteration_stats,
+            'best_solution': self.best_solution,
+            'best_fitness': self.best_fitness
+        }
+
+# ==================== STANDALONE TEST ====================
+if __name__ == '__main__':
+    print("\n🐦 Testing PSO - Lamp Optimization")
+    print("="*70)
+    
+    pso = ParticleSwarmOptimization(swarm_size=30, iterations=100)
+    solution, fitness = pso.optimize(verbose=True, adaptive_inertia=True)
+    
+    print(f"\nResult: Brightness={solution[0]}%, Fitness={fitness:.2f}")
