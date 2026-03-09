@@ -500,6 +500,7 @@ def on_message(client, userdata, msg):
         print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
         print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
         print(f"   'dashboard/state' in topic: {'dashboard/state' in topic}")
+        print(f"   'ml/result' in topic: {'ml/result' in topic}")
         print(f"   'ac/mode' in topic: {'ac/mode' in topic}")
         print(f"   'lamp/mode' in topic: {'lamp/mode' in topic}")
         print(f"   'ir/learned' in topic: {'ir/learned' in topic}")
@@ -562,17 +563,17 @@ def on_message(client, userdata, msg):
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
             
-        elif 'dashboard/state' in topic or 'optimization/stats' in topic:
+        elif 'dashboard/state' in topic or 'optimization/stats' in topic or 'ml/result' in topic:
             # Update from optimization algorithm (GA→AC / PSO→Lamp)
             ga_sol = payload.get('ga_solution', {})
             pso_sol = payload.get('pso_solution', {})
             mqtt_data['system'].update({
                 'ga_fitness': payload.get('ga_best_fitness', payload.get('ga_fitness', 0)),
                 'pso_fitness': payload.get('pso_best_fitness', payload.get('pso_fitness', 0)),
-                'optimization_runs': payload.get('optimization_count', payload.get('runs', 0)),
-                'ga_temp': ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0)),
-                'ga_fan': ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0)),
-                'pso_brightness': pso_sol.get('brightness', mqtt_data['system'].get('pso_brightness', 0)),
+                'optimization_runs': payload.get('optimization_count', payload.get('runs', mqtt_data['system'].get('optimization_runs', 0) + 1)),
+                'ga_temp': ga_sol.get('temperature', payload.get('ga_temp', mqtt_data['system'].get('ga_temp', 0))),
+                'ga_fan': ga_sol.get('fan_speed', payload.get('ga_fan', mqtt_data['system'].get('ga_fan', 0))),
+                'pso_brightness': pso_sol.get('brightness', payload.get('pso_brightness', mqtt_data['system'].get('pso_brightness', 0))),
                 'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                 'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
             })
@@ -588,6 +589,25 @@ def on_message(client, userdata, msg):
                 'msg': f"ML {payload.get('algorithm', '')}: {payload.get('status', '')}",
                 'level': 'info' if payload.get('status') == 'completed' else 'warning'
             })
+            
+            # If completed, also try to extract result data directly from status payload
+            if payload.get('status') == 'completed':
+                ga_sol = payload.get('ga_solution', {})
+                pso_sol = payload.get('pso_solution', {})
+                has_data = payload.get('ga_fitness') or payload.get('ga_best_fitness') or payload.get('pso_fitness') or payload.get('pso_best_fitness')
+                if has_data:
+                    mqtt_data['system'].update({
+                        'ga_fitness': payload.get('ga_best_fitness', payload.get('ga_fitness', mqtt_data['system'].get('ga_fitness', 0))),
+                        'pso_fitness': payload.get('pso_best_fitness', payload.get('pso_fitness', mqtt_data['system'].get('pso_fitness', 0))),
+                        'optimization_runs': mqtt_data['system'].get('optimization_runs', 0) + 1,
+                        'ga_temp': ga_sol.get('temperature', payload.get('ga_temp', mqtt_data['system'].get('ga_temp', 0))),
+                        'ga_fan': ga_sol.get('fan_speed', payload.get('ga_fan', mqtt_data['system'].get('ga_fan', 0))),
+                        'pso_brightness': pso_sol.get('brightness', payload.get('pso_brightness', mqtt_data['system'].get('pso_brightness', 0))),
+                        'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
+                        'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
+                    })
+                    print(f"📊 ML Completed → Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
+                    socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         elif 'ac/mode' in topic:
             mqtt_data['ac']['mode'] = payload.get('mode', 'ADAPTIVE')
@@ -678,6 +698,13 @@ def on_message(client, userdata, msg):
                 mqtt_data['ir_codes'][button_name] = ir_code
                 print(f"✅ IR code saved to memory: {button_name}")
                 
+                # Verify code integrity
+                if ir_code.startswith('RAW:'):
+                    raw_cnt = ir_code[4:].count(',') + 1
+                    print(f"   ✅ Verified RAW signal: {raw_cnt} values stored for {button_name}")
+                else:
+                    print(f"   ✅ Non-RAW code stored: {len(ir_code)} chars")
+                
                 # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
                 
@@ -688,6 +715,18 @@ def on_message(client, userdata, msg):
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
                     print(f"💾 IR codes saved to file: {ir_file}")
+                    
+                    # Verify file write
+                    with open(ir_file, 'r') as f:
+                        verify = json.load(f)
+                    if button_name in verify:
+                        saved_code = verify[button_name]
+                        if saved_code == ir_code:
+                            print(f"   ✅ File verified: {button_name} saved correctly ({len(saved_code)} chars)")
+                        else:
+                            print(f"   ⚠️  File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
+                    else:
+                        print(f"   ⚠️  Button {button_name} NOT found in saved file!")
                 except Exception as e:
                     print(f"❌ Error saving IR codes to file: {e}")
                 
@@ -2310,11 +2349,11 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 
-                <div style="margin-top: 20px; text-align: center;">
-                    <button class="btn btn-primary" onclick="toggleDetectionSound()">
-                        <i class="fas fa-volume-up"></i> Toggle Sound Alerts
+                <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
+                        <i class="fas fa-volume-up" id="sound-toggle-icon"></i> <span id="sound-toggle-text">Sound ON</span>
                     </button>
-                    <button class="btn btn-success" onclick="retryCamera()" style="margin-left: 10px;">
+                    <button class="btn btn-success" onclick="retryCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600;">
                         <i class="fas fa-sync"></i> Refresh Feed
                     </button>
                 </div>
@@ -3736,7 +3775,69 @@ HTML_TEMPLATE = '''
         // ==================== DETECTION ALERT ====================
         let lastDetectionTime = 0;
         const DETECTION_COOLDOWN = 8000; // 8 seconds between alerts
-        let detectionSoundEnabled = true; // Toggle for sound
+        let detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
+
+        // Initialize sound toggle button visual on load
+        function updateSoundToggleUI() {
+            const btn = document.getElementById('sound-toggle-btn');
+            const icon = document.getElementById('sound-toggle-icon');
+            const text = document.getElementById('sound-toggle-text');
+            if (!btn) return;
+            if (detectionSoundEnabled) {
+                btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                if (icon) icon.className = 'fas fa-volume-up';
+                if (text) text.textContent = 'Sound ON';
+            } else {
+                btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                if (icon) icon.className = 'fas fa-volume-mute';
+                if (text) text.textContent = 'Sound OFF';
+            }
+        }
+
+        function playDetectionSound() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const now = audioContext.currentTime;
+
+                // Beep 1 — alert tone
+                const osc1 = audioContext.createOscillator();
+                const gain1 = audioContext.createGain();
+                osc1.connect(gain1);
+                gain1.connect(audioContext.destination);
+                osc1.frequency.value = 880;
+                osc1.type = 'sine';
+                gain1.gain.setValueAtTime(0.4, now);
+                gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+                osc1.start(now);
+                osc1.stop(now + 0.25);
+
+                // Beep 2 — higher pitched
+                const osc2 = audioContext.createOscillator();
+                const gain2 = audioContext.createGain();
+                osc2.connect(gain2);
+                gain2.connect(audioContext.destination);
+                osc2.frequency.value = 1100;
+                osc2.type = 'sine';
+                gain2.gain.setValueAtTime(0.4, now + 0.3);
+                gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.55);
+                osc2.start(now + 0.3);
+                osc2.stop(now + 0.55);
+
+                // Beep 3 — highest
+                const osc3 = audioContext.createOscillator();
+                const gain3 = audioContext.createGain();
+                osc3.connect(gain3);
+                gain3.connect(audioContext.destination);
+                osc3.frequency.value = 1320;
+                osc3.type = 'sine';
+                gain3.gain.setValueAtTime(0.35, now + 0.6);
+                gain3.gain.exponentialRampToValueAtTime(0.01, now + 1.0);
+                osc3.start(now + 0.6);
+                osc3.stop(now + 1.0);
+            } catch(e) {
+                console.log('Audio notification not available:', e);
+            }
+        }
 
         function showDetectionAlert(count, confidence) {
             const now = Date.now();
@@ -3751,28 +3852,9 @@ HTML_TEMPLATE = '''
             const alertBox = document.getElementById('detection-alert');
             alertBox.classList.add('show');
             
-            // Play sound notification (optional)
+            // Play 3-beep alert sound if enabled
             if (detectionSoundEnabled) {
-                try {
-                    // Create a simple beep sound
-                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    const oscillator = audioContext.createOscillator();
-                    const gainNode = audioContext.createGain();
-                    
-                    oscillator.connect(gainNode);
-                    gainNode.connect(audioContext.destination);
-                    
-                    oscillator.frequency.value = 800; // Hz
-                    oscillator.type = 'sine';
-                    
-                    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-                    
-                    oscillator.start(audioContext.currentTime);
-                    oscillator.stop(audioContext.currentTime + 0.5);
-                } catch(e) {
-                    console.log('Audio notification not available:', e);
-                }
+                playDetectionSound();
             }
             
             // Auto hide after 5 seconds
@@ -3793,7 +3875,14 @@ HTML_TEMPLATE = '''
 
         function toggleDetectionSound() {
             detectionSoundEnabled = !detectionSoundEnabled;
-            showToast(detectionSoundEnabled ? 'Sound alerts enabled' : 'Sound alerts disabled', 'info');
+            localStorage.setItem('detectionSound', detectionSoundEnabled);
+            updateSoundToggleUI();
+            if (detectionSoundEnabled) {
+                playDetectionSound();
+                showToast('🔊 Sound alerts ON — anda akan mendengar suara saat orang terdeteksi', 'success');
+            } else {
+                showToast('🔇 Sound alerts OFF — notifikasi suara dimatikan', 'info');
+            }
         }
 
         // ==================== TOAST ====================
@@ -4226,6 +4315,7 @@ HTML_TEMPLATE = '''
             initCharts();
             loadSavedPreferences();
             loadSavedSettings();
+            updateSoundToggleUI();
             updateDashboard();
             updateLogs();
             loadIRCodes();
