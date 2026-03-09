@@ -1,8 +1,8 @@
 """
-Smart Room IoT - Main Optimization Controller
+Smart Room IoT - Main Optimization Controller (AUTO MODE)
 GA → Adaptive AC | PSO → Adaptive Lamp
-Data sourced from InfluxDB, results sent via MQTT to Dashboard
-Supports: Menu-driven CLI + Dashboard-triggered commands via MQTT
+Runs automatically: fetch sensor data → optimize → send to dashboard → repeat
+No menu — just run: python main.py
 """
 
 import paho.mqtt.client as mqtt
@@ -24,6 +24,9 @@ MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
 FLASK_URL = "http://localhost:5000"
 
+# Auto optimization interval (seconds between cycles)
+AUTO_INTERVAL = 60
+
 mqtt_client = mqtt.Client()
 
 # Store last optimization results for dashboard
@@ -32,24 +35,27 @@ last_results = {
     'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
 }
 
-# Configurable parameters (persist across runs, updated via menu or dashboard)
+# Optimized parameters for Smart Room project
 ga_params = {
-    'population_size': 20,
-    'generations': 50,
-    'mutation_rate': 0.1,
-    'crossover_rate': 0.7
+    'population_size': 30,
+    'generations': 80,
+    'mutation_rate': 0.15,
+    'crossover_rate': 0.8
 }
 
 pso_params = {
-    'swarm_size': 30,
-    'iterations': 100,
-    'w': 0.7,
-    'c1': 1.5,
-    'c2': 1.5
+    'swarm_size': 40,
+    'iterations': 120,
+    'w': 0.9,
+    'c1': 2.0,
+    'c2': 2.0
 }
 
 # Lock for thread-safe optimization
 optimization_lock = threading.Lock()
+
+# Track optimization run count
+optimization_run_count = 0
 
 # ==================== MQTT HANDLERS ====================
 def on_connect(client, userdata, flags, rc):
@@ -84,7 +90,11 @@ def on_message(client, userdata, msg):
 
 def on_disconnect(client, userdata, rc):
     if rc != 0:
-        print(f"⚠️  MQTT disconnected unexpectedly (RC: {rc})")
+        print(f"⚠️  MQTT disconnected unexpectedly (RC: {rc}), reconnecting...")
+        try:
+            mqtt_client.reconnect()
+        except Exception:
+            pass
 
 # ==================== DASHBOARD ML COMMAND HANDLER ====================
 def handle_ml_command(payload):
@@ -97,55 +107,49 @@ def handle_ml_command(payload):
         
         print(f"\n📡 DASHBOARD COMMAND: Run {algo.upper()} optimization")
         
-        # Update params if provided from dashboard
         if algo == 'ga' and params:
             ga_params.update({k: v for k, v in params.items() if k in ga_params})
-            print(f"   GA params: {ga_params}")
         elif algo == 'pso' and params:
             pso_params.update({k: v for k, v in params.items() if k in pso_params})
-            print(f"   PSO params: {pso_params}")
         elif algo == 'both' and params:
             if 'ga' in params:
                 ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
             if 'pso' in params:
                 pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
         
-        # Run in a separate thread to not block MQTT
-        t = threading.Thread(target=run_optimization_async, args=(algo,), daemon=True)
+        t = threading.Thread(target=run_optimization_cycle, args=(algo, True), daemon=True)
         t.start()
 
-def run_optimization_async(algo='both'):
-    """Run optimization in background thread (triggered by dashboard)"""
+# ==================== CORE OPTIMIZATION ====================
+def run_optimization_cycle(algo='both', verbose=True):
+    """Run one full optimization cycle: fetch data → GA → PSO → send to dashboard"""
     if not optimization_lock.acquire(blocking=False):
         print("⚠️  Optimization already running, skipping...")
-        # Notify dashboard
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'busy', 'message': 'Optimization already in progress'
         }))
-        return
+        return False
     
     try:
-        print(f"\n{'='*70}")
-        print(f"  🚀 DASHBOARD-TRIGGERED: {algo.upper()} OPTIMIZATION")
-        print(f"{'='*70}")
-        
         # Notify dashboard: started
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'running', 'algorithm': algo
         }))
         
-        # Fetch fresh data from DB
-        fetch_and_display_data()
+        # Fetch fresh sensor data from InfluxDB
+        conditions = fetch_and_display_data()
         
+        # ===== GA → AC Optimization =====
         if algo in ('ga', 'both'):
-            print("\n🧬 Running GA → AC...")
+            if verbose:
+                print("\n🧬 Running GA → AC Optimization...")
             ga = GeneticAlgorithm(
                 population_size=ga_params['population_size'],
                 generations=ga_params['generations'],
                 mutation_rate=ga_params['mutation_rate'],
                 crossover_rate=ga_params['crossover_rate']
             )
-            ga_sol, ga_fit = ga.optimize(verbose=True)
+            ga_sol, ga_fit = ga.optimize(verbose=verbose)
             last_results['ga']['stats'] = ga.fitness_history
             last_results['ga']['fitness'] = ga_fit
             last_results['ga']['temp'] = ga_sol[0]
@@ -153,23 +157,28 @@ def run_optimization_async(algo='both'):
             apply_ga_result(ga_sol, ga_fit)
             print(f"✅ GA Done: {ga_sol[0]}°C, Fan {ga_sol[1]}, Fitness: {ga_fit:.2f}")
         
+        # ===== PSO → Lamp Optimization =====
         if algo in ('pso', 'both'):
-            print("\n🐦 Running PSO → Lamp...")
+            if verbose:
+                print("\n🐦 Running PSO → Lamp Optimization...")
             pso = ParticleSwarmOptimization(
                 swarm_size=pso_params['swarm_size'],
-                iterations=pso_params['iterations']
+                iterations=pso_params['iterations'],
+                w=pso_params['w'],
+                c1=pso_params['c1'],
+                c2=pso_params['c2']
             )
-            pso_sol, pso_fit = pso.optimize(verbose=True, adaptive_inertia=True)
+            pso_sol, pso_fit = pso.optimize(verbose=verbose, adaptive_inertia=True)
             last_results['pso']['stats'] = pso.fitness_history
             last_results['pso']['fitness'] = pso_fit
             last_results['pso']['brightness'] = pso_sol[0]
             apply_pso_result(pso_sol, pso_fit)
             print(f"✅ PSO Done: {pso_sol[0]}%, Fitness: {pso_fit:.2f}")
         
-        # Send results to dashboard
+        # ===== Send ALL results to Dashboard =====
         send_dashboard_update()
         
-        # Notify dashboard: completed (include full data for redundancy)
+        # Notify dashboard: completed with full data
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'completed', 'algorithm': algo,
             'ga_fitness': last_results['ga']['fitness'],
@@ -186,8 +195,7 @@ def run_optimization_async(algo='both'):
             'pso_history': last_results['pso'].get('stats', [])
         }))
         
-        print(f"\n✅ Dashboard-triggered {algo.upper()} optimization complete!")
-        print(f"{'='*70}\n")
+        return True
         
     except Exception as e:
         print(f"❌ Optimization error: {e}")
@@ -196,6 +204,7 @@ def run_optimization_async(algo='both'):
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'error', 'message': str(e)
         }))
+        return False
     finally:
         optimization_lock.release()
 
@@ -203,15 +212,12 @@ def run_optimization_async(algo='both'):
 def apply_ga_result(solution, fitness):
     """Send GA (AC) optimization result to devices"""
     temp, fan = solution
+    print(f"📤 APPLYING GA → AC: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
     
-    print(f"\n📤 APPLYING GA → AC: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
-    
-    # Send AC control via MQTT
     ac_cmd = {'temperature': temp, 'fan_speed': fan, 'action': 'set_temp'}
     result = mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
     print(f"   AC Control: {'✅' if result.rc == 0 else '❌'}")
     
-    # Store result
     last_results['ga']['fitness'] = fitness
     last_results['ga']['temp'] = temp
     last_results['ga']['fan'] = fan
@@ -219,20 +225,14 @@ def apply_ga_result(solution, fitness):
 def apply_pso_result(solution, fitness):
     """Send PSO (Lamp) optimization result to devices"""
     brightness = solution[0]
+    print(f"📤 APPLYING PSO → Lamp: {brightness}%, Fitness: {fitness:.2f}")
     
-    print(f"\n📤 APPLYING PSO → Lamp: {brightness}%, Fitness: {fitness:.2f}")
-    
-    # Send Lamp control via MQTT
     lamp_cmd = {'brightness': brightness, 'action': 'set_brightness'}
     result = mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
     print(f"   Lamp Control: {'✅' if result.rc == 0 else '❌'}")
     
-    # Store result
     last_results['pso']['fitness'] = fitness
     last_results['pso']['brightness'] = brightness
-
-# Track optimization run count
-optimization_run_count = 0
 
 def send_dashboard_update():
     """Send combined GA+PSO results to dashboard via MQTT and HTTP"""
@@ -266,8 +266,8 @@ def send_dashboard_update():
     try:
         resp = requests.post(f"{FLASK_URL}/api/optimization/update", json=dashboard_data, timeout=5)
         print(f"   Dashboard HTTP: {'✅' if resp.status_code == 200 else '❌'}")
-    except:
-        pass  # Flask might not be running
+    except Exception:
+        print(f"   Dashboard HTTP: ⚠️  Flask not reachable")
 
 # ==================== FETCH DATA FROM DB ====================
 def fetch_and_display_data():
@@ -289,32 +289,14 @@ def fetch_and_display_data():
     
     return conditions
 
-# ==================== COMPARISON ====================
-def compare_results():
-    """Compare GA and PSO results"""
-    print("\n" + "="*70)
-    print("📊 OPTIMIZATION RESULTS COMPARISON")
-    print("="*70)
-    
-    print(f"\n🧬 GA → AC Control:")
-    print(f"   Fitness    : {last_results['ga']['fitness']:.2f}")
-    print(f"   Temperature: {last_results['ga']['temp']}°C")
-    print(f"   Fan Speed  : {last_results['ga']['fan']}")
-    
-    print(f"\n🐦 PSO → Lamp Control:")
-    print(f"   Fitness    : {last_results['pso']['fitness']:.2f}")
-    print(f"   Brightness : {last_results['pso']['brightness']}%")
-    
-    combined = (last_results['ga']['fitness'] + last_results['pso']['fitness']) / 2
-    print(f"\n📊 Combined Fitness: {combined:.2f}")
-    print("="*70)
-
-# ==================== MAIN MENU ====================
+# ==================== MAIN (AUTO MODE) ====================
 def main():
     print("\n" + "="*70)
     print("  🤖 SMART ROOM IoT - AI OPTIMIZATION SYSTEM")
     print("  GA → Adaptive AC | PSO → Adaptive Lamp")
-    print("  Data Source: InfluxDB → MQTT → Dashboard")
+    print("  Mode: FULLY AUTOMATIC (no menu)")
+    print(f"  Cycle interval: {AUTO_INTERVAL} seconds")
+    print("  Press Ctrl+C to stop")
     print("="*70 + "\n")
     
     # Connect MQTT
@@ -330,283 +312,69 @@ def main():
     except Exception as e:
         print(f"⚠️  MQTT error: {e} — continuing in offline mode")
     
-    # Wait for initial sensor data
-    print("\n⏳ Waiting for sensor data (3 seconds)...")
-    time.sleep(3)
+    # Wait for initial sensor data from ESP32
+    print("\n⏳ Waiting for initial sensor data (5 seconds)...")
+    time.sleep(5)
     
-    # Main menu loop
+    # ===== Run first cycle immediately with verbose output =====
+    print("\n" + "="*70)
+    print("  🚀 INITIAL OPTIMIZATION (Cycle #1)")
+    print("="*70)
+    
+    success = run_optimization_cycle('both', verbose=True)
+    if success:
+        combined = (last_results['ga']['fitness'] + last_results['pso']['fitness']) / 2
+        print(f"\n{'='*70}")
+        print(f"  ✅ INITIAL OPTIMIZATION COMPLETE")
+        print(f"  🧬 GA → AC:  {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
+        print(f"  🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
+        print(f"  📊 Combined Fitness: {combined:.2f}")
+        print(f"{'='*70}")
+    else:
+        print("⚠️  Initial optimization had issues, continuing anyway...")
+    
+    # ===== Continuous auto-optimization loop =====
+    cycle = 1
+    print(f"\n🔄 AUTO MODE ACTIVE — Optimizing every {AUTO_INTERVAL}s (Ctrl+C to stop)\n")
+    
     while True:
-        print("\n" + "="*70)
-        print("  🎯 OPTIMIZATION MENU")
-        print("="*70)
-        print("  1. 🧬 Run GA → Optimize AC (Temp + Fan)")
-        print("  2. 🐦 Run PSO → Optimize Lamp (Brightness)")
-        print("  3. 🏁 Run Both GA + PSO & Compare")
-        print("  4. 🔄 Auto Mode (Continuous Optimization)")
-        print("  5. 📊 View Current Sensor Data (from DB)")
-        print("  6. 🧪 Manual Fitness Test")
-        print("  7. ⚙️  Configure GA Parameters")
-        print("  8. ⚙️  Configure PSO Parameters")
-        print("  9. 🚪 Exit")
-        print("="*70)
+        # Wait for next cycle
+        print(f"⏳ Next optimization in {AUTO_INTERVAL} seconds...")
+        time.sleep(AUTO_INTERVAL)
         
-        try:
-            choice = input("\n🎮 Select (1-9): ").strip()
-        except KeyboardInterrupt:
-            print("\n\n👋 Interrupted")
-            break
+        cycle += 1
+        print(f"\n{'='*70}")
+        print(f"  🔄 AUTO CYCLE #{cycle} — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*70}")
         
-        if choice == '1':
-            # ===== GA → AC =====
-            print("\n" + "="*70)
-            print("  🧬 GENETIC ALGORITHM → AC OPTIMIZATION")
-            print("="*70)
-            
-            # Fetch latest data from DB
-            fetch_and_display_data()
-            
-            ga = GeneticAlgorithm(
-                population_size=ga_params['population_size'],
-                generations=ga_params['generations'],
-                mutation_rate=ga_params['mutation_rate'],
-                crossover_rate=ga_params['crossover_rate']
-            )
-            
-            solution, fitness = ga.optimize(verbose=True)
-            last_results['ga']['stats'] = ga.fitness_history
-            
-            apply_opt = input("\n📤 Apply AC setting? (y/n): ").strip().lower()
-            if apply_opt == 'y':
-                apply_ga_result(solution, fitness)
-                send_dashboard_update()
+        success = run_optimization_cycle('both', verbose=False)
         
-        elif choice == '2':
-            # ===== PSO → Lamp =====
-            print("\n" + "="*70)
-            print("  🐦 PSO → LAMP OPTIMIZATION")
-            print("="*70)
-            
-            fetch_and_display_data()
-            
-            pso = ParticleSwarmOptimization(
-                swarm_size=pso_params['swarm_size'],
-                iterations=pso_params['iterations']
-            )
-            
-            solution, fitness = pso.optimize(verbose=True, adaptive_inertia=True)
-            last_results['pso']['stats'] = pso.fitness_history
-            
-            apply_opt = input("\n📤 Apply Lamp setting? (y/n): ").strip().lower()
-            if apply_opt == 'y':
-                apply_pso_result(solution, fitness)
-                send_dashboard_update()
-        
-        elif choice == '3':
-            # ===== Run Both =====
-            print("\n" + "="*70)
-            print("  🏁 RUNNING GA (AC) + PSO (LAMP) SIMULTANEOUSLY")
-            print("="*70)
-            
-            # Fetch data once for both
-            fetch_and_display_data()
-            
-            # GA → AC
-            print("\n" + "-"*35 + " GA → AC " + "-"*35)
-            ga = GeneticAlgorithm(
-                population_size=ga_params['population_size'],
-                generations=ga_params['generations'],
-                mutation_rate=ga_params['mutation_rate'],
-                crossover_rate=ga_params['crossover_rate']
-            )
-            ga_solution, ga_fitness = ga.optimize(verbose=True)
-            last_results['ga']['stats'] = ga.fitness_history
-            
-            time.sleep(1)
-            
-            # PSO → Lamp
-            print("\n" + "-"*35 + " PSO → LAMP " + "-"*32)
-            pso = ParticleSwarmOptimization(
-                swarm_size=pso_params['swarm_size'],
-                iterations=pso_params['iterations']
-            )
-            pso_solution, pso_fitness = pso.optimize(verbose=True)
-            last_results['pso']['stats'] = pso.fitness_history
-            
-            # Store results
-            last_results['ga']['fitness'] = ga_fitness
-            last_results['ga']['temp'] = ga_solution[0]
-            last_results['ga']['fan'] = ga_solution[1]
-            last_results['pso']['fitness'] = pso_fitness
-            last_results['pso']['brightness'] = pso_solution[0]
-            
-            # Compare
-            compare_results()
-            
-            apply_opt = input("\n📤 Apply ALL settings to devices? (y/n): ").strip().lower()
-            if apply_opt == 'y':
-                apply_ga_result(ga_solution, ga_fitness)
-                apply_pso_result(pso_solution, pso_fitness)
-                send_dashboard_update()
-                print("\n✅ All optimization results applied!")
-        
-        elif choice == '4':
-            # ===== Auto Mode =====
-            print("\n" + "="*70)
-            print("  🔄 AUTO OPTIMIZATION MODE")
-            print("  GA → AC every 60s | PSO → Lamp every 60s")
-            print("  Press Ctrl+C to stop")
-            print("="*70)
-            
-            try:
-                interval = input("Optimization interval (seconds, default 60): ").strip()
-                interval = int(interval) if interval else 60
-            except ValueError:
-                interval = 60
-            
-            cycle = 0
-            try:
-                while True:
-                    cycle += 1
-                    print(f"\n{'='*70}")
-                    print(f"  🔄 AUTO CYCLE #{cycle} — {time.strftime('%H:%M:%S')}")
-                    print(f"{'='*70}")
-                    
-                    # Fetch fresh data from DB
-                    fetch_and_display_data()
-                    
-                    # GA → AC
-                    ga = GeneticAlgorithm(
-                        population_size=ga_params['population_size'],
-                        generations=ga_params['generations'],
-                        mutation_rate=ga_params['mutation_rate'],
-                        crossover_rate=ga_params['crossover_rate']
-                    )
-                    ga_sol, ga_fit = ga.optimize(verbose=False)
-                    last_results['ga']['stats'] = ga.fitness_history
-                    apply_ga_result(ga_sol, ga_fit)
-                    
-                    # PSO → Lamp
-                    pso = ParticleSwarmOptimization(
-                        swarm_size=pso_params['swarm_size'],
-                        iterations=pso_params['iterations']
-                    )
-                    pso_sol, pso_fit = pso.optimize(verbose=False)
-                    last_results['pso']['stats'] = pso.fitness_history
-                    apply_pso_result(pso_sol, pso_fit)
-                    
-                    # Send to dashboard
-                    send_dashboard_update()
-                    
-                    combined = (ga_fit + pso_fit) / 2
-                    print(f"\n📊 Cycle #{cycle} Results:")
-                    print(f"   GA→AC:  {ga_sol[0]}°C, Fan {ga_sol[1]} (fitness: {ga_fit:.2f})")
-                    print(f"   PSO→Lamp: {pso_sol[0]}% (fitness: {pso_fit:.2f})")
-                    print(f"   Combined: {combined:.2f}")
-                    print(f"\n⏳ Next cycle in {interval} seconds...")
-                    
-                    time.sleep(interval)
-                    
-            except KeyboardInterrupt:
-                print(f"\n\n✅ Auto mode stopped after {cycle} cycles")
-        
-        elif choice == '5':
-            # ===== View Data from DB =====
-            fetch_and_display_data()
-        
-        elif choice == '6':
-            # ===== Manual Fitness Test =====
-            print("\n" + "="*70)
-            print("  🧪 MANUAL FITNESS TEST")
-            print("="*70)
-            
-            fetch_and_display_data()
-            
-            try:
-                print("\n--- AC Fitness (GA) ---")
-                temp = int(input("  AC Temperature (16-30°C): "))
-                fan = int(input("  Fan Speed (1-3): "))
-                ac_fit = calculate_ac_fitness(temp, fan)
-                
-                print("\n--- Lamp Fitness (PSO) ---")
-                bright = int(input("  Brightness (0-100%): "))
-                lamp_fit = calculate_lamp_fitness(bright)
-                
-                combined = calculate_fitness(temp, fan, bright)
-                
-                print(f"\n📊 RESULTS:")
-                print(f"  AC Fitness (GA):   {ac_fit:.2f}")
-                print(f"  Lamp Fitness (PSO): {lamp_fit:.2f}")
-                print(f"  Combined:           {combined:.2f}")
-                
-                rating = "⭐⭐⭐⭐⭐" if combined >= 80 else "⭐⭐⭐⭐" if combined >= 60 else "⭐⭐⭐" if combined >= 40 else "⭐⭐"
-                print(f"  Rating: {rating}")
-                
-            except ValueError:
-                print("❌ Invalid input!")
-        
-        elif choice == '7':
-            # ===== Configure GA =====
-            print(f"\n⚙️  CONFIGURE GA (Enter to keep current)")
-            print(f"   Current: Pop={ga_params['population_size']}, Gen={ga_params['generations']}, Mut={ga_params['mutation_rate']}, Cross={ga_params['crossover_rate']}")
-            try:
-                pop = input(f"  Population Size ({ga_params['population_size']}): ").strip()
-                gen = input(f"  Generations ({ga_params['generations']}): ").strip()
-                mut = input(f"  Mutation Rate ({ga_params['mutation_rate']}): ").strip()
-                cross = input(f"  Crossover Rate ({ga_params['crossover_rate']}): ").strip()
-                
-                if pop: ga_params['population_size'] = int(pop)
-                if gen: ga_params['generations'] = int(gen)
-                if mut: ga_params['mutation_rate'] = float(mut)
-                if cross: ga_params['crossover_rate'] = float(cross)
-                
-                print(f"\n✅ GA Updated: Pop={ga_params['population_size']}, Gen={ga_params['generations']}, Mut={ga_params['mutation_rate']}, Cross={ga_params['crossover_rate']}")
-            except ValueError:
-                print("❌ Invalid input, keeping current values")
-        
-        elif choice == '8':
-            # ===== Configure PSO =====
-            print(f"\n⚙️  CONFIGURE PSO (Enter to keep current)")
-            print(f"   Current: Swarm={pso_params['swarm_size']}, Iter={pso_params['iterations']}, w={pso_params['w']}, c1={pso_params['c1']}, c2={pso_params['c2']}")
-            try:
-                swarm = input(f"  Swarm Size ({pso_params['swarm_size']}): ").strip()
-                iters = input(f"  Iterations ({pso_params['iterations']}): ").strip()
-                w = input(f"  Inertia w ({pso_params['w']}): ").strip()
-                c1 = input(f"  Cognitive c1 ({pso_params['c1']}): ").strip()
-                c2 = input(f"  Social c2 ({pso_params['c2']}): ").strip()
-                
-                if swarm: pso_params['swarm_size'] = int(swarm)
-                if iters: pso_params['iterations'] = int(iters)
-                if w: pso_params['w'] = float(w)
-                if c1: pso_params['c1'] = float(c1)
-                if c2: pso_params['c2'] = float(c2)
-                
-                print(f"\n✅ PSO Updated: Swarm={pso_params['swarm_size']}, Iter={pso_params['iterations']}, w={pso_params['w']}, c1={pso_params['c1']}, c2={pso_params['c2']}")
-            except ValueError:
-                print("❌ Invalid input, keeping current values")
-        
-        elif choice == '9':
-            print("\n👋 Exiting...")
-            break
-        
+        if success:
+            combined = (last_results['ga']['fitness'] + last_results['pso']['fitness']) / 2
+            print(f"\n📊 Cycle #{cycle} Results:")
+            print(f"   🧬 GA → AC:    {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
+            print(f"   🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
+            print(f"   📊 Combined:   {combined:.2f}")
+            print(f"   ✅ Results sent to dashboard!")
         else:
-            print("❌ Invalid option! Select 1-9.")
-    
-    # Cleanup
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
-    print("✅ MQTT disconnected\n👋 Goodbye!\n")
+            print(f"   ⚠️  Cycle #{cycle} had issues, will retry next cycle")
 
 # ==================== ENTRY POINT ====================
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n⚠️  Program interrupted")
+        print(f"\n\n{'='*70}")
+        print(f"  👋 Stopping after {optimization_run_count} optimization cycles")
+        print(f"{'='*70}")
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
+        print("✅ MQTT disconnected. Goodbye!")
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
         sys.exit(1)
