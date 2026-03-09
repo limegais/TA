@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, jsonify, request, Response
+from flask import Flask, render_template_string, jsonify, request, Response, session, redirect, url_for
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 import json
@@ -14,6 +14,25 @@ import numpy as np
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Authentication Credentials
+AUTH_USERNAME = "admin"
+AUTH_PASSWORD = "smartroom2024"
+
+# Device Status Tracking
+device_last_seen = {
+    'esp32_ac': {'last_seen': None, 'status': 'offline'},
+    'esp32_lamp': {'last_seen': None, 'status': 'offline'},
+    'camera': {'last_seen': None, 'status': 'offline'}
+}
+
+# Alert Rules
+alert_rules = {
+    'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
+    'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
+    'no_person_timeout': {'timeout_minutes': 30, 'enabled': True, 'last_person_seen': None}
+}
+active_alerts = deque(maxlen=50)
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -538,6 +557,10 @@ def on_message(client, userdata, msg):
             print("   ✅ AC data updated in memory & InfluxDB")
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
             print("   📡 Sent to frontend via WebSocket")
+            # Track device status & check alerts
+            device_last_seen['esp32_ac']['last_seen'] = datetime.now()
+            device_last_seen['esp32_ac']['status'] = 'online'
+            check_alert_rules()
             
         elif 'lamp/sensors' in topic:
             mqtt_data['lamp'].update({
@@ -554,6 +577,9 @@ def on_message(client, userdata, msg):
                 mqtt_data['lamp']['motion']
             )
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+            # Track device status
+            device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
+            device_last_seen['esp32_lamp']['status'] = 'online'
             
         elif 'camera/detection' in topic:
             mqtt_data['camera'].update({
@@ -562,6 +588,9 @@ def on_message(client, userdata, msg):
                 'confidence': payload.get('confidence', 0)
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            # Track device status
+            device_last_seen['camera']['last_seen'] = datetime.now()
+            device_last_seen['camera']['status'] = 'online'
             
         elif 'dashboard/state' in topic or 'optimization/stats' in topic or 'ml/result' in topic:
             # Update from optimization algorithm (GA→AC / PSO→Lamp)
@@ -579,6 +608,15 @@ def on_message(client, userdata, msg):
             })
             print(f"📊 Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+            # Write optimization history to InfluxDB
+            write_to_influxdb('optimization_result', {
+                'ga_fitness': float(mqtt_data['system']['ga_fitness']),
+                'pso_fitness': float(mqtt_data['system']['pso_fitness']),
+                'ga_temp': float(mqtt_data['system']['ga_temp']),
+                'ga_fan': float(mqtt_data['system']['ga_fan']),
+                'pso_brightness': float(mqtt_data['system']['pso_brightness']),
+                'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
+            })
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
@@ -594,7 +632,7 @@ def on_message(client, userdata, msg):
             if payload.get('status') == 'completed':
                 ga_sol = payload.get('ga_solution', {})
                 pso_sol = payload.get('pso_solution', {})
-                has_data = payload.get('ga_fitness') or payload.get('ga_best_fitness') or payload.get('pso_fitness') or payload.get('pso_best_fitness')
+                has_data = (payload.get('ga_fitness') is not None or payload.get('ga_best_fitness') is not None or payload.get('pso_fitness') is not None or payload.get('pso_best_fitness') is not None)
                 if has_data:
                     mqtt_data['system'].update({
                         'ga_fitness': payload.get('ga_best_fitness', payload.get('ga_fitness', mqtt_data['system'].get('ga_fitness', 0))),
@@ -853,6 +891,36 @@ def get_influx_data(measurement, field, hours=1):
     except Exception as e:
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'InfluxDB Query Error: {str(e)}', 'level': 'error'})
         return []
+
+# ==================== AUTHENTICATION ====================
+@app.before_request
+def require_login():
+    public_paths = ['/login', '/api/optimization/update']
+    if request.path in public_paths:
+        return None
+    if request.path.startswith('/socket.io'):
+        return None
+    if session.get('logged_in'):
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    return redirect('/login')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        if username == AUTH_USERNAME and password == AUTH_PASSWORD:
+            session['logged_in'] = True
+            return redirect('/')
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid credentials')
+    return render_template_string(LOGIN_TEMPLATE, error=None)
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect('/login')
 
 # ==================== API ROUTES ====================
 @app.route('/')
@@ -1251,6 +1319,127 @@ def manual_save_ir():
 @app.route('/api/logs')
 def get_logs():
     return jsonify(list(log_messages))
+
+@app.route('/api/device/status')
+def get_device_status():
+    now = datetime.now()
+    for dev_id, dev in device_last_seen.items():
+        if dev['last_seen'] is None:
+            dev['status'] = 'offline'
+        elif (now - dev['last_seen']).total_seconds() > 30:
+            dev['status'] = 'offline'
+        else:
+            dev['status'] = 'online'
+    return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
+
+@app.route('/api/alerts')
+def get_alerts():
+    return jsonify({'rules': alert_rules, 'active': list(active_alerts)})
+
+@app.route('/api/alerts/config', methods=['POST'])
+def config_alerts():
+    try:
+        data = request.json
+        for rule_name, config in data.items():
+            if rule_name in alert_rules:
+                alert_rules[rule_name].update(config)
+        return jsonify({'status': 'success', 'rules': alert_rules})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def check_alert_rules():
+    """Check sensor data against alert rules and emit alerts"""
+    now = datetime.now()
+    temp = mqtt_data['ac'].get('temperature', 0)
+    humidity = mqtt_data['ac'].get('humidity', 0)
+    person = mqtt_data['camera'].get('person_detected', False)
+    
+    # High temperature alert
+    rule = alert_rules['high_temp']
+    if rule['enabled'] and temp > rule['threshold']:
+        if not rule['triggered']:
+            rule['triggered'] = True
+            alert = {'type': 'high_temp', 'message': f'Temperature {temp:.1f}°C exceeds {rule["threshold"]}°C!', 'level': 'danger', 'time': now.strftime('%H:%M:%S')}
+            active_alerts.append(alert)
+            socketio.emit('alert', alert)
+    else:
+        rule['triggered'] = False
+    
+    # High humidity alert
+    rule = alert_rules['high_humidity']
+    if rule['enabled'] and humidity > rule['threshold']:
+        if not rule['triggered']:
+            rule['triggered'] = True
+            alert = {'type': 'high_humidity', 'message': f'Humidity {humidity:.1f}% exceeds {rule["threshold"]}%!', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
+            active_alerts.append(alert)
+            socketio.emit('alert', alert)
+    else:
+        rule['triggered'] = False
+    
+    # No person timeout → suggest turning off AC
+    rule = alert_rules['no_person_timeout']
+    if rule['enabled']:
+        if person:
+            rule['last_person_seen'] = now
+        elif rule['last_person_seen'] is not None:
+            elapsed = (now - rule['last_person_seen']).total_seconds() / 60
+            if elapsed > rule['timeout_minutes'] and mqtt_data['ac'].get('ac_state') != 'OFF':
+                alert = {'type': 'no_person', 'message': f'No person detected for {int(elapsed)} min. Consider turning off AC.', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
+                active_alerts.append(alert)
+                socketio.emit('alert', alert)
+                rule['last_person_seen'] = now  # Reset to avoid spamming
+
+# ==================== LOGIN TEMPLATE ====================
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Room - Login</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .login-box { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 40px; width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        .login-logo { text-align: center; margin-bottom: 30px; }
+        .login-logo i { font-size: 48px; color: #6366f1; }
+        .login-logo h1 { color: #f1f5f9; font-size: 24px; margin-top: 10px; }
+        .login-logo p { color: #94a3b8; font-size: 14px; margin-top: 5px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; color: #94a3b8; font-size: 13px; margin-bottom: 6px; font-weight: 500; }
+        .form-group input { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f1f5f9; font-size: 14px; transition: border-color 0.3s; }
+        .form-group input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.2); }
+        .login-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s; }
+        .login-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(99,102,241,0.4); }
+        .error-msg { background: rgba(239,68,68,0.15); border: 1px solid #ef4444; color: #ef4444; padding: 10px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <div class="login-logo">
+            <i class="fas fa-brain"></i>
+            <h1>Smart Room IoT</h1>
+            <p>Login to access dashboard</p>
+        </div>
+        {% if error %}
+        <div class="error-msg"><i class="fas fa-exclamation-circle"></i> {{ error }}</div>
+        {% endif %}
+        <form method="POST">
+            <div class="form-group">
+                <label><i class="fas fa-user"></i> Username</label>
+                <input type="text" name="username" required autocomplete="username" placeholder="Enter username">
+            </div>
+            <div class="form-group">
+                <label><i class="fas fa-lock"></i> Password</label>
+                <input type="password" name="password" required autocomplete="current-password" placeholder="Enter password">
+            </div>
+            <button type="submit" class="login-btn"><i class="fas fa-sign-in-alt"></i> Login</button>
+        </form>
+    </div>
+</body>
+</html>
+'''
 
 # ==================== HTML TEMPLATE ====================
 HTML_TEMPLATE = '''
@@ -1986,9 +2175,99 @@ HTML_TEMPLATE = '''
         }
 
         @media (max-width: 768px) {
-            .sidebar { display: none; }
-            .main-content { margin-left: 0; }
+            .sidebar { 
+                transform: translateX(-100%);
+                transition: transform 0.3s ease;
+                z-index: 2000;
+            }
+            .sidebar.open { transform: translateX(0); }
+            .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
             .stats-grid { grid-template-columns: 1fr; }
+            .hamburger-btn { display: flex !important; }
+            .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
+            .sidebar-overlay.active { display: block; }
+        }
+
+        .hamburger-btn {
+            display: none;
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            z-index: 1998;
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+        }
+
+        /* Device Status Indicators */
+        .device-status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            background: var(--bg-card-hover);
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+        .device-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .device-dot.online {
+            background: #10b981;
+            box-shadow: 0 0 6px #10b981;
+            animation: pulse-green 2s infinite;
+        }
+        .device-dot.offline {
+            background: #ef4444;
+        }
+        .device-time {
+            font-size: 10px;
+            color: var(--text-secondary);
+            opacity: 0.7;
+        }
+        @keyframes pulse-green {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Alert Notification Banner */
+        .alert-banner {
+            position: fixed;
+            top: 15px;
+            right: 15px;
+            z-index: 3000;
+            max-width: 380px;
+            padding: 14px 20px;
+            border-radius: 12px;
+            color: white;
+            font-size: 13px;
+            font-weight: 500;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            animation: slideInRight 0.4s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .alert-banner.danger { background: linear-gradient(135deg, #ef4444, #dc2626); }
+        .alert-banner.warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .alert-banner .alert-close { background: none; border: none; color: white; cursor: pointer; font-size: 16px; margin-left: auto; opacity: 0.8; }
+        .alert-banner .alert-close:hover { opacity: 1; }
+        @keyframes slideInRight {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
 
         /* Theme Toggle */
@@ -2033,8 +2312,14 @@ HTML_TEMPLATE = '''
     </style>
 </head>
 <body>
+    <!-- Hamburger Menu Button (mobile) -->
+    <button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()">
+        <i class="fas fa-bars" id="hamburger-icon"></i>
+    </button>
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
     <!-- Sidebar -->
-    <div class="sidebar">
+    <div class="sidebar" id="sidebar">
         <div class="logo">
             <i class="fas fa-brain"></i>
             Smart Room
@@ -2076,6 +2361,10 @@ HTML_TEMPLATE = '''
             <i class="fas fa-moon" id="theme-icon"></i>
             <span id="theme-label">Dark Mode</span>
         </button>
+        <a href="/logout" class="theme-toggle" style="text-decoration: none; color: var(--danger); border-color: var(--danger);">
+            <i class="fas fa-sign-out-alt"></i>
+            <span>Logout</span>
+        </a>
     </div>
 
     <!-- Main Content -->
@@ -2085,6 +2374,24 @@ HTML_TEMPLATE = '''
             <div class="header">
                 <h1>Dashboard Overview</h1>
                 <p>Real-time monitoring of all systems</p>
+                <!-- Device Status Indicators -->
+                <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
+                    <div class="device-status-item" id="ds-esp32-ac">
+                        <span class="device-dot offline"></span>
+                        <span>ESP32-AC</span>
+                        <span class="device-time" id="ds-ac-time">Never</span>
+                    </div>
+                    <div class="device-status-item" id="ds-esp32-lamp">
+                        <span class="device-dot offline"></span>
+                        <span>ESP32-Lamp</span>
+                        <span class="device-time" id="ds-lamp-time">Never</span>
+                    </div>
+                    <div class="device-status-item" id="ds-camera">
+                        <span class="device-dot offline"></span>
+                        <span>Camera</span>
+                        <span class="device-time" id="ds-cam-time">Never</span>
+                    </div>
+                </div>
             </div>
 
             <div class="stats-grid">
@@ -2448,6 +2755,30 @@ HTML_TEMPLATE = '''
                             <i class="fas fa-tint-slash" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Dry
                         </button>
                     </div>
+                </div>
+
+                <!-- AC Temperature & Fan Speed Sliders -->
+                <div style="margin-top: 20px; padding: 20px; background: rgba(99, 102, 241, 0.05); border-radius: 12px; border: 1px solid var(--border);">
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 15px; font-weight: 600;">
+                        <i class="fas fa-sliders-h"></i> AC Settings (Direct MQTT)
+                    </div>
+                    <div class="control-group" style="margin-bottom: 15px;">
+                        <label class="control-label">Temperature: <span id="ac-temp-display" style="color: var(--primary); font-weight: bold;">24</span>°C</label>
+                        <input type="range" min="16" max="30" value="24" class="slider" id="ac-temp-slider" oninput="updateACTemp(this.value)" style="width: 100%;">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span>16°C</span><span>20°C</span><span>24°C</span><span>28°C</span><span>30°C</span>
+                        </div>
+                    </div>
+                    <div class="control-group" style="margin-bottom: 15px;">
+                        <label class="control-label">Fan Speed: Level <span id="fan-speed-display" style="color: var(--primary); font-weight: bold;">1</span></label>
+                        <input type="range" min="1" max="3" value="1" class="slider" id="fan-speed-slider" oninput="updateFanSpeed(this.value)" style="width: 100%;">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span>Low</span><span>Medium</span><span>High</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="applyACSettings()" style="width: 100%; padding: 12px; border-radius: 10px; font-weight: 600;">
+                        <i class="fas fa-paper-plane"></i> Apply AC Settings
+                    </button>
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
@@ -3035,6 +3366,15 @@ HTML_TEMPLATE = '''
         initTheme();
 
         // ==================== NAVIGATION ====================
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebar-overlay');
+            const icon = document.getElementById('hamburger-icon');
+            sidebar.classList.toggle('open');
+            overlay.classList.toggle('active');
+            icon.className = sidebar.classList.contains('open') ? 'fas fa-times' : 'fas fa-bars';
+        }
+
         function showPage(pageId) {
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
@@ -3043,6 +3383,15 @@ HTML_TEMPLATE = '''
             event.target.closest('.nav-item').classList.add('active');
             
             localStorage.setItem('currentPage', pageId);
+
+            // Close mobile sidebar
+            if (window.innerWidth <= 768) {
+                const sidebar = document.getElementById('sidebar');
+                const overlay = document.getElementById('sidebar-overlay');
+                sidebar.classList.remove('open');
+                overlay.classList.remove('active');
+                document.getElementById('hamburger-icon').className = 'fas fa-bars';
+            }
 
             if (pageId === 'camera') {
                 checkCameraStatus();
@@ -4003,6 +4352,44 @@ HTML_TEMPLATE = '''
                 });
         }
 
+        // ==================== DEVICE STATUS ====================
+        function updateDeviceStatus() {
+            fetch('/api/device/status')
+                .then(r => r.json())
+                .then(data => {
+                    const mapping = {'esp32_ac': 'ds-esp32-ac', 'esp32_lamp': 'ds-esp32-lamp', 'camera': 'ds-camera'};
+                    const timeMapping = {'esp32_ac': 'ds-ac-time', 'esp32_lamp': 'ds-lamp-time', 'camera': 'ds-cam-time'};
+                    for (const [devId, info] of Object.entries(data)) {
+                        const el = document.getElementById(mapping[devId]);
+                        const timeEl = document.getElementById(timeMapping[devId]);
+                        if (el) {
+                            const dot = el.querySelector('.device-dot');
+                            if (dot) {
+                                dot.className = 'device-dot ' + info.status;
+                            }
+                        }
+                        if (timeEl) timeEl.textContent = info.last_seen;
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // ==================== ALERT SYSTEM ====================
+        let alertQueue = [];
+        socket.on('alert', function(alert) {
+            showAlertBanner(alert);
+        });
+
+        function showAlertBanner(alert) {
+            const banner = document.createElement('div');
+            banner.className = 'alert-banner ' + alert.level;
+            banner.innerHTML = '<i class="fas fa-' + (alert.level === 'danger' ? 'exclamation-triangle' : 'exclamation-circle') + '"></i>' +
+                '<span>' + alert.message + '</span>' +
+                '<button class="alert-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
+            document.body.appendChild(banner);
+            setTimeout(() => { if (banner.parentElement) banner.remove(); }, 8000);
+        }
+
         // ==================== SOCKET.IO EVENTS ====================
         socket.on('mqtt_update', function(data) {
             updateDashboard();
@@ -4317,6 +4704,7 @@ HTML_TEMPLATE = '''
             loadSavedSettings();
             updateSoundToggleUI();
             updateDashboard();
+            updateDeviceStatus();
             updateLogs();
             loadIRCodes();
             checkCameraStatus();
@@ -4326,6 +4714,7 @@ HTML_TEMPLATE = '''
             });
             
             setInterval(updateDashboard, 1000);
+            setInterval(updateDeviceStatus, 5000);
             setInterval(updateLogs, 5000);
             
             setInterval(() => {
