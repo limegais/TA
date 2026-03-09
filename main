@@ -169,11 +169,21 @@ def run_optimization_async(algo='both'):
         # Send results to dashboard
         send_dashboard_update()
         
-        # Notify dashboard: completed
+        # Notify dashboard: completed (include full data for redundancy)
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'completed', 'algorithm': algo,
             'ga_fitness': last_results['ga']['fitness'],
-            'pso_fitness': last_results['pso']['fitness']
+            'pso_fitness': last_results['pso']['fitness'],
+            'optimization_count': optimization_run_count,
+            'ga_solution': {
+                'temperature': last_results['ga']['temp'],
+                'fan_speed': last_results['ga']['fan']
+            },
+            'pso_solution': {
+                'brightness': last_results['pso']['brightness']
+            },
+            'ga_history': last_results['ga'].get('stats', []),
+            'pso_history': last_results['pso'].get('stats', [])
         }))
         
         print(f"\n✅ Dashboard-triggered {algo.upper()} optimization complete!")
@@ -244,9 +254,13 @@ def send_dashboard_update():
         'pso_history': last_results['pso'].get('stats', [])
     }
     
-    # Via MQTT
+    # Via MQTT - primary topic
     result = mqtt_client.publish('smartroom/dashboard/state', json.dumps(dashboard_data))
-    print(f"   Dashboard MQTT: {'✅' if result.rc == 0 else '❌'}")
+    print(f"   Dashboard MQTT (dashboard/state): {'✅' if result.rc == 0 else '❌'}")
+    
+    # Via MQTT - redundant topic for reliability
+    result2 = mqtt_client.publish('smartroom/ml/result', json.dumps(dashboard_data))
+    print(f"   Dashboard MQTT (ml/result): {'✅' if result2.rc == 0 else '❌'}")
     
     # Via HTTP API (backup)
     try:
