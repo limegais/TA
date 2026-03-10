@@ -538,6 +538,7 @@ def on_message(client, userdata, msg):
                 'ac_state': payload.get('ac_state', 'OFF'),
                 'ac_temp': payload.get('ac_temp', 24),
                 'fan_speed': payload.get('fan_speed', 1),
+                'ac_mode': payload.get('ac_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
@@ -2459,7 +2460,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-ac-state">OFF</span></div>
                     <div class="stat-change">
-                        <span>Target: <span id="dash-ac-temp">24</span>°C</span>
+                        <span><span id="dash-ac-temp">24</span>°C | Fan <span id="dash-ac-fan">1</span> | <span id="dash-ac-mode">COOL</span></span>
                     </div>
                 </div>
 
@@ -2721,11 +2722,24 @@ HTML_TEMPLATE = '''
                     <div class="mode-badge adaptive" id="ac-mode-badge" onclick="toggleACMode()">ADAPTIVE MODE</div>
                 </div>
                 
+                <!-- AC Realtime Status Bar -->
+                <div id="ac-live-status" style="margin-top: 12px; padding: 12px 16px; background: rgba(99, 102, 241, 0.08); border: 1px solid var(--border); border-radius: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <div id="ac-live-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #ef4444;"></div>
+                        <span style="font-weight: 600; color: var(--text);">AC <span id="ac-live-state">OFF</span></span>
+                    </div>
+                    <div style="display: flex; gap: 16px; color: var(--text-secondary);">
+                        <span><i class="fas fa-thermometer-half"></i> <span id="ac-live-temp">24</span>°C</span>
+                        <span><i class="fas fa-fan"></i> Fan <span id="ac-live-fan">1</span></span>
+                        <span><i class="fas fa-cog"></i> <span id="ac-live-mode">COOL</span></span>
+                    </div>
+                </div>
+                
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
-                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
+                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
                     </button>
-                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
+                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
@@ -4314,21 +4328,31 @@ HTML_TEMPLATE = '''
                     document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
                     
-                    // AC State Logic: < 30°C = ON, >= 30°C = OFF
+                    // AC State - use REAL state from ESP32, not temperature guessing
                     const acStateEl = document.getElementById('dash-ac-state');
-                    let acState = data.ac.ac_state;
+                    let acState = data.ac.ac_state || 'OFF';
                     
-                    // Override AC state based on temperature logic
-                    if (temperature < 30) {
-                        acState = 'ON';
+                    if (acState === 'ON') {
                         acStateEl.style.color = '#10b981'; // Green
                     } else {
-                        acState = 'OFF';
                         acStateEl.style.color = '#ef4444'; // Red
                     }
                     
                     acStateEl.textContent = acState;
-                    document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp;
+                    document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp || 24;
+                    document.getElementById('dash-ac-fan').textContent = data.ac.fan_speed || 1;
+                    document.getElementById('dash-ac-mode').textContent = data.ac.ac_mode || 'COOL';
+                    
+                    // Update AC Live Status Bar in control panel
+                    const liveDot = document.getElementById('ac-live-dot');
+                    const liveState = document.getElementById('ac-live-state');
+                    if (liveDot && liveState) {
+                        liveState.textContent = acState;
+                        liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
+                        document.getElementById('ac-live-temp').textContent = data.ac.ac_temp || 24;
+                        document.getElementById('ac-live-fan').textContent = data.ac.fan_speed || 1;
+                        document.getElementById('ac-live-mode').textContent = data.ac.ac_mode || 'COOL';
+                    }
                     
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
                     document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
