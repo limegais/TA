@@ -2722,16 +2722,16 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
-                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_ON')">
+                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
                     </button>
-                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_OFF')">
+                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
                     </button>
-                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_UP')">
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
                         <i class="fas fa-temperature-high" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP +
                     </button>
-                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_DOWN')">
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_DOWN')">
                         <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
                     </button>
                 </div>
@@ -3886,7 +3886,26 @@ HTML_TEMPLATE = '''
             });
         }
 
+        function sendACCommand(command) {
+            fetch('/api/ac/control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: command })
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.status === 'success') {
+                    const label = command.replace('_', ' ');
+                    showToast('AC: ' + label, 'success');
+                } else {
+                    showToast(result.message || 'Failed', 'error');
+                }
+            })
+            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+        }
+
         function sendIRCode(buttonName) {
+            // For IR Learning panel Send buttons - still uses learned codes
             fetch('/api/ir/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
