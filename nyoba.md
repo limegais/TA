@@ -3887,19 +3887,23 @@ HTML_TEMPLATE = '''
         }
 
         function sendACCommand(command) {
+            // Path 1: AC Control (Mitsubishi library + state tracking)
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: command })
+            });
+
+            // Path 2: Learned IR codes (proven working backup)
+            fetch('/api/ir/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ button: command })
             })
             .then(r => r.json())
             .then(result => {
-                if (result.status === 'success') {
-                    const label = command.replace('_', ' ');
-                    showToast('AC: ' + label, 'success');
-                } else {
-                    showToast(result.message || 'Failed', 'error');
-                }
+                const label = command.replace('_', ' ');
+                showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
             })
             .catch(e => showToast('Error: ' + (e.message || e), 'error'));
         }
@@ -3923,7 +3927,7 @@ HTML_TEMPLATE = '''
         }
 
         function sendACMode(modeName, btnElement) {
-            // Visual feedback - highlight active mode button
+            // Visual feedback
             document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                 btn.style.opacity = '0.6';
                 btn.style.transform = 'scale(0.95)';
@@ -3933,34 +3937,33 @@ HTML_TEMPLATE = '''
                 btnElement.style.transform = 'scale(1.05)';
             }
 
-            // Use AC control path (Mitsubishi AC library) instead of learned IR codes
+            // Path 1: AC control (library + state tracking)
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: modeName })
+            });
+
+            // Path 2: Learned IR codes (backup)
+            fetch('/api/ir/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ button: modeName })
             })
             .then(r => r.json())
             .then(result => {
-                if (result.status === 'success') {
-                    const modeLabel = modeName.replace('MODE_', '');
-                    showToast('AC Mode: ' + modeLabel, 'success');
-                    setTimeout(() => {
-                        document.querySelectorAll('.ac-mode-btn').forEach(btn => {
-                            btn.style.opacity = '1';
-                            btn.style.transform = 'scale(1)';
-                        });
-                        if (btnElement) {
-                            btnElement.style.transform = 'scale(1.05)';
-                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
-                        }
-                    }, 300);
-                } else {
-                    showToast('Failed: ' + (result.message || 'unknown'), 'error');
+                const modeLabel = modeName.replace('MODE_', '');
+                showToast('AC Mode: ' + modeLabel, 'success');
+                setTimeout(() => {
                     document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                         btn.style.opacity = '1';
                         btn.style.transform = 'scale(1)';
                     });
-                }
+                    if (btnElement) {
+                        btnElement.style.transform = 'scale(1.05)';
+                        btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                    }
+                }, 300);
             })
             .catch(e => {
                 showToast('Error: ' + (e.message || e), 'error');
