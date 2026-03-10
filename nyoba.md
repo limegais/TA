@@ -47,6 +47,7 @@ MQTT_PORT = 1883
 # Camera Configuration
 camera = None
 camera_lock = threading.Lock()
+camera_enabled = True  # Camera ON/OFF toggle
 
 # YOLO Configuration
 yolo_net = None
@@ -376,6 +377,9 @@ def generate_frames():
     save_interval = 5  # Save to InfluxDB every 5 seconds
     
     while True:
+        if not camera_enabled:
+            time.sleep(0.5)
+            continue
         with camera_lock:
             cam = get_camera()
             if cam is None or not cam.isOpened():
@@ -960,6 +964,28 @@ def restart_camera():
             return jsonify({'status': 'success', 'message': 'Camera restarted'})
         else:
             return jsonify({'status': 'error', 'message': 'Camera failed to restart'}), 500
+
+@app.route('/api/camera/toggle', methods=['POST'])
+def toggle_camera():
+    global camera_enabled, camera
+    camera_enabled = not camera_enabled
+    if not camera_enabled:
+        with camera_lock:
+            if camera is not None:
+                camera.release()
+                camera = None
+            mqtt_data['camera']['status'] = 'inactive'
+            mqtt_data['camera']['person_detected'] = False
+            mqtt_data['camera']['count'] = 0
+            mqtt_data['camera']['confidence'] = 0
+        return jsonify({'status': 'success', 'enabled': False, 'message': 'Camera OFF'})
+    else:
+        with camera_lock:
+            cam = get_camera()
+            if cam and cam.isOpened():
+                return jsonify({'status': 'success', 'enabled': True, 'message': 'Camera ON'})
+            else:
+                return jsonify({'status': 'error', 'enabled': True, 'message': 'Camera failed to start'}), 500
 
 @app.route('/api/data')
 def get_data():
@@ -2325,16 +2351,20 @@ HTML_TEMPLATE = '''
             <i class="fas fa-brain"></i>
             Smart Room
         </div>
-        <div class="nav-item active" onclick="showPage('dashboard')">
-            <i class="fas fa-home"></i>
-            <span>Dashboard</span>
+        <div class="nav-item active" onclick="showPage('dashboard-ac')">
+            <i class="fas fa-snowflake"></i>
+            <span>AC Dashboard</span>
+        </div>
+        <div class="nav-item" onclick="showPage('dashboard-lamp')">
+            <i class="fas fa-lightbulb"></i>
+            <span>Lamp Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('ac-analytics')">
-            <i class="fas fa-snowflake"></i>
+            <i class="fas fa-chart-line"></i>
             <span>AC Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('lamp-analytics')">
-            <i class="fas fa-lightbulb"></i>
+            <i class="fas fa-chart-bar"></i>
             <span>Lamp Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('camera')">
@@ -2345,9 +2375,13 @@ HTML_TEMPLATE = '''
             <i class="fas fa-bolt"></i>
             <span>Power Usage</span>
         </div>
-        <div class="nav-item" onclick="showPage('control')">
+        <div class="nav-item" onclick="showPage('control-ac')">
             <i class="fas fa-sliders-h"></i>
-            <span>Control Panel</span>
+            <span>AC Control</span>
+        </div>
+        <div class="nav-item" onclick="showPage('control-lamp')">
+            <i class="fas fa-adjust"></i>
+            <span>Lamp Control</span>
         </div>
         <div class="nav-item" onclick="showPage('ml-optimization')">
             <i class="fas fa-brain"></i>
@@ -2370,22 +2404,16 @@ HTML_TEMPLATE = '''
 
     <!-- Main Content -->
     <div class="main-content">
-        <!-- Dashboard Page -->
-        <div id="dashboard" class="page active">
+        <!-- AC Dashboard Page -->
+        <div id="dashboard-ac" class="page active">
             <div class="header">
-                <h1>Dashboard Overview</h1>
-                <p>Real-time monitoring of all systems</p>
-                <!-- Device Status Indicators -->
+                <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
+                <p>Air Conditioning monitoring & status</p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-ac">
                         <span class="device-dot offline"></span>
                         <span>ESP32-AC</span>
                         <span class="device-time" id="ds-ac-time">Never</span>
-                    </div>
-                    <div class="device-status-item" id="ds-esp32-lamp">
-                        <span class="device-dot offline"></span>
-                        <span>ESP32-Lamp</span>
-                        <span class="device-time" id="ds-lamp-time">Never</span>
                     </div>
                     <div class="device-status-item" id="ds-camera">
                         <span class="device-dot offline"></span>
@@ -2425,34 +2453,6 @@ HTML_TEMPLATE = '''
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Light Intensity</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-sun"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value"><span id="dash-lux">0</span> lx</div>
-                    <div class="stat-change">
-                        <span>Real-time</span>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Lamp Brightness</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-lightbulb"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value"><span id="dash-brightness">0</span>%</div>
-                    <div class="stat-change">
-                        <span>Real-time</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-header">
                         <span class="stat-title">AC Status</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
                             <i class="fas fa-snowflake"></i>
@@ -2461,19 +2461,6 @@ HTML_TEMPLATE = '''
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-ac-state">OFF</span></div>
                     <div class="stat-change">
                         <span><span id="dash-ac-temp">24</span>°C | Fan <span id="dash-ac-fan">1</span> | <span id="dash-ac-mode">COOL</span></span>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Motion Detection</span>
-                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
-                            <i class="fas fa-walking"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="dash-motion">NO MOTION</span></div>
-                    <div class="stat-change">
-                        <span>PIR Sensor</span>
                     </div>
                 </div>
 
@@ -2503,6 +2490,62 @@ HTML_TEMPLATE = '''
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
                         <span style="font-size: 11px; color: #94a3b8;"><i class="fas fa-thermometer-half"></i> Temp: <span id="ga-temp" style="color: #10b981; font-weight: bold;">--</span>°C &nbsp; <i class="fas fa-fan"></i> Fan: <span id="ga-fan" style="color: #10b981; font-weight: bold;">--</span></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lamp Dashboard Page -->
+        <div id="dashboard-lamp" class="page">
+            <div class="header">
+                <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
+                <p>Lighting monitoring & status</p>
+                <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
+                    <div class="device-status-item" id="ds-esp32-lamp">
+                        <span class="device-dot offline"></span>
+                        <span>ESP32-Lamp</span>
+                        <span class="device-time" id="ds-lamp-time">Never</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Light Intensity</span>
+                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                            <i class="fas fa-sun"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-lux">0</span> lx</div>
+                    <div class="stat-change">
+                        <span>Real-time</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp Brightness</span>
+                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
+                            <i class="fas fa-lightbulb"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-brightness">0</span>%</div>
+                    <div class="stat-change">
+                        <span>Real-time</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Motion Detection</span>
+                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
+                            <i class="fas fa-walking"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value" style="font-size: 24px;"><span id="dash-motion">NO MOTION</span></div>
+                    <div class="stat-change">
+                        <span>PIR Sensor</span>
                     </div>
                 </div>
 
@@ -2658,6 +2701,9 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
+                        <i class="fas fa-video" id="camera-toggle-icon"></i> <span id="camera-toggle-text">Camera ON</span>
+                    </button>
                     <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
                         <i class="fas fa-volume-up" id="sound-toggle-icon"></i> <span id="sound-toggle-text">Sound ON</span>
                     </button>
@@ -2710,10 +2756,11 @@ HTML_TEMPLATE = '''
         </div>
 
         <!-- Control Panel Page -->
-        <div id="control" class="page">
+        <!-- AC Control Page -->
+        <div id="control-ac" class="page">
             <div class="header">
-                <h1>Control Panel</h1>
-                <p>Manual control and mode selection</p>
+                <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
+                <p>Manual AC control and IR remote learning</p>
             </div>
 
             <div class="control-panel">
@@ -2962,6 +3009,14 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Lamp Control Page -->
+        <div id="control-lamp" class="page">
+            <div class="header">
+                <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
+                <p>Manual lamp control and brightness settings</p>
             </div>
 
             <div class="control-panel">
@@ -3640,6 +3695,49 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== CAMERA ====================
+        let cameraEnabled = true;
+
+        function toggleCamera() {
+            fetch('/api/camera/toggle', { method: 'POST' })
+                .then(r => r.json())
+                .then(result => {
+                    cameraEnabled = result.enabled;
+                    updateCameraToggleUI();
+                    const img = document.getElementById('camera-img');
+                    const error = document.getElementById('camera-error');
+                    if (cameraEnabled) {
+                        img.src = '/video_feed?' + new Date().getTime();
+                        img.style.display = 'block';
+                        error.style.display = 'none';
+                        showToast('Camera ON', 'success');
+                    } else {
+                        img.style.display = 'none';
+                        error.style.display = 'flex';
+                        error.querySelector('h3').textContent = 'Camera OFF';
+                        error.querySelector('p').textContent = 'Kamera dimatikan. Klik tombol Camera ON untuk mengaktifkan.';
+                        showToast('Camera OFF', 'info');
+                    }
+                    checkCameraStatus();
+                })
+                .catch(e => showToast('Error: ' + e, 'error'));
+        }
+
+        function updateCameraToggleUI() {
+            const btn = document.getElementById('camera-toggle-btn');
+            const icon = document.getElementById('camera-toggle-icon');
+            const text = document.getElementById('camera-toggle-text');
+            if (!btn) return;
+            if (cameraEnabled) {
+                btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                icon.className = 'fas fa-video';
+                text.textContent = 'Camera ON';
+            } else {
+                btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                icon.className = 'fas fa-video-slash';
+                text.textContent = 'Camera OFF';
+            }
+        }
+
         function retryCamera() {
             const img = document.getElementById('camera-img');
             const error = document.getElementById('camera-error');
@@ -3701,14 +3799,31 @@ HTML_TEMPLATE = '''
         }
 
         function sendACCommand(command) {
+            // Path 1: AC Control (Mitsubishi library + state tracking)
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: command })
-            })
-            .then(r => r.json())
-            .then(result => showToast(result.message))
-            .catch(e => showToast('Error: ' + e, 'error'));
+            });
+
+            // Path 2: Learned IR codes (proven working for POWER/MODE)
+            // Skip for TEMP_UP/TEMP_DOWN - library handles temp changes better
+            if (command !== 'TEMP_UP' && command !== 'TEMP_DOWN') {
+                fetch('/api/ir/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ button: command })
+                })
+                .then(r => r.json())
+                .then(result => {
+                    const label = command.replace('_', ' ');
+                    showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
+                })
+                .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+            } else {
+                const label = command.replace('_', ' ');
+                showToast('AC: ' + label, 'success');
+            }
         }
 
         let selectedACMode = 'COOL';
@@ -3929,11 +4044,18 @@ HTML_TEMPLATE = '''
                 btnElement.style.transform = 'scale(1.05)';
             }
 
-            // AC control via Mitsubishi library
+            // Path 1: AC control (library + state tracking)
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: modeName })
+            });
+
+            // Path 2: Learned IR codes (backup)
+            fetch('/api/ir/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ button: modeName })
             })
             .then(r => r.json())
             .then(result => {
@@ -4168,7 +4290,7 @@ HTML_TEMPLATE = '''
 
         // ==================== DETECTION ALERT ====================
         let lastDetectionTime = 0;
-        const DETECTION_COOLDOWN = 8000; // 8 seconds between alerts
+        const DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
         let detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
 
         // Initialize sound toggle button visual on load
@@ -4738,8 +4860,11 @@ HTML_TEMPLATE = '''
 
         // ==================== INIT ====================
         function loadSavedPreferences() {
-            const savedPage = localStorage.getItem('currentPage');
-            if (savedPage) {
+            let savedPage = localStorage.getItem('currentPage');
+            // Migrate old page IDs to new split pages
+            if (savedPage === 'dashboard') savedPage = 'dashboard-ac';
+            if (savedPage === 'control') savedPage = 'control-ac';
+            if (savedPage && document.getElementById(savedPage)) {
                 document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
                 
@@ -4758,6 +4883,7 @@ HTML_TEMPLATE = '''
             loadSavedPreferences();
             loadSavedSettings();
             updateSoundToggleUI();
+            updateCameraToggleUI();
             updateDashboard();
             updateDeviceStatus();
             updateLogs();
