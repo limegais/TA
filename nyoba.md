@@ -3900,28 +3900,6 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function sendACCommand(command) {
-            // Path 1: AC Control (Mitsubishi library + state tracking)
-            fetch('/api/ac/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: command })
-            });
-
-            // Path 2: Learned IR codes (proven working backup)
-            fetch('/api/ir/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: command })
-            })
-            .then(r => r.json())
-            .then(result => {
-                const label = command.replace('_', ' ');
-                showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
-            })
-            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
-        }
-
         function sendIRCode(buttonName) {
             // For IR Learning panel Send buttons - still uses learned codes
             fetch('/api/ir/send', {
@@ -3951,18 +3929,11 @@ HTML_TEMPLATE = '''
                 btnElement.style.transform = 'scale(1.05)';
             }
 
-            // Path 1: AC control (library + state tracking)
+            // AC control via Mitsubishi library
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: modeName })
-            });
-
-            // Path 2: Learned IR codes (backup)
-            fetch('/api/ir/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: modeName })
             })
             .then(r => r.json())
             .then(result => {
