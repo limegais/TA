@@ -3806,24 +3806,18 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify({ command: command })
             });
 
-            // Path 2: Learned IR codes (proven working for POWER/MODE)
-            // Skip for TEMP_UP/TEMP_DOWN - library handles temp changes better
-            if (command !== 'TEMP_UP' && command !== 'TEMP_DOWN') {
-                fetch('/api/ir/send', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ button: command })
-                })
-                .then(r => r.json())
-                .then(result => {
-                    const label = command.replace('_', ' ');
-                    showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
-                })
-                .catch(e => showToast('Error: ' + (e.message || e), 'error'));
-            } else {
+            // Path 2: Learned IR codes (proven working backup)
+            fetch('/api/ir/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ button: command })
+            })
+            .then(r => r.json())
+            .then(result => {
                 const label = command.replace('_', ' ');
-                showToast('AC: ' + label, 'success');
-            }
+                showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
+            })
+            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
         }
 
         let selectedACMode = 'COOL';
