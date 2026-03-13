@@ -1649,13 +1649,62 @@ HTML_TEMPLATE = '''
         }
 
         .dashboard-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(2, minmax(320px, 1fr));
+            align-items: stretch;
+        }
+
+        .dashboard-grid .stat-card {
+            min-height: 170px;
         }
 
         .feedback-grid {
             display: grid;
             grid-template-columns: 1.2fr 1fr;
             gap: 20px;
+        }
+
+        .occupancy-top {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .occupancy-kpi {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .occupancy-kpi .kpi-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .occupancy-kpi .kpi-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: #06b6d4;
+            line-height: 1;
+        }
+
+        .occupancy-mini-note {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .occupancy-chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+        }
+
+        .occupancy-chart-card canvas {
+            max-height: 160px;
         }
 
         .rating-row {
@@ -1669,16 +1718,25 @@ HTML_TEMPLATE = '''
             border: 1px solid var(--border);
             background: var(--bg-card);
             color: var(--text-primary);
-            border-radius: 8px;
-            padding: 8px 12px;
+            border-radius: 14px;
+            min-width: 74px;
+            min-height: 74px;
+            padding: 10px 12px;
             cursor: pointer;
             transition: all 0.2s;
+            font-size: 22px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .rating-btn.active {
             background: var(--primary);
             border-color: var(--primary);
             color: #fff;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(99, 102, 241, 0.35);
         }
 
         .feedback-input {
@@ -2301,6 +2359,7 @@ HTML_TEMPLATE = '''
             .stats-grid { grid-template-columns: 1fr; }
             .dashboard-grid { grid-template-columns: 1fr; }
             .feedback-grid { grid-template-columns: 1fr; }
+            .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
             .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
             .sidebar-overlay.active { display: block; }
@@ -2308,7 +2367,15 @@ HTML_TEMPLATE = '''
 
         @media (min-width: 769px) and (max-width: 1200px) {
             .dashboard-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
+                grid-template-columns: repeat(2, minmax(280px, 1fr));
+            }
+            .occupancy-top { grid-template-columns: 1fr; }
+        }
+
+        @media (min-width: 1400px) {
+            .main-content {
+                max-width: 1460px;
+                margin-right: auto;
             }
         }
 
@@ -3347,16 +3414,25 @@ HTML_TEMPLATE = '''
                 <p>Pantau tren okupansi dan kirim penilaian kenyamanan ruangan (1-5)</p>
             </div>
 
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Occupancy Trend (Person Count)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
-                    </div>
+            <div class="occupancy-top">
+                <div class="occupancy-kpi">
+                    <div class="kpi-label">Occupancy Saat Ini</div>
+                    <div class="kpi-value" id="occ-live-count">0</div>
+                    <div class="occupancy-mini-note">Orang terdeteksi saat ini</div>
+                    <div class="occupancy-mini-note">Confidence: <span id="occ-live-confidence">0%</span></div>
                 </div>
-                <canvas id="occupancyChart" height="80"></canvas>
+
+                <div class="occupancy-chart-card">
+                    <div class="chart-header" style="margin-bottom: 10px;">
+                        <div class="chart-title">Occupancy Trend</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
+                        </div>
+                    </div>
+                    <canvas id="occupancyChart" height="48"></canvas>
+                </div>
             </div>
 
             <div class="feedback-grid">
@@ -3367,12 +3443,16 @@ HTML_TEMPLATE = '''
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         Skala: 1 = Tidak Puas, 5 = Sangat Puas
                     </div>
-                    <div class="rating-row" id="rating-row">
-                        <button class="rating-btn" onclick="selectFeedbackRating(1)">1</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(2)">2</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(3)">3</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(4)">4</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(5)">5</button>
+                    <div class="rating-row" id="rating-row" style="margin-top: 14px;">
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Tidak puas">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Kurang puas">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Cukup">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Puas">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Sangat puas">5</button>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-secondary);">
+                        <span>Tidak Puas</span>
+                        <span>Sangat Puas</span>
                     </div>
                     <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Masukkan feedback pengguna ruangan..."></textarea>
                     <input id="google-form-url" class="feedback-input" placeholder="Masukkan URL Google Form Anda" />
@@ -4729,6 +4809,11 @@ HTML_TEMPLATE = '''
                         camConfEl.textContent = confidence + '%';
                         camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
                     }
+
+                    const occCountEl = document.getElementById('occ-live-count');
+                    const occConfEl = document.getElementById('occ-live-confidence');
+                    if (occCountEl) occCountEl.textContent = personCount;
+                    if (occConfEl) occConfEl.textContent = confidence + '%';
                     
                     // Show detection alert if person detected
                     if (personDetected && personCount > 0) {
