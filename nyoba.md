@@ -1605,7 +1605,7 @@ HTML_TEMPLATE = '''
 
         .main-content {
             margin-left: 260px;
-            padding: 30px;
+            padding: 22px;
             min-height: 100vh;
         }
 
@@ -1627,7 +1627,7 @@ HTML_TEMPLATE = '''
             background: var(--bg-card);
             padding: 20px 30px;
             border-radius: 12px;
-            margin-bottom: 30px;
+            margin-bottom: 16px;
             border: 1px solid var(--border);
         }
 
@@ -1644,17 +1644,17 @@ HTML_TEMPLATE = '''
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+            gap: 14px;
+            margin-bottom: 16px;
         }
 
         .dashboard-grid {
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             align-items: stretch;
         }
 
         .dashboard-grid .stat-card {
-            min-height: 170px;
+            min-height: 185px;
         }
 
         .feedback-grid {
@@ -1759,7 +1759,7 @@ HTML_TEMPLATE = '''
 
         .stat-card {
             background: var(--bg-card);
-            padding: 24px;
+            padding: 18px;
             border-radius: 12px;
             border: 1px solid var(--border);
             transition: all 0.3s;
@@ -2367,9 +2367,15 @@ HTML_TEMPLATE = '''
 
         @media (min-width: 769px) and (max-width: 1200px) {
             .dashboard-grid {
-                grid-template-columns: repeat(2, minmax(280px, 1fr));
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
             .occupancy-top { grid-template-columns: 1fr; }
+        }
+
+        @media (min-width: 1201px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         .hamburger-btn {
