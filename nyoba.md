@@ -1649,7 +1649,7 @@ HTML_TEMPLATE = '''
         }
 
         .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(320px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             align-items: stretch;
         }
 
@@ -2370,13 +2370,6 @@ HTML_TEMPLATE = '''
                 grid-template-columns: repeat(2, minmax(280px, 1fr));
             }
             .occupancy-top { grid-template-columns: 1fr; }
-        }
-
-        @media (min-width: 1400px) {
-            .main-content {
-                max-width: 1460px;
-                margin-right: auto;
-            }
         }
 
         .hamburger-btn {
