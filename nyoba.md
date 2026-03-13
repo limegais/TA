@@ -34,6 +34,10 @@ alert_rules = {
 }
 active_alerts = deque(maxlen=50)
 
+# Occupancy Feedback
+GOOGLE_FORM_URL = "https://docs.google.com/forms/"
+occupancy_feedback = deque(maxlen=200)
+
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
 INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb_I0leIREUnMhvQQXtgETfg=="
@@ -991,6 +995,40 @@ def toggle_camera():
 def get_data():
     return jsonify(mqtt_data)
 
+@app.route('/api/occupancy/feedback', methods=['POST'])
+def occupancy_feedback_submit():
+    try:
+        data = request.json or {}
+        rating = int(data.get('rating', 0))
+        comment = (data.get('comment') or '').strip()
+        occupancy_count = int(data.get('occupancy_count', 0))
+        google_form_url = (data.get('google_form_url') or GOOGLE_FORM_URL).strip()
+
+        if rating < 1 or rating > 5:
+            return jsonify({'status': 'error', 'message': 'Rating harus 1-5'}), 400
+
+        row = {
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'rating': rating,
+            'comment': comment,
+            'occupancy_count': occupancy_count,
+            'google_form_url': google_form_url
+        }
+        occupancy_feedback.appendleft(row)
+        log_messages.append({
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'msg': f'Occupancy Feedback: rating={rating}, occupancy={occupancy_count}, comment={comment[:40]}',
+            'level': 'info'
+        })
+
+        return jsonify({'status': 'success', 'message': 'Feedback tersimpan', 'google_form_url': google_form_url})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/occupancy/feedback/list')
+def occupancy_feedback_list():
+    return jsonify({'feedback': list(occupancy_feedback)[:20]})
+
 @app.route('/api/chart/<measurement>/<field>/<int:hours>')
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
@@ -1610,6 +1648,57 @@ HTML_TEMPLATE = '''
             margin-bottom: 30px;
         }
 
+        .dashboard-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .feedback-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 20px;
+        }
+
+        .rating-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .rating-btn {
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border-radius: 8px;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .rating-btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: #fff;
+        }
+
+        .feedback-input {
+            width: 100%;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-primary);
+            padding: 10px 12px;
+            margin-top: 10px;
+        }
+
+        .feedback-history-item {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            background: var(--bg-card-hover);
+        }
+
         .stat-card {
             background: var(--bg-card);
             padding: 24px;
@@ -2210,9 +2299,17 @@ HTML_TEMPLATE = '''
             .sidebar.open { transform: translateX(0); }
             .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
             .stats-grid { grid-template-columns: 1fr; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .feedback-grid { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
             .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
             .sidebar-overlay.active { display: block; }
+        }
+
+        @media (min-width: 769px) and (max-width: 1200px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         .hamburger-btn {
@@ -2371,9 +2468,9 @@ HTML_TEMPLATE = '''
             <i class="fas fa-video"></i>
             <span>Camera</span>
         </div>
-        <div class="nav-item" onclick="showPage('power')">
+        <div class="nav-item" onclick="showPage('energy')">
             <i class="fas fa-bolt"></i>
-            <span>Power Usage</span>
+            <span>Energy Usage</span>
         </div>
         <div class="nav-item" onclick="showPage('control-ac')">
             <i class="fas fa-sliders-h"></i>
@@ -2390,6 +2487,10 @@ HTML_TEMPLATE = '''
         <div class="nav-item" onclick="showPage('logs')">
             <i class="fas fa-file-alt"></i>
             <span>System Logs</span>
+        </div>
+        <div class="nav-item" onclick="showPage('occupancy-feedback')">
+            <i class="fas fa-clipboard-check"></i>
+            <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
         <button class="theme-toggle" onclick="toggleTheme()" id="theme-toggle-btn">
@@ -2423,7 +2524,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <div class="stats-grid">
+            <div class="stats-grid dashboard-grid">
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Room Temperature</span>
@@ -2509,7 +2610,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <div class="stats-grid">
+            <div class="stats-grid dashboard-grid">
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Light Intensity</span>
@@ -2714,30 +2815,30 @@ HTML_TEMPLATE = '''
             </div>
         </div>
 
-        <!-- Power Usage Page -->
-        <div id="power" class="page">
+        <!-- Energy Usage Page -->
+        <div id="energy" class="page">
             <div class="header">
-                <h1>Power Usage</h1>
-                <p>Energy consumption monitoring and analysis</p>
+                <h1>Energy Usage</h1>
+                <p>Pemakaian energi AC dan Lamp dalam kWh</p>
             </div>
 
             <div class="power-grid">
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Power</div>
-                    <div class="power-value"><span id="ac-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Hari</div>
+                    <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Power</div>
-                    <div class="power-value"><span id="lamp-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Hari</div>
+                    <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Power</div>
-                    <div class="power-value"><span id="total-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Hari</div>
+                    <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
@@ -2749,9 +2850,9 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title">Power Consumption Trend</div>
+                    <div class="chart-title">Energy Trend (kWh/day equivalent)</div>
                 </div>
-                <canvas id="powerChart" height="80"></canvas>
+                <canvas id="energyChart" height="80"></canvas>
             </div>
         </div>
 
@@ -3238,6 +3339,65 @@ HTML_TEMPLATE = '''
             <div class="log-container" id="log-container">
             </div>
         </div>
+
+        <!-- Occupancy Trend & Feedback Page -->
+        <div id="occupancy-feedback" class="page">
+            <div class="header">
+                <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
+                <p>Pantau tren okupansi dan kirim penilaian kenyamanan ruangan (1-5)</p>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Occupancy Trend (Person Count)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="occupancyChart" height="80"></canvas>
+            </div>
+
+            <div class="feedback-grid">
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-star"></i> Feedback Kenyamanan</div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
+                        Skala: 1 = Tidak Puas, 5 = Sangat Puas
+                    </div>
+                    <div class="rating-row" id="rating-row">
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)">5</button>
+                    </div>
+                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Masukkan feedback pengguna ruangan..."></textarea>
+                    <input id="google-form-url" class="feedback-input" placeholder="Masukkan URL Google Form Anda" />
+
+                    <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
+                            <i class="fas fa-save"></i> Simpan Link Form
+                        </button>
+                        <button class="btn btn-success" onclick="openGoogleForm()">
+                            <i class="fas fa-external-link-alt"></i> Buka Google Form
+                        </button>
+                        <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
+                            <i class="fas fa-paper-plane"></i> Kirim Feedback
+                        </button>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-history"></i> Feedback Terbaru</div>
+                    </div>
+                    <div id="feedback-history"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Toast Notification -->
@@ -3272,8 +3432,12 @@ HTML_TEMPLATE = '''
             hum: 1,
             acTemp: 1,
             lampLux: 1,
-            lampBright: 1
+            lampBright: 1,
+            occupancy: 1
         };
+
+        let selectedFeedbackRating = 0;
+        const DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
 
         let learnedCodes = {};
 
@@ -3357,9 +3521,14 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
-            charts.power = new Chart(document.getElementById('powerChart'), {
+            charts.energy = new Chart(document.getElementById('energyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Total Power (W)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
             });
 
             // ML Optimization Charts
@@ -3397,6 +3566,7 @@ HTML_TEMPLATE = '''
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
+                case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
             }
 
             fetch(endpoint)
@@ -3487,6 +3657,10 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'ml-optimization') {
                 refreshMLData();
+            }
+            if (pageId === 'occupancy-feedback') {
+                updateChartData('occupancy', chartRanges.occupancy || 1);
+                loadFeedbackHistory();
             }
         }
 
@@ -4406,6 +4580,95 @@ HTML_TEMPLATE = '''
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
 
+        // ==================== OCCUPANCY FEEDBACK ====================
+        function selectFeedbackRating(value) {
+            selectedFeedbackRating = value;
+            document.querySelectorAll('#rating-row .rating-btn').forEach((btn, idx) => {
+                btn.classList.toggle('active', idx + 1 === value);
+            });
+        }
+
+        function saveGoogleFormUrl() {
+            const url = (document.getElementById('google-form-url').value || '').trim();
+            if (!url) {
+                showToast('Masukkan URL Google Form terlebih dahulu', 'error');
+                return;
+            }
+            localStorage.setItem('googleFormUrl', url);
+            showToast('URL Google Form tersimpan', 'success');
+        }
+
+        function openGoogleForm() {
+            const url = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+            window.open(url, '_blank');
+        }
+
+        function submitOccupancyFeedback() {
+            const comment = (document.getElementById('feedback-comment').value || '').trim();
+            const formUrl = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+
+            if (!selectedFeedbackRating) {
+                showToast('Pilih rating 1-5 terlebih dahulu', 'error');
+                return;
+            }
+
+            fetch('/api/occupancy/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    rating: selectedFeedbackRating,
+                    comment: comment,
+                    google_form_url: formUrl,
+                    occupancy_count: parseInt(document.getElementById('cam-count')?.textContent || '0', 10)
+                })
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.status === 'success') {
+                    showToast('Feedback berhasil dikirim', 'success');
+                    document.getElementById('feedback-comment').value = '';
+                    selectFeedbackRating(0);
+                    loadFeedbackHistory();
+                    if (formUrl && formUrl !== DEFAULT_GOOGLE_FORM_URL) {
+                        window.open(formUrl, '_blank');
+                    }
+                } else {
+                    showToast(result.message || 'Gagal kirim feedback', 'error');
+                }
+            })
+            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+        }
+
+        function loadFeedbackHistory() {
+            fetch('/api/occupancy/feedback/list')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('feedback-history');
+                    if (!container) return;
+
+                    const rows = data.feedback || [];
+                    if (rows.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Belum ada feedback.</div>';
+                        return;
+                    }
+
+                    container.innerHTML = rows.map(item => {
+                        const safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        return `
+                            <div class="feedback-history-item">
+                                <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                                    <strong>Rating: ${item.rating}/5</strong>
+                                    <span style="font-size:12px; color: var(--text-secondary);">${item.time}</span>
+                                </div>
+                                <div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ${item.occupancy_count} person(s)</div>
+                                <div style="margin-top:6px; font-size:13px;">${safeComment || '-'}</div>
+                            </div>
+                        `;
+                    }).join('');
+                })
+                .catch(() => {});
+        }
+
         // ==================== DATA UPDATES ====================
         function updateDashboard() {
             fetch('/api/data')
@@ -4497,12 +4760,30 @@ HTML_TEMPLATE = '''
                     }
                     let lampPower = (data.lamp.brightness / 255) * 10;
                     let totalPower = acPower + lampPower;
+                    let acEnergyKwh = (acPower / 1000) * 24;
+                    let lampEnergyKwh = (lampPower / 1000) * 24;
+                    let totalEnergyKwh = acEnergyKwh + lampEnergyKwh;
                     let dailyCost = (totalPower / 1000) * 24 * 1500;
                     
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
                     document.getElementById('total-power').textContent = totalPower.toFixed(1);
+                    document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
+                    document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
+                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(2);
                     document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
+
+                    if (charts.energy) {
+                        const now = new Date();
+                        const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
+                        if (charts.energy.data.labels.length >= 50) {
+                            charts.energy.data.labels.shift();
+                            charts.energy.data.datasets[0].data.shift();
+                        }
+                        charts.energy.data.labels.push(timeLabel);
+                        charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
+                        charts.energy.update();
+                    }
                     
                     updateModeBadges();
                 });
@@ -4858,6 +5139,7 @@ HTML_TEMPLATE = '''
             // Migrate old page IDs to new split pages
             if (savedPage === 'dashboard') savedPage = 'dashboard-ac';
             if (savedPage === 'control') savedPage = 'control-ac';
+            if (savedPage === 'power') savedPage = 'energy';
             if (savedPage && document.getElementById(savedPage)) {
                 document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
@@ -4883,6 +5165,11 @@ HTML_TEMPLATE = '''
             updateLogs();
             loadIRCodes();
             checkCameraStatus();
+            const googleFormInput = document.getElementById('google-form-url');
+            if (googleFormInput) {
+                googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+            }
+            loadFeedbackHistory();
             
             Object.keys(chartRanges).forEach(chartName => {
                 updateChartData(chartName, chartRanges[chartName]);
