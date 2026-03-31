@@ -59,6 +59,10 @@ yolo_classes = []
 yolo_output_layers = []
 yolo_lock = threading.Lock()
 
+# Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
+_last_adaptive_ac_apply = 0
+_last_adaptive_lamp_apply = 0
+
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
@@ -631,15 +635,27 @@ def on_message(client, userdata, msg):
                 opt_temp = mqtt_data['system'].get('ga_temp', 0)
                 opt_fan = mqtt_data['system'].get('ga_fan', 0)
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
-                    client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    global _last_adaptive_ac_apply
+                    now = time.time()
+                    if now - _last_adaptive_ac_apply >= 5:
+                        _last_adaptive_ac_apply = now
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                        client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                        print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    else:
+                        print(f"🤖 ADAPTIVE → AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
                 if opt_brightness > 0:
-                    client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
-                    print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                    global _last_adaptive_lamp_apply
+                    now = time.time()
+                    if now - _last_adaptive_lamp_apply >= 5:
+                        _last_adaptive_lamp_apply = now
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
+                        print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                    else:
+                        print(f"🤖 ADAPTIVE → Lamp apply debounced")
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
@@ -1158,23 +1174,37 @@ def update_optimization():
         print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
         
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
+        # Uses same 5-second debounce as on_message to avoid double-apply
+        # (main.py sends both MQTT ml/result AND HTTP POST — debounce prevents duplicate IR)
         if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
             opt_temp = mqtt_data['system'].get('ga_temp', 0)
             opt_fan = mqtt_data['system'].get('ga_fan', 0)
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
-                ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
-                mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
-                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
+                global _last_adaptive_ac_apply
+                now = time.time()
+                if now - _last_adaptive_ac_apply >= 5:
+                    _last_adaptive_ac_apply = now
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                    print(f"🤖 ADAPTIVE (HTTP) → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
+                else:
+                    print(f"🤖 ADAPTIVE (HTTP) → AC apply debounced (MQTT already handled it)")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
             opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
             if opt_brightness > 0:
-                lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
-                mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
-                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
+                global _last_adaptive_lamp_apply
+                now = time.time()
+                if now - _last_adaptive_lamp_apply >= 5:
+                    _last_adaptive_lamp_apply = now
+                    lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
+                    print(f"🤖 ADAPTIVE (HTTP) → Applied to Lamp: {opt_brightness}%")
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
+                else:
+                    print(f"🤖 ADAPTIVE (HTTP) → Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
