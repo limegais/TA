@@ -1087,32 +1087,14 @@ def control_ac():
         data = request.json
         command = data.get('command', data.get('action', ''))
 
-        # Path 1: Send command for ESP32 state tracking
+        # Send command to ESP32 — ESP32 now uses IRMitsubishiAC library
+        # to construct and send proper Mitsubishi protocol frames directly.
+        # No need to send RAW IR codes from Flask anymore!
         mqtt_client.publish('smartroom/ac/control', json.dumps(data))
+        print(f"[AC Control] Sent command '{command}' to ESP32 (Mitsubishi AC library handles IR)")
 
-        # Path 2: Also send learned IR code if available (so ESP32 can transmit IR)
-        ir_sent = False
-        ir_button = command  # e.g. 'POWER_ON', 'TEMP_UP', 'MODE_COOL'
-        if ir_button and ir_button in mqtt_data['ir_codes']:
-            ir_code = mqtt_data['ir_codes'][ir_button]
-            mqtt_payload = json.dumps({'button': ir_button, 'code': ir_code})
-            result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
-            ir_sent = (result.rc == 0)
-            print(f"[AC Control] Also sent IR code for '{ir_button}': {'OK' if ir_sent else 'FAILED'}")
-        
-        # For SET command: also send the mode-specific IR code if available
-        if command == 'SET' and not ir_sent:
-            mode = data.get('mode', '')
-            mode_btn = f'MODE_{mode}'.upper() if mode else ''
-            if mode_btn and mode_btn in mqtt_data['ir_codes']:
-                ir_code = mqtt_data['ir_codes'][mode_btn]
-                mqtt_payload = json.dumps({'button': mode_btn, 'code': ir_code})
-                result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
-                ir_sent = (result.rc == 0)
-                print(f"[AC Control] SET → sent IR code for mode '{mode_btn}': {'OK' if ir_sent else 'FAILED'}")
-
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command} (IR: {"sent" if ir_sent else "no code"})', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ir_sent': ir_sent})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
+        return jsonify({'status': 'success', 'message': f'AC command sent: {command}'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1183,9 +1165,6 @@ def update_optimization():
                 ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                 mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
                 print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
-                # Also send IR code if available for MODE_COOL
-                if 'MODE_COOL' in mqtt_data['ir_codes']:
-                    mqtt_client.publish('smartroom/ir/send', json.dumps({'button': 'MODE_COOL', 'code': mqtt_data['ir_codes']['MODE_COOL']}))
                 log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
