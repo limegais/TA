@@ -210,27 +210,22 @@ def run_optimization_cycle(algo='both', verbose=True):
 
 # ==================== SEND RESULTS ====================
 def apply_ga_result(solution, fitness):
-    """Send GA (AC) optimization result to devices"""
+    """Store GA (AC) optimization result — Flask ADAPTIVE handler will apply"""
     temp, fan = solution
-    print(f"📤 APPLYING GA → AC: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
-    
-    ac_cmd = {'temperature': temp, 'fan_speed': fan, 'action': 'set_temp'}
-    result = mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-    print(f"   AC Control: {'✅' if result.rc == 0 else '❌'}")
-    
+    print(f"📊 GA Result: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
+    # Do NOT publish directly to ac/control here.
+    # Flask on_message checks ADAPTIVE mode and applies exactly once.
+    # Direct publish here would cause duplicate/conflicting IR commands.
     last_results['ga']['fitness'] = fitness
     last_results['ga']['temp'] = temp
     last_results['ga']['fan'] = fan
 
 def apply_pso_result(solution, fitness):
-    """Send PSO (Lamp) optimization result to devices"""
+    """Store PSO (Lamp) optimization result — Flask ADAPTIVE handler will apply"""
     brightness = solution[0]
-    print(f"📤 APPLYING PSO → Lamp: {brightness}%, Fitness: {fitness:.2f}")
-    
-    lamp_cmd = {'brightness': brightness, 'action': 'set_brightness'}
-    result = mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-    print(f"   Lamp Control: {'✅' if result.rc == 0 else '❌'}")
-    
+    print(f"📊 PSO Result: {brightness}%, Fitness: {fitness:.2f}")
+    # Do NOT publish directly to lamp/control here.
+    # Flask on_message checks ADAPTIVE mode and applies exactly once.
     last_results['pso']['fitness'] = fitness
     last_results['pso']['brightness'] = brightness
 
@@ -254,13 +249,10 @@ def send_dashboard_update():
         'pso_history': last_results['pso'].get('stats', [])
     }
     
-    # Via MQTT - primary topic
-    result = mqtt_client.publish('smartroom/dashboard/state', json.dumps(dashboard_data))
-    print(f"   Dashboard MQTT (dashboard/state): {'✅' if result.rc == 0 else '❌'}")
-    
-    # Via MQTT - redundant topic for reliability
-    result2 = mqtt_client.publish('smartroom/ml/result', json.dumps(dashboard_data))
-    print(f"   Dashboard MQTT (ml/result): {'✅' if result2.rc == 0 else '❌'}")
+    # Via MQTT - single topic to avoid Flask processing same data twice
+    # Flask on_message handles 'ml/result' → checks ADAPTIVE → sends ONE ac/control
+    result = mqtt_client.publish('smartroom/ml/result', json.dumps(dashboard_data))
+    print(f"   Dashboard MQTT (ml/result): {'✅' if result.rc == 0 else '❌'}")
     
     # Via HTTP API (backup)
     try:
