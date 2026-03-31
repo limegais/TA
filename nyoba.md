@@ -626,6 +626,20 @@ def on_message(client, userdata, msg):
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
                 'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
             })
+            # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
+            if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+                opt_temp = mqtt_data['system'].get('ga_temp', 0)
+                opt_fan = mqtt_data['system'].get('ga_fan', 0)
+                if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                    client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                    print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+            # AUTO-APPLY: If Lamp is in ADAPTIVE mode
+            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+                opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
+                if opt_brightness > 0:
+                    client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
+                    print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
@@ -1071,9 +1085,34 @@ def ml_run():
 def control_ac():
     try:
         data = request.json
+        command = data.get('command', data.get('action', ''))
+
+        # Path 1: Send command for ESP32 state tracking
         mqtt_client.publish('smartroom/ac/control', json.dumps(data))
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {data}', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': 'AC command sent'})
+
+        # Path 2: Also send learned IR code if available (so ESP32 can transmit IR)
+        ir_sent = False
+        ir_button = command  # e.g. 'POWER_ON', 'TEMP_UP', 'MODE_COOL'
+        if ir_button and ir_button in mqtt_data['ir_codes']:
+            ir_code = mqtt_data['ir_codes'][ir_button]
+            mqtt_payload = json.dumps({'button': ir_button, 'code': ir_code})
+            result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
+            ir_sent = (result.rc == 0)
+            print(f"[AC Control] Also sent IR code for '{ir_button}': {'OK' if ir_sent else 'FAILED'}")
+        
+        # For SET command: also send the mode-specific IR code if available
+        if command == 'SET' and not ir_sent:
+            mode = data.get('mode', '')
+            mode_btn = f'MODE_{mode}'.upper() if mode else ''
+            if mode_btn and mode_btn in mqtt_data['ir_codes']:
+                ir_code = mqtt_data['ir_codes'][mode_btn]
+                mqtt_payload = json.dumps({'button': mode_btn, 'code': ir_code})
+                result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
+                ir_sent = (result.rc == 0)
+                print(f"[AC Control] SET → sent IR code for mode '{mode_btn}': {'OK' if ir_sent else 'FAILED'}")
+
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command} (IR: {"sent" if ir_sent else "no code"})', 'level': 'info'})
+        return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ir_sent': ir_sent})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1135,6 +1174,28 @@ def update_optimization():
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
+        
+        # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
+        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            opt_temp = mqtt_data['system'].get('ga_temp', 0)
+            opt_fan = mqtt_data['system'].get('ga_fan', 0)
+            if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
+                ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                # Also send IR code if available for MODE_COOL
+                if 'MODE_COOL' in mqtt_data['ir_codes']:
+                    mqtt_client.publish('smartroom/ir/send', json.dumps({'button': 'MODE_COOL', 'code': mqtt_data['ir_codes']['MODE_COOL']}))
+                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
+        
+        # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
+            if opt_brightness > 0:
+                lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
+                mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
+                print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -2950,10 +3011,10 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
-                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
+                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
                     </button>
-                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
+                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
@@ -4052,23 +4113,16 @@ HTML_TEMPLATE = '''
         }
 
         function sendACCommand(command) {
-            // Path 1: AC Control (Mitsubishi library + state tracking)
+            // Single endpoint handles BOTH state tracking AND IR code transmission
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: command })
-            });
-
-            // Path 2: Learned IR codes (proven working backup)
-            fetch('/api/ir/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: command })
             })
             .then(r => r.json())
             .then(result => {
                 const label = command.replace('_', ' ');
-                showToast('AC: ' + label, result.status === 'success' ? 'success' : 'info');
+                showToast('AC: ' + label, result.ir_sent ? 'success' : 'info');
             })
             .catch(e => showToast('Error: ' + (e.message || e), 'error'));
         }
@@ -4291,23 +4345,16 @@ HTML_TEMPLATE = '''
                 btnElement.style.transform = 'scale(1.05)';
             }
 
-            // Path 1: AC control (library + state tracking)
+            // Single endpoint handles state tracking + IR code transmission
             fetch('/api/ac/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: modeName })
-            });
-
-            // Path 2: Learned IR codes (backup)
-            fetch('/api/ir/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: modeName })
             })
             .then(r => r.json())
             .then(result => {
                 const modeLabel = modeName.replace('MODE_', '');
-                showToast('AC Mode: ' + modeLabel, 'success');
+                showToast('AC Mode: ' + modeLabel, result.ir_sent ? 'success' : 'info');
                 setTimeout(() => {
                     document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                         btn.style.opacity = '1';
