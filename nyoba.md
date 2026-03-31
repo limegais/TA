@@ -2700,16 +2700,68 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">AC Status</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-snowflake"></i>
+                <!-- AC Status - Full Width Detailed Panel -->
+                <div class="stat-card" id="ac-status-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
+                    <!-- Header Bar -->
+                    <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-snowflake" style="font-size: 18px; color: #6366f1;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">AC Status</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">Mitsubishi Heavy Industries — Real-time</div>
+                            </div>
+                        </div>
+                        <div id="ac-panel-power" style="display: flex; align-items: center; gap: 8px;">
+                            <div id="ac-panel-dot" style="width: 12px; height: 12px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);"></div>
+                            <span id="dash-ac-state" style="font-size: 16px; font-weight: 800; color: #ef4444;">OFF</span>
                         </div>
                     </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="dash-ac-state">OFF</span></div>
-                    <div class="stat-change">
-                        <span><span id="dash-ac-temp">24</span>°C | Fan <span id="dash-ac-fan">1</span> | <span id="dash-ac-mode">COOL</span></span>
+                    <!-- Body Grid -->
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+                        <!-- Set Temperature -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-thermometer-half"></i> Set Suhu
+                            </div>
+                            <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
+                        </div>
+                        <!-- Fan Speed -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(139, 92, 246, 0.06); border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-fan"></i> Fan Speed
+                            </div>
+                            <div style="font-size: 28px; font-weight: 800; color: #8b5cf6;" id="dash-ac-fan">1</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="dash-ac-fan-label">Low</div>
+                        </div>
+                        <!-- AC Mode (COOL/HEAT/DRY/FAN/AUTO) -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(14, 165, 233, 0.06); border-radius: 12px; border: 1px solid rgba(14, 165, 233, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-cog"></i> Mode AC
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon"><i class="fas fa-snowflake"></i></div>
+                            <div style="font-size: 14px; font-weight: 700; color: #0ea5e9; margin-top: 2px;" id="dash-ac-mode">COOL</div>
+                        </div>
+                        <!-- Operating Mode (ADAPTIVE/MANUAL) -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-sliders-h"></i> Kontrol
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon"><i class="fas fa-robot"></i></div>
+                            <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
+                        </div>
+                    </div>
+                    <!-- Footer: Room Environment + extra info -->
+                    <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
+                        <div style="display: flex; gap: 16px; align-items: center;">
+                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Ruangan: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
+                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Kelembapan: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
+                        </div>
+                        <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
+                            <i class="fas fa-robot"></i> AI Controlled
+                        </div>
                     </div>
                 </div>
 
@@ -4854,9 +4906,85 @@ HTML_TEMPLATE = '''
                     }
                     
                     acStateEl.textContent = acState;
-                    document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp || 24;
-                    document.getElementById('dash-ac-fan').textContent = data.ac.fan_speed || 1;
-                    document.getElementById('dash-ac-mode').textContent = data.ac.ac_mode || 'COOL';
+                    
+                    // AC panel power dot
+                    const panelDot = document.getElementById('ac-panel-dot');
+                    if (panelDot) {
+                        panelDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
+                        panelDot.style.boxShadow = acState === 'ON' ? '0 0 8px rgba(16,185,129,0.5)' : '0 0 8px rgba(239,68,68,0.5)';
+                    }
+                    
+                    // Set Temperature
+                    const acTemp = data.ac.ac_temp || 24;
+                    document.getElementById('dash-ac-temp').textContent = acTemp;
+                    
+                    // Fan Speed with label
+                    const fanSpeed = data.ac.fan_speed || 1;
+                    document.getElementById('dash-ac-fan').textContent = fanSpeed;
+                    const fanLabel = document.getElementById('dash-ac-fan-label');
+                    if (fanLabel) {
+                        const fanNames = {1: 'Low', 2: 'Medium', 3: 'High'};
+                        fanLabel.textContent = fanNames[fanSpeed] || 'Level ' + fanSpeed;
+                    }
+                    
+                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color
+                    const acMode = data.ac.ac_mode || 'COOL';
+                    document.getElementById('dash-ac-mode').textContent = acMode;
+                    const modeIconEl = document.getElementById('dash-ac-mode-icon');
+                    const modeTextEl = document.getElementById('dash-ac-mode');
+                    const modeIcons = {
+                        'COOL': {icon: 'fa-snowflake', color: '#0ea5e9'},
+                        'HEAT': {icon: 'fa-fire', color: '#f97316'},
+                        'DRY':  {icon: 'fa-tint-slash', color: '#a855f7'},
+                        'FAN':  {icon: 'fa-fan', color: '#8b5cf6'},
+                        'AUTO': {icon: 'fa-magic', color: '#6366f1'}
+                    };
+                    const modeInfo = modeIcons[acMode] || modeIcons['COOL'];
+                    if (modeIconEl) {
+                        modeIconEl.innerHTML = '<i class="fas ' + modeInfo.icon + '"></i>';
+                        modeIconEl.style.color = modeInfo.color;
+                    }
+                    if (modeTextEl) modeTextEl.style.color = modeInfo.color;
+                    
+                    // Operating Mode (ADAPTIVE / MANUAL)
+                    const ctrlMode = data.ac.mode || 'ADAPTIVE';
+                    const ctrlIcon = document.getElementById('dash-ac-ctrl-icon');
+                    const ctrlText = document.getElementById('dash-ac-ctrl-mode');
+                    if (ctrlIcon && ctrlText) {
+                        if (ctrlMode === 'ADAPTIVE') {
+                            ctrlIcon.innerHTML = '<i class="fas fa-robot"></i>';
+                            ctrlIcon.style.color = '#10b981';
+                            ctrlText.textContent = 'ADAPTIVE';
+                            ctrlText.style.color = '#10b981';
+                        } else {
+                            ctrlIcon.innerHTML = '<i class="fas fa-hand-paper"></i>';
+                            ctrlIcon.style.color = '#f59e0b';
+                            ctrlText.textContent = 'MANUAL';
+                            ctrlText.style.color = '#f59e0b';
+                        }
+                    }
+                    
+                    // Source badge
+                    const srcBadge = document.getElementById('dash-ac-source');
+                    if (srcBadge) {
+                        if (ctrlMode === 'ADAPTIVE') {
+                            srcBadge.innerHTML = '<i class="fas fa-robot"></i> AI Controlled';
+                            srcBadge.style.background = 'rgba(16, 185, 129, 0.12)';
+                            srcBadge.style.color = '#10b981';
+                            srcBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
+                        } else {
+                            srcBadge.innerHTML = '<i class="fas fa-hand-paper"></i> Manual Control';
+                            srcBadge.style.background = 'rgba(245, 158, 11, 0.12)';
+                            srcBadge.style.color = '#f59e0b';
+                            srcBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                        }
+                    }
+                    
+                    // Room environment in AC panel footer
+                    const roomTemp = document.getElementById('dash-ac-room-temp');
+                    const roomHum = document.getElementById('dash-ac-room-hum');
+                    if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
+                    if (roomHum) roomHum.textContent = data.ac.humidity.toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -4864,9 +4992,9 @@ HTML_TEMPLATE = '''
                     if (liveDot && liveState) {
                         liveState.textContent = acState;
                         liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
-                        document.getElementById('ac-live-temp').textContent = data.ac.ac_temp || 24;
-                        document.getElementById('ac-live-fan').textContent = data.ac.fan_speed || 1;
-                        document.getElementById('ac-live-mode').textContent = data.ac.ac_mode || 'COOL';
+                        document.getElementById('ac-live-temp').textContent = acTemp;
+                        document.getElementById('ac-live-fan').textContent = fanSpeed;
+                        document.getElementById('ac-live-mode').textContent = acMode;
                     }
                     
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
