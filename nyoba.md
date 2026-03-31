@@ -71,7 +71,7 @@ _last_adaptive_lamp_apply = 0
 
 # Global data storage
 mqtt_data = {
-    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0},
     'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
@@ -562,7 +562,8 @@ def on_message(client, userdata, msg):
                 'ac_state': payload.get('ac_state', 'OFF'),
                 'ac_temp': payload.get('ac_temp', 24),
                 'fan_speed': payload.get('fan_speed', 1),
-                'ac_mode': payload.get('ac_mode', 'COOL'),
+                'ac_mode': payload.get('ac_mode', 'ADAPTIVE'),
+                'ac_fan_mode': payload.get('ac_fan_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
@@ -1120,6 +1121,11 @@ def control_ac():
         # No need to send RAW IR codes from Flask anymore!
         mqtt_client.publish('smartroom/ac/control', json.dumps(data))
         print(f"[AC Control] Sent command '{command}' to ESP32 (Mitsubishi AC library handles IR)")
+
+        # Track AC operating mode locally for instant dashboard update
+        mode_map = {'MODE_COOL': 'COOL', 'MODE_HEAT': 'HEAT', 'MODE_DRY': 'DRY', 'MODE_FAN': 'FAN', 'MODE_AUTO': 'AUTO'}
+        if command in mode_map:
+            mqtt_data['ac']['ac_fan_mode'] = mode_map[command]
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'AC command sent: {command}'})
@@ -2683,7 +2689,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-value"><span id="dash-temp">0</span>°C</div>
                     <div class="stat-change up">
                         <i class="fas fa-arrow-up"></i>
-                        <span>Real-time</span>
+                        <span>DHT22 Sensor — Real-time</span>
                     </div>
                 </div>
 
@@ -2696,7 +2702,33 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-hum">0</span>%</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <span>DHT22 Sensor — Real-time</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Heat Index</span>
+                        <div class="stat-icon" style="background: rgba(249, 115, 22, 0.2); color: #f97316;">
+                            <i class="fas fa-sun"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
+                    <div class="stat-change">
+                        <span>Suhu terasa — Kombinasi temp &amp; humidity</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">ESP32 Signal</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                            <i class="fas fa-wifi"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value" style="font-size: 24px;"><span id="dash-rssi">0</span> dBm</div>
+                    <div class="stat-change">
+                        <span>Uptime: <span id="dash-uptime" style="font-weight: bold;">0</span>s</span>
                     </div>
                 </div>
 
@@ -2765,32 +2797,103 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Person Detection</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
-                            <i class="fas fa-user-friends"></i>
+                <!-- Person Detection - Enhanced Card -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-user-friends" style="font-size: 18px; color: #ef4444;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">YOLOv8n — Camera Real-time</div>
+                            </div>
+                        </div>
+                        <div id="cam-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+                            <i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person
                         </div>
                     </div>
-                    <div class="stat-value" style="font-size: 32px;">
-                        <span id="cam-count" style="color: #ef4444;">0</span> Person(s)
-                    </div>
-                    <div class="stat-change">
-                        <span><i class="fas fa-brain"></i> YOLO: <span id="cam-confidence" style="font-weight: bold;">0%</span></span>
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-users"></i> Jumlah Orang
+                            </div>
+                            <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
+                        </div>
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-crosshairs"></i> Confidence
+                            </div>
+                            <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">akurasi deteksi</div>
+                        </div>
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-bolt"></i> Auto Control
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Aktif (10 min timeout)</div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">GA → AC Control</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-dna"></i>
+                <!-- GA + PSO Optimization - Full Width -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
+                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center;">
+                            <i class="fas fa-brain" style="font-size: 18px; color: #10b981;"></i>
+                        </div>
+                        <div>
+                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm → AC | PSO → Lamp</div>
                         </div>
                     </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="ga-fitness">0.00</span></div>
-                    <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
-                        <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;"><i class="fas fa-thermometer-half"></i> Temp: <span id="ga-temp" style="color: #10b981; font-weight: bold;">--</span>°C &nbsp; <i class="fas fa-fan"></i> Fan: <span id="ga-fan" style="color: #10b981; font-weight: bold;">--</span></span>
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
+                        <!-- GA Section -->
+                        <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+                                <i class="fas fa-dna"></i> GA → AC Control
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #10b981;" id="ga-fitness">0.00</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Temp</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #3b82f6;" id="ga-temp">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">°C</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fan</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #8b5cf6;" id="ga-fan">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">speed</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- PSO Section -->
+                        <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
+                            <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+                                <i class="fas fa-lightbulb"></i> PSO → Lamp Control
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #f59e0b;" id="pso-fitness">0.00</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Brightness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #eab308;" id="pso-brightness">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">%</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Runs</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #a855f7;" id="dash-opt-runs">0</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">cycle</div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -4895,6 +4998,21 @@ HTML_TEMPLATE = '''
                     document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
                     
+                    // Heat Index
+                    const hiEl = document.getElementById('dash-heat-index');
+                    if (hiEl) hiEl.textContent = (data.ac.heat_index || 0).toFixed(1);
+                    
+                    // ESP32 Signal & Uptime
+                    const rssiEl = document.getElementById('dash-rssi');
+                    if (rssiEl) rssiEl.textContent = data.ac.rssi || 0;
+                    const uptEl = document.getElementById('dash-uptime');
+                    if (uptEl) {
+                        const secs = data.ac.uptime || 0;
+                        const h = Math.floor(secs / 3600);
+                        const m = Math.floor((secs % 3600) / 60);
+                        uptEl.textContent = h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (secs % 60) + 's';
+                    }
+                    
                     // AC State - use REAL state from ESP32, not temperature guessing
                     const acStateEl = document.getElementById('dash-ac-state');
                     let acState = data.ac.ac_state || 'OFF';
@@ -4927,8 +5045,8 @@ HTML_TEMPLATE = '''
                         fanLabel.textContent = fanNames[fanSpeed] || 'Level ' + fanSpeed;
                     }
                     
-                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color
-                    const acMode = data.ac.ac_mode || 'COOL';
+                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color — uses ac_fan_mode from ESP32
+                    const acMode = data.ac.ac_fan_mode || 'COOL';
                     document.getElementById('dash-ac-mode').textContent = acMode;
                     const modeIconEl = document.getElementById('dash-ac-mode-icon');
                     const modeTextEl = document.getElementById('dash-ac-mode');
@@ -4996,7 +5114,6 @@ HTML_TEMPLATE = '''
                         document.getElementById('ac-live-fan').textContent = fanSpeed;
                         document.getElementById('ac-live-mode').textContent = acMode;
                     }
-                    
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
                     document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
@@ -5021,6 +5138,22 @@ HTML_TEMPLATE = '''
                     if (camConfEl) {
                         camConfEl.textContent = confidence + '%';
                         camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
+                    }
+                    
+                    // Person detection status badge
+                    const camBadge = document.getElementById('cam-status-badge');
+                    if (camBadge) {
+                        if (personCount > 0) {
+                            camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> ' + personCount + ' Person Detected';
+                            camBadge.style.background = 'rgba(16, 185, 129, 0.12)';
+                            camBadge.style.color = '#10b981';
+                            camBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                        } else {
+                            camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person';
+                            camBadge.style.background = 'rgba(239, 68, 68, 0.12)';
+                            camBadge.style.color = '#ef4444';
+                            camBadge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                        }
                     }
 
                     const occCountEl = document.getElementById('occ-live-count');
@@ -5047,6 +5180,19 @@ HTML_TEMPLATE = '''
                     if (psoEl) {
                         psoEl.textContent = psoFitness.toFixed(2);
                         psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                    }
+                    
+                    // PSO Brightness
+                    const psoBrightEl = document.getElementById('pso-brightness');
+                    if (psoBrightEl) {
+                        const psoBright = data.system.pso_brightness || 0;
+                        psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
+                    }
+                    
+                    // Optimization Runs
+                    const optRunsEl = document.getElementById('dash-opt-runs');
+                    if (optRunsEl) {
+                        optRunsEl.textContent = data.system.optimization_runs || 0;
                     }
                     
                     // Calculate AC power based on temperature logic
