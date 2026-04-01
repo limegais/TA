@@ -410,22 +410,25 @@ def camera_detection_loop():
             continue
         
         try:
+            frame = None
             with camera_lock:
                 cam = get_camera()
                 if cam is None or not cam.isOpened():
                     mqtt_data['camera']['status'] = 'error'
-                    time.sleep(retry_delay)
-                    continue
-                success, frame = cam.read()
-                if not success:
-                    # Camera read failed — release and retry
-                    if camera is not None:
-                        camera.release()
-                        camera = None
-                    mqtt_data['camera']['status'] = 'reconnecting'
-                    print("⚠️ Camera read failed, will retry...")
-                    time.sleep(retry_delay)
-                    continue
+                else:
+                    success, frame = cam.read()
+                    if not success:
+                        # Camera read failed — release and retry
+                        if camera is not None:
+                            camera.release()
+                            camera = None
+                        mqtt_data['camera']['status'] = 'reconnecting'
+                        print("⚠️ Camera read failed, will retry...")
+            
+            # If no frame captured, wait and retry (lock is released)
+            if frame is None:
+                time.sleep(retry_delay)
+                continue
             
             mqtt_data['camera']['status'] = 'active'
             
@@ -482,18 +485,22 @@ def camera_detection_loop():
     print("🛑 Camera detection background thread stopped")
 
 def generate_frames():
-    """Stream latest frames to /video_feed — just reads from background thread"""
+    """Stream latest frames to /video_feed — reads from background thread"""
+    # Send a blank frame first so the MJPEG stream starts immediately
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(blank, 'Waiting for camera...', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+    _, buf = cv2.imencode('.jpg', blank)
+    yield (b'--frame\r\n'
+           b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+    
     while True:
         with _latest_frame_lock:
             frame_bytes = _latest_frame_bytes
         
-        if frame_bytes is None:
-            # No frame yet, send a placeholder
-            time.sleep(0.1)
-            continue
+        if frame_bytes is not None:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(0.066)  # ~15 FPS to client
 
 def release_camera():
@@ -3096,8 +3103,8 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv4 Detection</h1>
-                <p>Real-time person detection menggunakan YOLOv4-tiny</p>
+                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
+                <p>Real-time person detection menggunakan YOLOv8n</p>
             </div>
 
             <div class="camera-view">
