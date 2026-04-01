@@ -63,7 +63,8 @@ _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
 NO_PERSON_TIMEOUT_SECONDS = 600  # 10 minutes no person → auto OFF
-_auto_off_triggered = False
+_last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
+_auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
 
 # Background detection thread state
 _latest_frame_bytes = None
@@ -76,7 +77,7 @@ _last_adaptive_lamp_apply = 0
 
 # Global data storage
 mqtt_data = {
-    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0},
+    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
@@ -292,10 +293,15 @@ def detect_persons(frame):
         traceback.print_exc()
         return frame, 0, 0.0
 
+def _person_present_recently():
+    """True if person confirmed within NO_PERSON_TIMEOUT_SECONDS — blocks adaptive SET when room is empty"""
+    return _last_person_confirmed_time > 0 and \
+           (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
+
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
     """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 10 min empty"""
-    global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered
+    global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time
     
     # Only act in ADAPTIVE mode
     if mqtt_data['ac'].get('mode') != 'ADAPTIVE':
@@ -306,8 +312,13 @@ def handle_person_based_control(person_count):
     
     if person_count > 0:
         _person_consecutive_frames += 1
-        _no_person_start_time = None
-        _auto_off_triggered = False
+        
+        # Only reset auto-off state when person is CONFIRMED (multiple frames)
+        # A single spurious detection should NOT reset the timer/flag
+        if _person_consecutive_frames >= PERSON_CONFIRM_FRAMES:
+            _last_person_confirmed_time = time.time()  # Record time person was confirmed
+            _no_person_start_time = None
+            _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
         
         # Auto ON: person confirmed for PERSON_CONFIRM_FRAMES consecutive frames
         if _person_consecutive_frames >= PERSON_CONFIRM_FRAMES:
@@ -339,6 +350,7 @@ def handle_person_based_control(person_count):
         # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
         elapsed = time.time() - _no_person_start_time
         if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
+            _auto_off_triggered = True  # Always set flag to block adaptive SET
             if mqtt_data['ac'].get('ac_state') != 'OFF':
                 print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC")
                 try:
@@ -362,8 +374,25 @@ def handle_person_based_control(person_count):
 def get_camera():
     global camera
     if camera is None:
-        camera = cv2.VideoCapture(0)
-        if camera.isOpened():
+        # Auto-detect camera: try index 0-4
+        for idx in range(5):
+            print(f"📷 Trying camera index {idx}...")
+            cam = cv2.VideoCapture(idx)
+            if cam.isOpened():
+                # Verify it can actually capture a frame
+                ret, test_frame = cam.read()
+                if ret and test_frame is not None:
+                    camera = cam
+                    print(f"✅ Camera found at index {idx}")
+                    break
+                else:
+                    cam.release()
+                    print(f"   Index {idx}: opened but can't read frames")
+            else:
+                cam.release()
+                print(f"   Index {idx}: not available")
+        
+        if camera is not None and camera.isOpened():
             # Try 4K or best available
             camera.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
@@ -699,7 +728,8 @@ def on_message(client, userdata, msg):
                 'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
             })
             # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-            if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            # Skip if camera auto-OFF is active (no person detected)
+            if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
                 opt_temp = mqtt_data['system'].get('ga_temp', 0)
                 opt_fan = mqtt_data['system'].get('ga_fan', 0)
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
@@ -712,6 +742,8 @@ def on_message(client, userdata, msg):
                         print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     else:
                         print(f"🤖 ADAPTIVE → AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
+            elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+                print(f"🤖 ADAPTIVE → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
@@ -1247,9 +1279,8 @@ def update_optimization():
         print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
         
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-        # Uses same 5-second debounce as on_message to avoid double-apply
-        # (main.py sends both MQTT ml/result AND HTTP POST — debounce prevents duplicate IR)
-        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+        # Skip if camera auto-OFF is active (no person detected)
+        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = mqtt_data['system'].get('ga_temp', 0)
             opt_fan = mqtt_data['system'].get('ga_fan', 0)
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
@@ -1263,6 +1294,8 @@ def update_optimization():
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
                 else:
                     print(f"🤖 ADAPTIVE (HTTP) → AC apply debounced (MQTT already handled it)")
+        elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            print(f"🤖 ADAPTIVE (HTTP) → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
@@ -2743,8 +2776,13 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-temp">0</span>°C</div>
                     <div class="stat-change up">
-                        <i class="fas fa-arrow-up"></i>
-                        <span>DHT22 Sensor — Real-time</span>
+                        <i class="fas fa-robot"></i>
+                        <span>Avg 3×DHT22 — Real-time</span>
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-temp1">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-temp2">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-temp3">0</strong>°C</span>
                     </div>
                 </div>
 
@@ -2842,9 +2880,12 @@ HTML_TEMPLATE = '''
                     </div>
                     <!-- Footer: Room Environment + extra info -->
                     <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
-                        <div style="display: flex; gap: 16px; align-items: center;">
-                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Ruangan: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
-                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Kelembapan: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
+                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Avg: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
                         <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
                             <i class="fas fa-robot"></i> AI Controlled
@@ -5052,6 +5093,13 @@ HTML_TEMPLATE = '''
                     const temperature = data.ac.temperature;
                     document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
+                    // Individual sensor readings
+                    const t1El = document.getElementById('dash-temp1');
+                    const t2El = document.getElementById('dash-temp2');
+                    const t3El = document.getElementById('dash-temp3');
+                    if (t1El) t1El.textContent = (data.ac.temp1 || 0).toFixed(1);
+                    if (t2El) t2El.textContent = (data.ac.temp2 || 0).toFixed(1);
+                    if (t3El) t3El.textContent = (data.ac.temp3 || 0).toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
@@ -5158,6 +5206,13 @@ HTML_TEMPLATE = '''
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
                     if (roomHum) roomHum.textContent = data.ac.humidity.toFixed(1);
+                    // Individual sensors in AC panel footer
+                    const acT1 = document.getElementById('dash-ac-temp1');
+                    const acT2 = document.getElementById('dash-ac-temp2');
+                    const acT3 = document.getElementById('dash-ac-temp3');
+                    if (acT1) acT1.textContent = (data.ac.temp1 || 0).toFixed(1);
+                    if (acT2) acT2.textContent = (data.ac.temp2 || 0).toFixed(1);
+                    if (acT3) acT3.textContent = (data.ac.temp3 || 0).toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -5747,4 +5802,4 @@ if __name__ == '__main__':
     print("     - Real-time Person Count & Confidence")
     print("=" * 60)
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
