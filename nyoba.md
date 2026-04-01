@@ -65,6 +65,11 @@ PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
 NO_PERSON_TIMEOUT_SECONDS = 600  # 10 minutes no person → auto OFF
 _auto_off_triggered = False
 
+# Background detection thread state
+_latest_frame_bytes = None
+_latest_frame_lock = threading.Lock()
+_detection_thread_running = False
+
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
@@ -389,37 +394,50 @@ def get_camera():
                                'msg': 'Camera failed to open', 'level': 'error'})
     return camera
 
-def generate_frames():
+def camera_detection_loop():
+    """Background thread: continuously detect persons & auto ON/OFF even when no one views the feed"""
+    global _latest_frame_bytes, _detection_thread_running, camera
+    _detection_thread_running = True
     last_save_time = time.time()
-    save_interval = 5  # Save to InfluxDB every 5 seconds
+    save_interval = 5
+    retry_delay = 2
     
-    while True:
+    print("🎥 Camera detection background thread started (runs 24/7)")
+    
+    while _detection_thread_running:
         if not camera_enabled:
             time.sleep(0.5)
             continue
-        with camera_lock:
-            cam = get_camera()
-            if cam is None or not cam.isOpened():
-                mqtt_data['camera']['status'] = 'error'
-                break
-            success, frame = cam.read()
-            if not success:
-                global camera
-                if camera is not None:
-                    camera.release()
-                    camera = None
-                mqtt_data['camera']['status'] = 'error'
-                break
+        
+        try:
+            with camera_lock:
+                cam = get_camera()
+                if cam is None or not cam.isOpened():
+                    mqtt_data['camera']['status'] = 'error'
+                    time.sleep(retry_delay)
+                    continue
+                success, frame = cam.read()
+                if not success:
+                    # Camera read failed — release and retry
+                    if camera is not None:
+                        camera.release()
+                        camera = None
+                    mqtt_data['camera']['status'] = 'reconnecting'
+                    print("⚠️ Camera read failed, will retry...")
+                    time.sleep(retry_delay)
+                    continue
+            
+            mqtt_data['camera']['status'] = 'active'
             
             # YOLO person detection
             frame, person_count, confidence = detect_persons(frame)
             
-            # Update MQTT data
+            # Update shared data
             mqtt_data['camera']['person_detected'] = person_count > 0
             mqtt_data['camera']['count'] = person_count
             mqtt_data['camera']['confidence'] = int(confidence * 100)
             
-            # Smart auto ON/OFF based on person detection
+            # ★ Smart auto ON/OFF — runs regardless of video viewer
             handle_person_based_control(person_count)
             
             # Save to InfluxDB every 5 seconds
@@ -428,25 +446,55 @@ def generate_frames():
                 save_person_detection(person_count, confidence)
                 last_save_time = current_time
             
-            # Emit to WebSocket
+            # Emit to WebSocket for live dashboard updates
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
             
-            # Add timestamp overlay
+            # Draw overlays on frame
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             cv2.putText(frame, timestamp, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
             cv2.putText(frame, 'Smart Room Camera - YOLOv8 Detection', (20, frame.shape[0] - 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            
-            # Add detection info overlay
             if person_count > 0:
                 cv2.putText(frame, f'Persons Detected: {person_count}', (20, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             
-            # Encode with high quality
+            # Debug: print timer status every 60 seconds
+            if _no_person_start_time is not None:
+                elapsed = time.time() - _no_person_start_time
+                if int(elapsed) % 60 < 1:
+                    print(f"⏱️ No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
+            
+            # Encode frame and store for video_feed consumers
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            if ret:
+                with _latest_frame_lock:
+                    _latest_frame_bytes = buffer.tobytes()
+            
+            # Cap at ~15 FPS to reduce CPU load
+            time.sleep(0.066)
+            
+        except Exception as e:
+            print(f"❌ Detection loop error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(retry_delay)
+    
+    print("🛑 Camera detection background thread stopped")
+
+def generate_frames():
+    """Stream latest frames to /video_feed — just reads from background thread"""
+    while True:
+        with _latest_frame_lock:
+            frame_bytes = _latest_frame_bytes
+        
+        if frame_bytes is None:
+            # No frame yet, send a placeholder
+            time.sleep(0.1)
+            continue
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        time.sleep(0.066)  # ~15 FPS to client
 
 def release_camera():
     global camera
@@ -5640,7 +5688,7 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  🏠 Smart Room Dashboard - 4K Camera + YOLOv4 Detection")
+    print("  🏠 Smart Room Dashboard - YOLOv8n + Auto AC Control")
     print("=" * 60)
     
     # Load saved IR codes from file
@@ -5675,13 +5723,20 @@ if __name__ == '__main__':
     else:
         print("  ⚠️  YOLO failed to load, running without detection")
     
+    # Start background camera detection thread (runs 24/7 for auto ON/OFF)
+    print("  🎥 Starting background camera detection thread...")
+    detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
+    detection_thread.start()
+    print("  ✅ Detection thread running — auto ON/OFF active")
+    
     print("=" * 60)
     print("  🌐 Dashboard URL: http://172.20.0.65:5000")
     print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
     print("  ✨ Features:")
-    print("     - YOLOv4-tiny Person Detection")
+    print("     - YOLOv8n Person Detection (background thread)")
+    print("     - Auto ON: 3 frames (~2s) person confirmed → AC ON")
+    print("     - Auto OFF: 10 min no person → AC OFF")
     print("     - 4K Camera (fallback 1080p)")
-    print("     - localStorage Settings Persistence")
     print("     - Real-time Person Count & Confidence")
     print("=" * 60)
     
