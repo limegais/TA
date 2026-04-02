@@ -62,9 +62,12 @@ yolo_lock = threading.Lock()
 _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
+PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
 NO_PERSON_TIMEOUT_SECONDS = 600  # 10 minutes no person → auto OFF
+AUTO_OFF_COOLDOWN = 120          # 2 min cooldown: block auto-ON after auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
+_auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
 
 # Background detection thread state
 _latest_frame_bytes = None
@@ -301,7 +304,7 @@ def _person_present_recently():
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
     """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 10 min empty"""
-    global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time
+    global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time, _auto_off_time
     
     # Only act in ADAPTIVE mode
     if mqtt_data['ac'].get('mode') != 'ADAPTIVE':
@@ -310,20 +313,32 @@ def handle_person_based_control(person_count):
         _auto_off_triggered = False
         return
     
+    # How many consecutive frames needed to confirm person?
+    # After auto-OFF → require 15 frames (~10s) to prevent false positives from turning AC on
+    # Normal mode → require 3 frames (~2s)
+    in_cooldown = _auto_off_time > 0 and (time.time() - _auto_off_time) < AUTO_OFF_COOLDOWN
+    required_frames = PERSON_RECONFIRM_FRAMES if _auto_off_triggered else PERSON_CONFIRM_FRAMES
+    
     if person_count > 0:
         _person_consecutive_frames += 1
         
-        # Only reset auto-off state when person is CONFIRMED (multiple frames)
-        # A single spurious detection should NOT reset the timer/flag
-        if _person_consecutive_frames >= PERSON_CONFIRM_FRAMES:
+        # Only reset auto-off state when person is CONFIRMED (required frames)
+        # AND cooldown has elapsed
+        if _person_consecutive_frames >= required_frames and not in_cooldown:
             _last_person_confirmed_time = time.time()  # Record time person was confirmed
             _no_person_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
+            _auto_off_time = 0.0  # Clear cooldown
+            print(f"✅ Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+        elif _person_consecutive_frames >= required_frames and in_cooldown:
+            cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
+            if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
+                print(f"⏳ Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
         
-        # Auto ON: person confirmed for PERSON_CONFIRM_FRAMES consecutive frames
-        if _person_consecutive_frames >= PERSON_CONFIRM_FRAMES:
+        # Auto ON: person confirmed AND cooldown elapsed
+        if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames) → Auto turning ON AC")
+                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) → Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -339,7 +354,7 @@ def handle_person_based_control(person_count):
                     })
                 except Exception as e:
                     print(f"❌ Auto ON error: {e}")
-            _person_consecutive_frames = PERSON_CONFIRM_FRAMES  # Cap to avoid overflow
+            _person_consecutive_frames = required_frames  # Cap to avoid overflow
     else:
         _person_consecutive_frames = 0
         
@@ -351,15 +366,15 @@ def handle_person_based_control(person_count):
         elapsed = time.time() - _no_person_start_time
         if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
             _auto_off_triggered = True  # Always set flag to block adaptive SET
+            _auto_off_time = time.time()  # Start cooldown timer
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC")
+                print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
                         "source": "camera_auto"
                     }))
                     mqtt_data['ac']['ac_state'] = 'OFF'
-                    _auto_off_triggered = True
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
                                        'msg': f'Auto OFF: No person for {int(elapsed/60)} min', 'level': 'warning'})
                     socketio.emit('alert', {
@@ -649,7 +664,13 @@ def on_message(client, userdata, msg):
                 'ac_mode': payload.get('ac_mode', 'ADAPTIVE'),
                 'ac_fan_mode': payload.get('ac_fan_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
-                'uptime': payload.get('uptime', 0)
+                'uptime': payload.get('uptime', 0),
+                'temp1': payload.get('temp1', 0),
+                'hum1': payload.get('hum1', 0),
+                'temp2': payload.get('temp2', 0),
+                'hum2': payload.get('hum2', 0),
+                'temp3': payload.get('temp3', 0),
+                'hum3': payload.get('hum3', 0),
             })
             # Save sensor data to InfluxDB
             print("   💾 Saving to InfluxDB...")
@@ -2795,7 +2816,13 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-hum">0</span>%</div>
                     <div class="stat-change">
-                        <span>DHT22 Sensor — Real-time</span>
+                        <i class="fas fa-robot"></i>
+                        <span>Avg 3×DHT22 — Real-time</span>
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-hum1">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-hum2">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-hum3">0</strong>%</span>
                     </div>
                 </div>
 
@@ -5100,6 +5127,13 @@ HTML_TEMPLATE = '''
                     if (t1El) t1El.textContent = (data.ac.temp1 || 0).toFixed(1);
                     if (t2El) t2El.textContent = (data.ac.temp2 || 0).toFixed(1);
                     if (t3El) t3El.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    // Individual humidity readings
+                    const h1El = document.getElementById('dash-hum1');
+                    const h2El = document.getElementById('dash-hum2');
+                    const h3El = document.getElementById('dash-hum3');
+                    if (h1El) h1El.textContent = (data.ac.hum1 || 0).toFixed(1);
+                    if (h2El) h2El.textContent = (data.ac.hum2 || 0).toFixed(1);
+                    if (h3El) h3El.textContent = (data.ac.hum3 || 0).toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
