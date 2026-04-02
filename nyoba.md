@@ -52,7 +52,8 @@ MQTT_PORT = 1883
 # Camera Configuration
 camera = None
 camera_lock = threading.Lock()
-camera_enabled = True  # Camera ON/OFF toggle
+camera_enabled = True
+_actual_fps = 0  # Real measured FPS from detection loop
 
 # YOLO Configuration
 yolo_model = None
@@ -411,6 +412,10 @@ def get_camera():
             camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             camera.set(cv2.CAP_PROP_FPS, 30)
+            # Force MJPEG codec for USB cameras — much faster than default YUY2
+            camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            # Minimal buffer — always get latest frame, not stale buffered ones
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             # Get actual values
             actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -439,7 +444,7 @@ def get_camera():
 
 def camera_detection_loop():
     """Background thread: continuously detect persons & auto ON/OFF even when no one views the feed"""
-    global _latest_frame_bytes, _detection_thread_running, camera
+    global _latest_frame_bytes, _detection_thread_running, camera, _actual_fps
     _detection_thread_running = True
     last_save_time = time.time()
     save_interval = 5
@@ -449,6 +454,8 @@ def camera_detection_loop():
     last_person_count = 0
     last_confidence = 0.0
     last_boxes = []  # Cache bounding boxes to draw on non-YOLO frames
+    fps_counter = 0
+    fps_timer = time.time()
     
     print("🎥 Camera detection background thread started (runs 24/7)")
     
@@ -530,6 +537,14 @@ def camera_detection_loop():
             if ret:
                 with _latest_frame_lock:
                     _latest_frame_bytes = buffer.tobytes()
+            
+            # Measure real FPS
+            fps_counter += 1
+            elapsed_fps = time.time() - fps_timer
+            if elapsed_fps >= 1.0:
+                _actual_fps = round(fps_counter / elapsed_fps)
+                fps_counter = 0
+                fps_timer = time.time()
             
         except Exception as e:
             print(f"❌ Detection loop error: {e}")
@@ -1110,7 +1125,7 @@ def camera_status():
         if cam and cam.isOpened():
             w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = int(cam.get(cv2.CAP_PROP_FPS))
+            fps = _actual_fps if _actual_fps > 0 else int(cam.get(cv2.CAP_PROP_FPS))
             return jsonify({'status': 'active', 'width': w, 'height': h, 'fps': fps})
         else:
             return jsonify({'status': 'inactive'})
