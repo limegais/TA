@@ -517,8 +517,8 @@ def camera_detection_loop():
                 with _latest_frame_lock:
                     _latest_frame_bytes = buffer.tobytes()
             
-            # Cap at ~15 FPS to reduce CPU load
-            time.sleep(0.066)
+            # Cap at ~20 FPS
+            time.sleep(0.033)
             
         except Exception as e:
             print(f"❌ Detection loop error: {e}")
@@ -545,7 +545,7 @@ def generate_frames():
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         
-        time.sleep(0.066)  # ~15 FPS to client
+        time.sleep(0.033)  # ~20 FPS to client
 
 def release_camera():
     global camera
