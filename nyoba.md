@@ -256,19 +256,20 @@ def load_yolo_model():
         return False
 
 def detect_persons(frame):
-    """Detect persons using YOLOv8"""
+    """Detect persons using YOLOv8 — returns frame, count, confidence, and bounding boxes list"""
     global yolo_model
     
     if yolo_model is None:
-        return frame, 0, 0.0
+        return frame, 0, 0.0, []
     
     try:
         with yolo_lock:
             # YOLOv8 inference — classes=[0] filters for 'person' only
-            results = yolo_model.predict(frame, conf=0.35, classes=[0], verbose=False)
+            results = yolo_model.predict(frame, conf=0.35, classes=[0], verbose=False, imgsz=640)
             
             person_count = 0
             max_confidence = 0.0
+            boxes_list = []
             
             for result in results:
                 boxes = result.boxes
@@ -281,20 +282,18 @@ def detect_persons(frame):
                     label = f"Person {confidence*100:.0f}%"
                     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                     
+                    boxes_list.append((x1, y1, x2, y2, confidence))
                     person_count += 1
                     if confidence > max_confidence:
                         max_confidence = confidence
             
-            if person_count > 0:
-                print(f"✅ YOLOv8: {person_count} person(s) detected")
-            
-            return frame, person_count, max_confidence
+            return frame, person_count, max_confidence, boxes_list
             
     except Exception as e:
         print(f"❌ YOLO detection error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return frame, 0, 0.0
+        return frame, 0, 0.0, []
 
 def _person_present_recently():
     """True if person confirmed within NO_PERSON_TIMEOUT_SECONDS — blocks adaptive SET when room is empty"""
@@ -408,19 +407,19 @@ def get_camera():
                 print(f"   Index {idx}: not available")
         
         if camera is not None and camera.isOpened():
-            # Try 4K or best available
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
-            camera.set(cv2.CAP_PROP_FPS, 60)
+            # 720p for best FPS — YOLO only uses 640px input anyway
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            camera.set(cv2.CAP_PROP_FPS, 30)
             
             # Get actual values
             actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
-            # Fallback to 1080p if 4K not supported
-            if actual_w < 1920:
-                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            # Fallback to 640x480 if 720p not supported
+            if actual_w < 1280:
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 camera.set(cv2.CAP_PROP_FPS, 30)
                 actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -445,6 +444,11 @@ def camera_detection_loop():
     last_save_time = time.time()
     save_interval = 5
     retry_delay = 2
+    frame_count = 0
+    YOLO_EVERY_N = 4  # Run YOLO every 4th frame — other frames just capture+encode
+    last_person_count = 0
+    last_confidence = 0.0
+    last_boxes = []  # Cache bounding boxes to draw on non-YOLO frames
     
     print("🎥 Camera detection background thread started (runs 24/7)")
     
@@ -475,34 +479,44 @@ def camera_detection_loop():
                 continue
             
             mqtt_data['camera']['status'] = 'active'
+            frame_count += 1
             
-            # YOLO person detection
-            frame, person_count, confidence = detect_persons(frame)
+            # Run YOLO only every Nth frame — other frames reuse last detection
+            if frame_count % YOLO_EVERY_N == 0:
+                frame, person_count, confidence, last_boxes = detect_persons(frame)
+                last_person_count = person_count
+                last_confidence = confidence
+                
+                # Update shared data
+                mqtt_data['camera']['person_detected'] = person_count > 0
+                mqtt_data['camera']['count'] = person_count
+                mqtt_data['camera']['confidence'] = int(confidence * 100)
+                
+                # ★ Smart auto ON/OFF — only on YOLO frames
+                handle_person_based_control(person_count)
+                
+                # Save to InfluxDB every 5 seconds
+                current_time = time.time()
+                if current_time - last_save_time >= save_interval:
+                    save_person_detection(person_count, confidence)
+                    last_save_time = current_time
+                
+                # Emit to WebSocket for live dashboard updates
+                socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            else:
+                # Non-YOLO frame: just draw cached bounding boxes
+                for (x1, y1, x2, y2, conf) in last_boxes:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                    label = f"Person {conf*100:.0f}%"
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
-            # Update shared data
-            mqtt_data['camera']['person_detected'] = person_count > 0
-            mqtt_data['camera']['count'] = person_count
-            mqtt_data['camera']['confidence'] = int(confidence * 100)
-            
-            # ★ Smart auto ON/OFF — runs regardless of video viewer
-            handle_person_based_control(person_count)
-            
-            # Save to InfluxDB every 5 seconds
-            current_time = time.time()
-            if current_time - last_save_time >= save_interval:
-                save_person_detection(person_count, confidence)
-                last_save_time = current_time
-            
-            # Emit to WebSocket for live dashboard updates
-            socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
-            
-            # Draw overlays on frame
+            # Draw overlays on every frame
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             cv2.putText(frame, timestamp, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
             cv2.putText(frame, 'Smart Room Camera - YOLOv8 Detection', (20, frame.shape[0] - 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            if person_count > 0:
-                cv2.putText(frame, f'Persons Detected: {person_count}', (20, 100), 
+            if last_person_count > 0:
+                cv2.putText(frame, f'Persons Detected: {last_person_count}', (20, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             
             # Debug: print timer status every 60 seconds
@@ -512,13 +526,10 @@ def camera_detection_loop():
                     print(f"⏱️ No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
             
             # Encode frame and store for video_feed consumers
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if ret:
                 with _latest_frame_lock:
                     _latest_frame_bytes = buffer.tobytes()
-            
-            # Cap at ~20 FPS
-            time.sleep(0.033)
             
         except Exception as e:
             print(f"❌ Detection loop error: {e}")
