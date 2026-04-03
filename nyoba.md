@@ -64,8 +64,8 @@ _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 10   # 10 detik no person → auto OFF (UJI COBA)
-AUTO_OFF_COOLDOWN = 10           # 10s cooldown (UJI COBA)
+NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person → auto OFF
+AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
 _auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
