@@ -35,12 +35,15 @@ last_results = {
     'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
 }
 
-# Optimized parameters for Smart Room project
+# Optimized parameters for Smart Room project (Enhanced)
+# Population 15 + generations 30 = 450 evaluations (vs 45 brute-force = 10x redundancy for GA exploration)
+# Brute-force validation ensures GA never misses optimum
 ga_params = {
-    'population_size': 30,
-    'generations': 80,
-    'mutation_rate': 0.15,
-    'crossover_rate': 0.8
+    'population_size': 15,
+    'generations': 30,
+    'mutation_rate': 0.25,
+    'crossover_rate': 0.8,
+    'elitism_ratio': 0.2
 }
 
 pso_params = {
@@ -77,7 +80,13 @@ def on_message(client, userdata, msg):
         if 'ac/sensors' in topic:
             update_sensor_data(
                 temperature=payload.get('temperature'),
-                humidity=payload.get('humidity')
+                humidity=payload.get('humidity'),
+                temp1=payload.get('temp1'),
+                hum1=payload.get('hum1'),
+                temp2=payload.get('temp2'),
+                hum2=payload.get('hum2'),
+                temp3=payload.get('temp3'),
+                hum3=payload.get('hum3')
             )
         elif 'lamp/sensors' in topic:
             update_sensor_data(lux=payload.get('lux'))
@@ -142,18 +151,27 @@ def run_optimization_cycle(algo='both', verbose=True):
         # ===== GA → AC Optimization =====
         if algo in ('ga', 'both'):
             if verbose:
-                print("\n🧬 Running GA → AC Optimization...")
+                print("\n🧬 Running GA → AC Optimization (Enhanced)...")
+            
+            # Seed with previous cycle's best solution for continuity
+            seed_solutions = []
+            if last_results['ga']['temp'] > 0 and last_results['ga']['fan'] > 0:
+                seed_solutions.append([last_results['ga']['temp'], last_results['ga']['fan']])
+            
             ga = GeneticAlgorithm(
                 population_size=ga_params['population_size'],
                 generations=ga_params['generations'],
                 mutation_rate=ga_params['mutation_rate'],
-                crossover_rate=ga_params['crossover_rate']
+                crossover_rate=ga_params['crossover_rate'],
+                elitism_ratio=ga_params.get('elitism_ratio', 0.2),
+                seed_solutions=seed_solutions
             )
             ga_sol, ga_fit = ga.optimize(verbose=verbose)
             last_results['ga']['stats'] = ga.fitness_history
             last_results['ga']['fitness'] = ga_fit
             last_results['ga']['temp'] = ga_sol[0]
             last_results['ga']['fan'] = ga_sol[1]
+            last_results['ga']['brute_force'] = ga.brute_force_best  # Validation data
             apply_ga_result(ga_sol, ga_fit)
             print(f"✅ GA Done: {ga_sol[0]}°C, Fan {ga_sol[1]}, Fitness: {ga_fit:.2f}")
         
@@ -246,7 +264,8 @@ def send_dashboard_update():
             'brightness': last_results['pso']['brightness']
         },
         'ga_history': last_results['ga'].get('stats', []),
-        'pso_history': last_results['pso'].get('stats', [])
+        'pso_history': last_results['pso'].get('stats', []),
+        'ga_brute_force': last_results['ga'].get('brute_force', None)
     }
     
     # Via MQTT - single topic to avoid Flask processing same data twice
