@@ -1,0 +1,456 @@
+"""
+Smart Room IoT - Fitness Function (Enhanced)
+GA fitness for AC control, PSO fitness for Lamp control
+Features: Gaussian smooth scoring, 3-sensor support, time-of-day awareness,
+          humidity continuous response, temperature trend tracking
+Data sourced from InfluxDB sensor history
+"""
+
+import math
+from influxdb_client import InfluxDBClient
+from datetime import datetime, timedelta
+
+# ==================== INFLUXDB CONFIG ====================
+INFLUX_URL = "http://localhost:8086"
+INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb_I0leIREUnMhvQQXtgETfg=="
+INFLUX_ORG = "IOTLAB"
+INFLUX_BUCKET = "SENSORDATA"
+
+# ==================== OPTIMIZATION BOUNDS ====================
+# Continuous encoding: GA uses float, rounded to int when applied to AC
+TEMP_MIN, TEMP_MAX = 16.0, 30.0    # AC temperature range (°C) — float for continuous GA
+FAN_MIN, FAN_MAX = 1, 3            # Fan speed levels (discrete)
+BRIGHTNESS_MIN, BRIGHTNESS_MAX = 0, 100  # Lamp brightness (%)
+
+# ==================== SENSOR DATA (live + DB + 3-sensor) ====================
+current_data = {
+    'temperature': 28.0,
+    'humidity': 55.0,
+    'person_detected': False,
+    'lux': 200,
+    'avg_temperature': 28.0,    # rata-rata dari DB
+    'avg_humidity': 55.0,       # rata-rata dari DB
+    'avg_lux': 200.0,          # rata-rata dari DB
+    'data_source': 'default',  # 'default', 'mqtt', 'influxdb'
+    # 3×DHT22 individual sensor data
+    'temp1': 0.0, 'hum1': 0.0,
+    'temp2': 0.0, 'hum2': 0.0,
+    'temp3': 0.0, 'hum3': 0.0,
+    # Temperature trend tracking
+    'temp_history': [],         # list of (timestamp, temp) tuples, last 10 readings
+    'temp_trend': 0.0,         # °C/min: positive = warming, negative = cooling
+}
+
+# ==================== HELPER: GAUSSIAN SCORING ====================
+def _gaussian_score(value, target, sigma, max_score):
+    """Smooth Gaussian scoring: max_score at target, decays smoothly with distance"""
+    return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
+
+def _get_time_period():
+    """Get current time period for time-of-day aware optimization"""
+    hour = datetime.now().hour
+    if 6 <= hour < 12:
+        return 'morning'    # 06:00–12:00
+    elif 12 <= hour < 17:
+        return 'afternoon'  # 12:00–17:00
+    elif 17 <= hour < 22:
+        return 'evening'    # 17:00–22:00
+    else:
+        return 'night'      # 22:00–06:00
+
+def _get_temp_uniformity():
+    """Calculate temperature uniformity from 3 sensors (0.0=bad, 1.0=perfect)"""
+    temps = []
+    for key in ('temp1', 'temp2', 'temp3'):
+        val = current_data.get(key, 0)
+        if val > 0:  # Only include valid readings
+            temps.append(val)
+    if len(temps) < 2:
+        return 1.0  # Can't measure uniformity with < 2 sensors
+    temp_range = max(temps) - min(temps)
+    # Uniformity: 1.0 if all same, drops toward 0 as range increases
+    # 0°C range → 1.0, 3°C range → 0.5, 6°C+ range → ~0
+    return math.exp(-(temp_range ** 2) / 18.0)
+
+# ==================== INFLUXDB DATA FETCH ====================
+def fetch_sensor_data_from_db(time_range_minutes=30):
+    """
+    Ambil data sensor dari InfluxDB untuk digunakan oleh GA/PSO
+    
+    Parameters:
+    - time_range_minutes: Berapa menit terakhir data diambil
+    
+    Returns:
+    - dict: Data sensor rata-rata dari database
+    """
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        
+        # Query rata-rata suhu & humidity dari ac_sensor
+        ac_query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+            |> range(start: -{time_range_minutes}m)
+            |> filter(fn: (r) => r._measurement == "ac_sensor")
+            |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity")
+            |> mean()
+        '''
+        
+        # Query rata-rata lux dari lamp_sensor
+        lamp_query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+            |> range(start: -{time_range_minutes}m)
+            |> filter(fn: (r) => r._measurement == "lamp_sensor")
+            |> filter(fn: (r) => r._field == "lux")
+            |> mean()
+        '''
+        
+        # Query deteksi orang terakhir
+        camera_query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+            |> range(start: -{time_range_minutes}m)
+            |> filter(fn: (r) => r._measurement == "camera_detection")
+            |> filter(fn: (r) => r._field == "person_count")
+            |> last()
+        '''
+        
+        result_data = {
+            'temperature': current_data['temperature'],
+            'humidity': current_data['humidity'],
+            'lux': current_data['lux'],
+            'person_detected': current_data['person_detected'],
+            'data_points': 0
+        }
+        
+        # Parse AC sensor data
+        ac_tables = query_api.query(ac_query)
+        for table in ac_tables:
+            for record in table.records:
+                field = record.get_field()
+                value = record.get_value()
+                if field == 'temperature' and value is not None:
+                    result_data['temperature'] = round(float(value), 1)
+                elif field == 'humidity' and value is not None:
+                    result_data['humidity'] = round(float(value), 1)
+                result_data['data_points'] += 1
+        
+        # Parse Lamp sensor data
+        lamp_tables = query_api.query(lamp_query)
+        for table in lamp_tables:
+            for record in table.records:
+                field = record.get_field()
+                value = record.get_value()
+                if field == 'lux' and value is not None:
+                    result_data['lux'] = round(float(value), 1)
+                result_data['data_points'] += 1
+        
+        # Parse Camera data
+        try:
+            cam_tables = query_api.query(camera_query)
+            for table in cam_tables:
+                for record in table.records:
+                    value = record.get_value()
+                    if value is not None:
+                        result_data['person_detected'] = int(value) > 0
+                    result_data['data_points'] += 1
+        except:
+            pass  # Camera data might not exist
+        
+        client.close()
+        
+        # Update current_data with DB values
+        current_data['avg_temperature'] = result_data['temperature']
+        current_data['avg_humidity'] = result_data['humidity']
+        current_data['avg_lux'] = result_data['lux']
+        current_data['temperature'] = result_data['temperature']
+        current_data['humidity'] = result_data['humidity']
+        current_data['lux'] = result_data['lux']
+        current_data['person_detected'] = result_data['person_detected']
+        current_data['data_source'] = 'influxdb'
+        
+        print(f"✅ InfluxDB: {result_data['data_points']} data points fetched ({time_range_minutes}m range)")
+        print(f"   Temp: {result_data['temperature']}°C | Humidity: {result_data['humidity']}%")
+        print(f"   Lux: {result_data['lux']} | Person: {result_data['person_detected']}")
+        
+        return result_data
+        
+    except Exception as e:
+        print(f"⚠️  InfluxDB query failed: {e}")
+        print(f"   Using last known sensor data instead")
+        current_data['data_source'] = 'mqtt_fallback'
+        return {
+            'temperature': current_data['temperature'],
+            'humidity': current_data['humidity'],
+            'lux': current_data['lux'],
+            'person_detected': current_data['person_detected'],
+            'data_points': 0
+        }
+
+# ==================== GA FITNESS: AC OPTIMIZATION (Enhanced) ====================
+def calculate_ac_fitness(temp_set, fan_speed):
+    """
+    Enhanced fitness function untuk GA - Optimasi AC (suhu + fan speed)
+    
+    Improvements over v1:
+    1. Gaussian smooth scoring (no step-function jumps)
+    2. Continuous humidity response (proportional, not binary)
+    3. Time-of-day awareness (afternoon hotter → more aggressive cooling)
+    4. 3-sensor temperature uniformity bonus
+    5. Temperature trend compensation (room warming → lower set temp)
+    
+    Parameters:
+    - temp_set: Setting suhu AC (16.0-30.0°C, float — rounded to int when applied)
+    - fan_speed: Kecepatan fan (1-3)
+    
+    Returns:
+    - fitness: float score (higher = better, max ~100)
+    """
+    temp_room = current_data['temperature']
+    humidity = current_data['humidity']
+    person_detected = current_data['person_detected']
+    temp_trend = current_data.get('temp_trend', 0.0)  # °C/min
+    time_period = _get_time_period()
+    
+    fitness = 0.0
+    
+    # ===== 1. COMFORT SCORE — Gaussian (max 40) =====
+    # Time-of-day aware targets
+    if person_detected:
+        target_map = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
+        sigma_map = {'morning': 2.0, 'afternoon': 1.5, 'evening': 2.0, 'night': 2.5}
+    else:
+        target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
+        sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
+    
+    target_temp = target_map.get(time_period, 25.0)
+    sigma = sigma_map.get(time_period, 2.0)
+    
+    # Trend compensation: if room warming (+0.5°C/min), shift target 1°C lower
+    trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
+    adjusted_target = target_temp + trend_offset
+    
+    fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
+    
+    # ===== 2. HUMIDITY RESPONSE — Continuous (max 15) =====
+    # Ideal humidity: 45-55%. Score proportional to how well setting addresses humidity.
+    humidity_ideal = 50.0
+    humidity_deviation = abs(humidity - humidity_ideal)
+    
+    if humidity > 60:
+        # High humidity: AC dehumidifies better with lower temp + higher fan
+        # Score proportional to humidity excess
+        excess_factor = min(1.0, (humidity - 60) / 30.0)  # 0 at 60%, 1.0 at 90%
+        dehumid_target_temp = 24.0 - excess_factor * 2.0   # 24°C at 60% → 22°C at 90%
+        dehumid_temp_score = _gaussian_score(temp_set, dehumid_target_temp, 3.0, 10.0)
+        dehumid_fan_score = (fan_speed - 1) / 2.0 * 5.0 * excess_factor  # Higher fan = better
+        fitness += dehumid_temp_score + dehumid_fan_score
+    elif humidity < 40:
+        # Dry air: don't overcool (increases dryness)
+        dry_factor = min(1.0, (40 - humidity) / 20.0)  # 0 at 40%, 1.0 at 20%
+        if temp_set >= 25:
+            fitness += 15.0 * (1 - dry_factor * 0.3)
+        else:
+            fitness += _gaussian_score(temp_set, 26.0, 3.0, 15.0) * (1 - dry_factor)
+    else:
+        # Humidity ideal (40-60%): full score
+        # Closer to 50% = better
+        humidity_quality = _gaussian_score(humidity, 50.0, 10.0, 1.0)
+        fitness += 15.0 * humidity_quality
+    
+    # ===== 3. FAN SPEED APPROPRIATENESS — Continuous (max 15) =====
+    temp_gap = abs(temp_room - temp_set)
+    # Ideal fan speed based on temperature gap: bigger gap → higher fan
+    # temp_gap 0-2 → ideal fan 1, gap 3-4 → ideal fan 2, gap 5+ → ideal fan 3
+    ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
+    fan_diff = abs(fan_speed - ideal_fan)
+    fitness += _gaussian_score(fan_diff, 0.0, 1.0, 15.0)
+    
+    # ===== 4. ENERGY EFFICIENCY — Continuous (max 15) =====
+    ac_power = (30.0 - temp_set) * 50.0 + fan_speed * 30.0  # Watts estimation
+    max_power = (30.0 - 16.0) * 50.0 + 3 * 30.0            # Maximum possible
+    energy_ratio = 1.0 - (ac_power / max_power)
+    
+    if person_detected:
+        fitness += energy_ratio * 5.0   # Light weight on energy when occupied
+    else:
+        fitness += energy_ratio * 15.0  # Heavy weight when empty
+    
+    # ===== 5. 3-SENSOR UNIFORMITY BONUS (max 8) =====
+    # Higher fan improves air circulation → better temp uniformity
+    uniformity = _get_temp_uniformity()
+    if uniformity < 0.7 and fan_speed >= 2:
+        # Poor uniformity + high fan → bonus for trying to fix it
+        fitness += 8.0 * (1 - uniformity) * (fan_speed / 3.0)
+    elif uniformity >= 0.7:
+        # Good uniformity → bonus
+        fitness += 8.0 * uniformity
+    
+    # ===== 6. TREND COMPENSATION BONUS (max 7) =====
+    if temp_trend > 0.3:
+        # Room warming: reward proactive cooling (lower temp set)
+        if temp_set <= target_temp - 1:
+            fitness += min(7.0, temp_trend * 5.0)
+    elif temp_trend < -0.3:
+        # Room cooling: reward moderate setting (don't overcool)
+        if temp_set >= target_temp:
+            fitness += min(7.0, abs(temp_trend) * 5.0)
+    else:
+        # Stable: small bonus for being at target
+        fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
+    
+    # ===== 7. PENALTY: Overcooling empty room =====
+    if not person_detected and temp_set < 24:
+        penalty = (24.0 - temp_set) * 3.0  # Graduated penalty
+        fitness -= penalty
+    
+    # ===== 8. PENALTY: Extreme settings =====
+    if temp_set < 18 and fan_speed == 3:
+        fitness -= 10.0
+    
+    return max(0.0, round(fitness, 2))
+
+# ==================== PSO FITNESS: LAMP OPTIMIZATION ====================
+def calculate_lamp_fitness(brightness):
+    """
+    Fitness function untuk PSO - Optimasi Lamp (brightness)
+    
+    Tujuan: Temukan brightness terbaik berdasarkan lux & ketersediaan orang
+    - Jika ada orang → target 300-500 lux (cukup terang untuk bekerja)
+    - Jika kosong → matikan atau minimal
+    
+    Parameters:
+    - brightness: Brightness lamp (0-100%)
+    
+    Returns:
+    - fitness: float score (higher = better, max ~100)
+    """
+    ambient_lux = current_data['lux']
+    person_detected = current_data['person_detected']
+    
+    fitness = 0
+    
+    # Estimasi total lux = ambient + lamp contribution
+    lamp_lux_contribution = brightness * 5  # 1% brightness ≈ 5 lux
+    total_lux = ambient_lux + lamp_lux_contribution
+    
+    # ===== 1. LIGHTING COMFORT (max 50) =====
+    if person_detected:
+        target_lux = 400  # Office/study lighting standard
+        lux_range = (300, 500)
+        
+        if lux_range[0] <= total_lux <= lux_range[1]:
+            fitness += 50  # Perfect lighting
+        elif 200 <= total_lux <= 600:
+            fitness += 35
+        elif total_lux < 200:
+            # Too dark when someone is present
+            fitness += max(0, 50 - (200 - total_lux) * 0.2)
+        else:
+            # Too bright
+            fitness += max(0, 50 - (total_lux - 600) * 0.1)
+    else:
+        # No one → darkness is fine → reward low brightness
+        if brightness <= 5:
+            fitness += 50  # Perfect: lamp off when empty
+        elif brightness <= 20:
+            fitness += 35
+        else:
+            fitness += max(0, 50 - brightness * 0.5)
+    
+    # ===== 2. ENERGY EFFICIENCY (max 30) =====
+    lamp_power = brightness * 0.5  # Watts (assumption: 50W max)
+    max_power = 100 * 0.5
+    energy_ratio = 1 - (lamp_power / max_power)
+    
+    if person_detected:
+        fitness += energy_ratio * 10  # Less weight on energy when occupied
+    else:
+        fitness += energy_ratio * 30  # Full weight on energy when empty
+    
+    # ===== 3. AMBIENT LIGHT ADAPTATION (max 20) =====
+    if person_detected:
+        if ambient_lux >= 400:
+            # Plenty of natural light → lamp should be low
+            if brightness <= 20:
+                fitness += 20
+            elif brightness <= 40:
+                fitness += 12
+            else:
+                fitness += 0  # Wasting energy
+        elif ambient_lux >= 200:
+            # Some natural light → moderate lamp
+            if 20 <= brightness <= 60:
+                fitness += 20
+            else:
+                fitness += 8
+        else:
+            # Dark → lamp should be high
+            if brightness >= 60:
+                fitness += 20
+            elif brightness >= 40:
+                fitness += 12
+            else:
+                fitness += 5  # Too dark for comfort
+    else:
+        # Empty room: any ambient level doesn't matter, lamp should be off
+        if brightness <= 5:
+            fitness += 20
+    
+    return max(0, round(fitness, 2))
+
+# ==================== COMBINED FITNESS (backward compatibility) ====================
+def calculate_fitness(temp_set, fan_speed, brightness):
+    """Combined fitness for both AC and Lamp (backward compatible)"""
+    ac_score = calculate_ac_fitness(temp_set, fan_speed)
+    lamp_score = calculate_lamp_fitness(brightness)
+    return round((ac_score + lamp_score) / 2, 2)
+
+# ==================== SENSOR DATA UPDATE (Enhanced) ====================
+def update_sensor_data(temperature=None, humidity=None, person_detected=None, lux=None,
+                       temp1=None, hum1=None, temp2=None, hum2=None, temp3=None, hum3=None):
+    """Update current sensor readings from MQTT — supports 3×DHT22 + trend tracking"""
+    import time as _time
+    
+    if temperature is not None:
+        current_data['temperature'] = temperature
+        current_data['data_source'] = 'mqtt'
+        
+        # Track temperature trend (last 10 readings)
+        now = _time.time()
+        current_data['temp_history'].append((now, temperature))
+        # Keep only last 10
+        if len(current_data['temp_history']) > 10:
+            current_data['temp_history'] = current_data['temp_history'][-10:]
+        # Calculate trend (°C/min) using linear regression on last readings
+        history = current_data['temp_history']
+        if len(history) >= 3:
+            t0, temp0 = history[0]
+            t_last, temp_last = history[-1]
+            dt_min = (t_last - t0) / 60.0
+            if dt_min > 0.1:  # At least 6 seconds of data
+                current_data['temp_trend'] = round((temp_last - temp0) / dt_min, 3)
+    
+    if humidity is not None:
+        current_data['humidity'] = humidity
+    if person_detected is not None:
+        current_data['person_detected'] = person_detected
+    if lux is not None:
+        current_data['lux'] = lux
+    
+    # 3×DHT22 individual sensor values
+    if temp1 is not None:
+        current_data['temp1'] = temp1
+    if hum1 is not None:
+        current_data['hum1'] = hum1
+    if temp2 is not None:
+        current_data['temp2'] = temp2
+    if hum2 is not None:
+        current_data['hum2'] = hum2
+    if temp3 is not None:
+        current_data['temp3'] = temp3
+    if hum3 is not None:
+        current_data['hum3'] = hum3
+
+def get_current_conditions():
+    """Return current sensor data including 3-sensor and trend info"""
+    return current_data.copy()
