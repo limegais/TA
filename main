@@ -304,7 +304,9 @@ def fetch_and_display_data():
 def main():
     print("\n" + "="*70)
     print("  🤖 SMART ROOM IoT - AI OPTIMIZATION SYSTEM")
-    print("  GA → Adaptive AC | PSO → Adaptive Lamp")
+    print("  GA → AC Control (Genetic Algorithm)")
+    print("  PSO → Lamp Control (Particle Swarm)")
+    print("  ⚠️  AC dikontrol HANYA oleh GA, bukan combined")
     print("  Mode: FULLY AUTOMATIC (no menu)")
     print(f"  Cycle interval: {AUTO_INTERVAL} seconds")
     print("  Press Ctrl+C to stop")
@@ -334,12 +336,11 @@ def main():
     
     success = run_optimization_cycle('both', verbose=True)
     if success:
-        combined = (last_results['ga']['fitness'] + last_results['pso']['fitness']) / 2
         print(f"\n{'='*70}")
         print(f"  ✅ INITIAL OPTIMIZATION COMPLETE")
-        print(f"  🧬 GA → AC:  {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
+        print(f"  🧬 GA → AC:   {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
         print(f"  🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
-        print(f"  📊 Combined Fitness: {combined:.2f}")
+        print(f"  ⚠️  AC setting diambil dari GA saja, PSO hanya untuk lampu")
         print(f"{'='*70}")
     else:
         print("⚠️  Initial optimization had issues, continuing anyway...")
@@ -361,11 +362,9 @@ def main():
         success = run_optimization_cycle('both', verbose=False)
         
         if success:
-            combined = (last_results['ga']['fitness'] + last_results['pso']['fitness']) / 2
             print(f"\n📊 Cycle #{cycle} Results:")
-            print(f"   🧬 GA → AC:    {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
-            print(f"   🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
-            print(f"   📊 Combined:   {combined:.2f}")
+            print(f"   🧬 GA → AC:    {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f}) ← AC dikontrol ini")
+            print(f"   🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f}) ← Lamp dikontrol ini")
             print(f"   ✅ Results sent to dashboard!")
         else:
             print(f"   ⚠️  Cycle #{cycle} had issues, will retry next cycle")
