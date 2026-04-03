@@ -10,6 +10,7 @@ import threading
 import time
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -30,9 +31,13 @@ device_last_seen = {
 alert_rules = {
     'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
     'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
-    'no_person_timeout': {'timeout_minutes': 30, 'enabled': True, 'last_person_seen': None}
+    'no_person_timeout': {'timeout_minutes': 10, 'enabled': True, 'last_person_seen': None}
 }
 active_alerts = deque(maxlen=50)
+
+# Occupancy Feedback
+GOOGLE_FORM_URL = "https://docs.google.com/forms/"
+occupancy_feedback = deque(maxlen=200)
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -47,16 +52,36 @@ MQTT_PORT = 1883
 # Camera Configuration
 camera = None
 camera_lock = threading.Lock()
+camera_enabled = True
+_actual_fps = 0  # Real measured FPS from detection loop
 
 # YOLO Configuration
-yolo_net = None
-yolo_classes = []
-yolo_output_layers = []
+yolo_model = None
 yolo_lock = threading.Lock()
+
+# Smart Person-Based Auto ON/OFF
+_person_consecutive_frames = 0
+_no_person_start_time = None
+PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
+PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
+NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person → auto OFF
+AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
+_last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
+_auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
+_auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
+
+# Background detection thread state
+_latest_frame_bytes = None
+_latest_frame_lock = threading.Lock()
+_detection_thread_running = False
+
+# Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
+_last_adaptive_ac_apply = 0
+_last_adaptive_lamp_apply = 0
 
 # Global data storage
 mqtt_data = {
-    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
@@ -157,7 +182,7 @@ def save_person_detection(person_count, confidence):
                 "confidence": float(confidence),
                 "person_detected": bool(person_count > 0)
             },
-            tags={"device": "camera_yolo", "model": "yolov4-tiny"}
+            tags={"device": "camera_yolo", "model": "yolov8n"}
         )
         if person_count > 0:
             print(f"✅ Detection saved: {person_count} person(s), {confidence:.2f} confidence")
@@ -198,52 +223,29 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
-    global yolo_net, yolo_classes, yolo_output_layers
+    global yolo_model
     try:
         import os
         
         yolo_dir = '/home/iotlab/smartroom/yolo'
+        model_path = f'{yolo_dir}/yolov8n.pt'
         
-        # YOLOv4-tiny paths
-        weights_path = f'{yolo_dir}/yolov4-tiny.weights'
-        config_path = f'{yolo_dir}/yolov4-tiny.cfg'
-        names_path = f'{yolo_dir}/coco.names'
+        # Try local model first, fallback to auto-download
+        if os.path.exists(model_path):
+            print(f"🧠 Loading YOLOv8n from {model_path}...")
+            yolo_model = YOLO(model_path)
+        else:
+            print("🧠 YOLOv8n not found locally, downloading...")
+            os.makedirs(yolo_dir, exist_ok=True)
+            yolo_model = YOLO('yolov8n.pt')
         
-        # Check if files exist
-        if not os.path.exists(weights_path):
-            print(f"❌ YOLO weights not found: {weights_path}")
-            print("Please download:")
-            print("cd ~/smartroom/yolo")
-            print("wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights")
-            return False
+        # Warm up with dummy inference
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        yolo_model.predict(dummy, verbose=False)
         
-        if not os.path.exists(config_path):
-            print(f"❌ YOLO config not found: {config_path}")
-            print("wget https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg")
-            return False
-        
-        if not os.path.exists(names_path):
-            print(f"❌ COCO names not found: {names_path}")
-            print("wget https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names")
-            return False
-        
-        # Load YOLO
-        print(f"🧠 Loading YOLOv4-tiny from {weights_path}...")
-        yolo_net = cv2.dnn.readNet(weights_path, config_path)
-        yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-        yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-        
-        with open(names_path, 'r') as f:
-            yolo_classes = [line.strip() for line in f.readlines()]
-        
-        layer_names = yolo_net.getLayerNames()
-        yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
-        
-        print("✅ YOLO model loaded successfully!")
-        print(f"   - Classes loaded: {len(yolo_classes)}")
-        print(f"   - Output layers: {len(yolo_output_layers)}")
+        print("✅ YOLOv8n model loaded successfully!")
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
-                           'msg': 'YOLOv4-tiny loaded successfully', 'level': 'success'})
+                           'msg': 'YOLOv8n loaded successfully', 'level': 'success'})
         return True
         
     except Exception as e:
@@ -255,105 +257,174 @@ def load_yolo_model():
         return False
 
 def detect_persons(frame):
-    """Detect persons using YOLO"""
-    global yolo_net, yolo_classes, yolo_output_layers
+    """Detect persons using YOLOv8 — returns frame, count, confidence, and bounding boxes list"""
+    global yolo_model
     
-    if yolo_net is None:
-        return frame, 0, 0.0
+    if yolo_model is None:
+        return frame, 0, 0.0, []
     
     try:
         with yolo_lock:
-            height, width = frame.shape[:2]
-            
-            # Resize for faster detection
-            detect_width = min(width, 1280)
-            detect_height = int(height * (detect_width / width))
-            resized = cv2.resize(frame, (detect_width, detect_height))
-            
-            # YOLO detection
-            blob = cv2.dnn.blobFromImage(resized, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-            yolo_net.setInput(blob)
-            outs = yolo_net.forward(yolo_output_layers)
-            
-            # Process detections
-            class_ids = []
-            confidences = []
-            boxes = []
-            
-            for out in outs:
-                for detection in out:
-                    scores = detection[5:]
-                    class_id = np.argmax(scores)
-                    confidence = scores[class_id]
-                    
-                    # Filter for "person" class (class_id == 0)
-                    if class_id == 0 and confidence > 0.3:
-                        center_x = int(detection[0] * detect_width)
-                        center_y = int(detection[1] * detect_height)
-                        w = int(detection[2] * detect_width)
-                        h = int(detection[3] * detect_height)
-                        
-                        x = int(center_x - w / 2)
-                        y = int(center_y - h / 2)
-                        
-                        # Scale back to original frame
-                        scale = width / detect_width
-                        boxes.append([int(x*scale), int(y*scale), int(w*scale), int(h*scale)])
-                        confidences.append(float(confidence))
-                        class_ids.append(class_id)
-            
-            # Debug print
-            if len(boxes) > 0:
-                print(f"🔍 YOLO: Found {len(boxes)} raw detections, confidence > 0.3")
-            
-            # Apply non-max suppression
-            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.3, 0.4)
+            # YOLOv8 inference — classes=[0] filters for 'person' only
+            results = yolo_model.predict(frame, conf=0.35, classes=[0], verbose=False, imgsz=640)
             
             person_count = 0
             max_confidence = 0.0
+            boxes_list = []
             
-            if len(indexes) > 0:
-                print(f"✅ After NMS: {len(indexes)} persons detected")
-                for i in indexes.flatten():
-                    x, y, w, h = boxes[i]
-                    confidence = confidences[i]
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    confidence = float(box.conf[0])
                     
                     # Draw bounding box
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
                     label = f"Person {confidence*100:.0f}%"
-                    cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                     
+                    boxes_list.append((x1, y1, x2, y2, confidence))
                     person_count += 1
                     if confidence > max_confidence:
                         max_confidence = confidence
             
-            return frame, person_count, max_confidence
+            return frame, person_count, max_confidence, boxes_list
             
     except Exception as e:
         print(f"❌ YOLO detection error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return frame, 0, 0.0
+        return frame, 0, 0.0, []
+
+def _person_present_recently():
+    """True if person confirmed within NO_PERSON_TIMEOUT_SECONDS — blocks adaptive SET when room is empty"""
+    return _last_person_confirmed_time > 0 and \
+           (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
+
+# ==================== SMART PERSON-BASED CONTROL ====================
+def handle_person_based_control(person_count):
+    """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 10 min empty"""
+    global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time, _auto_off_time
+    
+    # Only act in ADAPTIVE mode
+    if mqtt_data['ac'].get('mode') != 'ADAPTIVE':
+        _person_consecutive_frames = 0
+        _no_person_start_time = None
+        _auto_off_triggered = False
+        return
+    
+    # How many consecutive frames needed to confirm person?
+    # After auto-OFF → require 15 frames (~10s) to prevent false positives from turning AC on
+    # Normal mode → require 3 frames (~2s)
+    in_cooldown = _auto_off_time > 0 and (time.time() - _auto_off_time) < AUTO_OFF_COOLDOWN
+    required_frames = PERSON_RECONFIRM_FRAMES if _auto_off_triggered else PERSON_CONFIRM_FRAMES
+    
+    if person_count > 0:
+        _person_consecutive_frames += 1
+        
+        # Only reset auto-off state when person is CONFIRMED (required frames)
+        # AND cooldown has elapsed
+        if _person_consecutive_frames >= required_frames and not in_cooldown:
+            _last_person_confirmed_time = time.time()  # Record time person was confirmed
+            _no_person_start_time = None
+            _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
+            _auto_off_time = 0.0  # Clear cooldown
+            print(f"✅ Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+        elif _person_consecutive_frames >= required_frames and in_cooldown:
+            cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
+            if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
+                print(f"⏳ Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
+        
+        # Auto ON: person confirmed AND cooldown elapsed
+        if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
+            if mqtt_data['ac'].get('ac_state') == 'OFF':
+                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) → Auto turning ON AC")
+                try:
+                    mqtt_client.publish("smartroom/ac/control", json.dumps({
+                        "action": "POWER_ON",
+                        "source": "camera_auto"
+                    }))
+                    mqtt_data['ac']['ac_state'] = 'ON'
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                                       'msg': 'Auto ON: Person detected', 'level': 'success'})
+                    socketio.emit('alert', {
+                        'type': 'auto_on', 'level': 'success',
+                        'message': 'Person detected — AC turned ON automatically',
+                        'time': datetime.now().strftime('%H:%M:%S')
+                    })
+                except Exception as e:
+                    print(f"❌ Auto ON error: {e}")
+            _person_consecutive_frames = required_frames  # Cap to avoid overflow
+    else:
+        _person_consecutive_frames = 0
+        
+        # Start no-person timer
+        if _no_person_start_time is None:
+            _no_person_start_time = time.time()
+        
+        # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
+        elapsed = time.time() - _no_person_start_time
+        if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
+            _auto_off_triggered = True  # Always set flag to block adaptive SET
+            _auto_off_time = time.time()  # Start cooldown timer
+            if mqtt_data['ac'].get('ac_state') != 'OFF':
+                print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
+                try:
+                    mqtt_client.publish("smartroom/ac/control", json.dumps({
+                        "action": "POWER_OFF",
+                        "source": "camera_auto"
+                    }))
+                    mqtt_data['ac']['ac_state'] = 'OFF'
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                                       'msg': f'Auto OFF: No person for {int(elapsed/60)} min', 'level': 'warning'})
+                    socketio.emit('alert', {
+                        'type': 'auto_off', 'level': 'warning',
+                        'message': f'No person for {int(elapsed/60)} min — AC turned OFF automatically',
+                        'time': datetime.now().strftime('%H:%M:%S')
+                    })
+                except Exception as e:
+                    print(f"❌ Auto OFF error: {e}")
 
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
     global camera
     if camera is None:
-        camera = cv2.VideoCapture(0)
-        if camera.isOpened():
-            # Try 4K or best available
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
-            camera.set(cv2.CAP_PROP_FPS, 60)
+        # Auto-detect camera: try index 0-4
+        for idx in range(5):
+            print(f"📷 Trying camera index {idx}...")
+            cam = cv2.VideoCapture(idx)
+            if cam.isOpened():
+                # Verify it can actually capture a frame
+                ret, test_frame = cam.read()
+                if ret and test_frame is not None:
+                    camera = cam
+                    print(f"✅ Camera found at index {idx}")
+                    break
+                else:
+                    cam.release()
+                    print(f"   Index {idx}: opened but can't read frames")
+            else:
+                cam.release()
+                print(f"   Index {idx}: not available")
+        
+        if camera is not None and camera.isOpened():
+            # 720p for best FPS — YOLO only uses 640px input anyway
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            camera.set(cv2.CAP_PROP_FPS, 30)
+            # Force MJPEG codec for USB cameras — much faster than default YUY2
+            camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            # Minimal buffer — always get latest frame, not stale buffered ones
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             # Get actual values
             actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
-            # Fallback to 1080p if 4K not supported
-            if actual_w < 1920:
-                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            # Fallback to 640x480 if 720p not supported
+            if actual_w < 1280:
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 camera.set(cv2.CAP_PROP_FPS, 30)
                 actual_w = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -371,58 +442,136 @@ def get_camera():
                                'msg': 'Camera failed to open', 'level': 'error'})
     return camera
 
-def generate_frames():
+def camera_detection_loop():
+    """Background thread: continuously detect persons & auto ON/OFF even when no one views the feed"""
+    global _latest_frame_bytes, _detection_thread_running, camera, _actual_fps
+    _detection_thread_running = True
     last_save_time = time.time()
-    save_interval = 5  # Save to InfluxDB every 5 seconds
+    save_interval = 5
+    retry_delay = 2
+    frame_count = 0
+    YOLO_EVERY_N = 4  # Run YOLO every 4th frame — other frames just capture+encode
+    last_person_count = 0
+    last_confidence = 0.0
+    last_boxes = []  # Cache bounding boxes to draw on non-YOLO frames
+    fps_counter = 0
+    fps_timer = time.time()
     
-    while True:
-        with camera_lock:
-            cam = get_camera()
-            if cam is None or not cam.isOpened():
-                mqtt_data['camera']['status'] = 'error'
-                break
-            success, frame = cam.read()
-            if not success:
-                global camera
-                if camera is not None:
-                    camera.release()
-                    camera = None
-                mqtt_data['camera']['status'] = 'error'
-                break
+    print("🎥 Camera detection background thread started (runs 24/7)")
+    
+    while _detection_thread_running:
+        if not camera_enabled:
+            time.sleep(0.5)
+            continue
+        
+        try:
+            frame = None
+            with camera_lock:
+                cam = get_camera()
+                if cam is None or not cam.isOpened():
+                    mqtt_data['camera']['status'] = 'error'
+                else:
+                    success, frame = cam.read()
+                    if not success:
+                        # Camera read failed — release and retry
+                        if camera is not None:
+                            camera.release()
+                            camera = None
+                        mqtt_data['camera']['status'] = 'reconnecting'
+                        print("⚠️ Camera read failed, will retry...")
             
-            # YOLO person detection
-            frame, person_count, confidence = detect_persons(frame)
+            # If no frame captured, wait and retry (lock is released)
+            if frame is None:
+                time.sleep(retry_delay)
+                continue
             
-            # Update MQTT data
-            mqtt_data['camera']['person_detected'] = person_count > 0
-            mqtt_data['camera']['count'] = person_count
-            mqtt_data['camera']['confidence'] = int(confidence * 100)
+            mqtt_data['camera']['status'] = 'active'
+            frame_count += 1
             
-            # Save to InfluxDB every 5 seconds
-            current_time = time.time()
-            if current_time - last_save_time >= save_interval:
-                save_person_detection(person_count, confidence)
-                last_save_time = current_time
+            # Run YOLO only every Nth frame — other frames reuse last detection
+            if frame_count % YOLO_EVERY_N == 0:
+                frame, person_count, confidence, last_boxes = detect_persons(frame)
+                last_person_count = person_count
+                last_confidence = confidence
+                
+                # Update shared data
+                mqtt_data['camera']['person_detected'] = person_count > 0
+                mqtt_data['camera']['count'] = person_count
+                mqtt_data['camera']['confidence'] = int(confidence * 100)
+                
+                # ★ Smart auto ON/OFF — only on YOLO frames
+                handle_person_based_control(person_count)
+                
+                # Save to InfluxDB every 5 seconds
+                current_time = time.time()
+                if current_time - last_save_time >= save_interval:
+                    save_person_detection(person_count, confidence)
+                    last_save_time = current_time
+                
+                # Emit to WebSocket for live dashboard updates
+                socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            else:
+                # Non-YOLO frame: just draw cached bounding boxes
+                for (x1, y1, x2, y2, conf) in last_boxes:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                    label = f"Person {conf*100:.0f}%"
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
-            # Emit to WebSocket
-            socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
-            
-            # Add timestamp overlay
+            # Draw overlays on every frame
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             cv2.putText(frame, timestamp, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            cv2.putText(frame, 'Smart Room Camera - YOLO Detection', (20, frame.shape[0] - 30), 
+            cv2.putText(frame, 'Smart Room Camera - YOLOv8 Detection', (20, frame.shape[0] - 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            
-            # Add detection info overlay
-            if person_count > 0:
-                cv2.putText(frame, f'Persons Detected: {person_count}', (20, 100), 
+            if last_person_count > 0:
+                cv2.putText(frame, f'Persons Detected: {last_person_count}', (20, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             
-            # Encode with high quality
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            frame_bytes = buffer.tobytes()
+            # Debug: print timer status every 60 seconds
+            if _no_person_start_time is not None:
+                elapsed = time.time() - _no_person_start_time
+                if int(elapsed) % 60 < 1:
+                    print(f"⏱️ No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
+            
+            # Encode frame and store for video_feed consumers
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ret:
+                with _latest_frame_lock:
+                    _latest_frame_bytes = buffer.tobytes()
+            
+            # Measure real FPS
+            fps_counter += 1
+            elapsed_fps = time.time() - fps_timer
+            if elapsed_fps >= 1.0:
+                _actual_fps = round(fps_counter / elapsed_fps)
+                fps_counter = 0
+                fps_timer = time.time()
+            
+        except Exception as e:
+            print(f"❌ Detection loop error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(retry_delay)
+    
+    print("🛑 Camera detection background thread stopped")
+
+def generate_frames():
+    """Stream latest frames to /video_feed — reads from background thread"""
+    # Send a blank frame first so the MJPEG stream starts immediately
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(blank, 'Waiting for camera...', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+    _, buf = cv2.imencode('.jpg', blank)
+    yield (b'--frame\r\n'
+           b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+    
+    while True:
+        with _latest_frame_lock:
+            frame_bytes = _latest_frame_bytes
+        
+        if frame_bytes is not None:
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        time.sleep(0.033)  # ~20 FPS to client
 
 def release_camera():
     global camera
@@ -538,8 +687,16 @@ def on_message(client, userdata, msg):
                 'ac_state': payload.get('ac_state', 'OFF'),
                 'ac_temp': payload.get('ac_temp', 24),
                 'fan_speed': payload.get('fan_speed', 1),
+                'ac_mode': payload.get('ac_mode', 'ADAPTIVE'),
+                'ac_fan_mode': payload.get('ac_fan_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
-                'uptime': payload.get('uptime', 0)
+                'uptime': payload.get('uptime', 0),
+                'temp1': payload.get('temp1', 0),
+                'hum1': payload.get('hum1', 0),
+                'temp2': payload.get('temp2', 0),
+                'hum2': payload.get('hum2', 0),
+                'temp3': payload.get('temp3', 0),
+                'hum3': payload.get('hum3', 0),
             })
             # Save sensor data to InfluxDB
             print("   💾 Saving to InfluxDB...")
@@ -617,6 +774,35 @@ def on_message(client, userdata, msg):
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
                 'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
             })
+            # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
+            # Skip if camera auto-OFF is active (no person detected)
+            if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+                opt_temp = mqtt_data['system'].get('ga_temp', 0)
+                opt_fan = mqtt_data['system'].get('ga_fan', 0)
+                if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
+                    global _last_adaptive_ac_apply
+                    now = time.time()
+                    if now - _last_adaptive_ac_apply >= 5:
+                        _last_adaptive_ac_apply = now
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                        client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                        print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    else:
+                        print(f"🤖 ADAPTIVE → AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
+            elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+                print(f"🤖 ADAPTIVE → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+            # AUTO-APPLY: If Lamp is in ADAPTIVE mode
+            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+                opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
+                if opt_brightness > 0:
+                    global _last_adaptive_lamp_apply
+                    now = time.time()
+                    if now - _last_adaptive_lamp_apply >= 5:
+                        _last_adaptive_lamp_apply = now
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
+                        print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                    else:
+                        print(f"🤖 ADAPTIVE → Lamp apply debounced")
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
@@ -939,7 +1125,7 @@ def camera_status():
         if cam and cam.isOpened():
             w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = int(cam.get(cv2.CAP_PROP_FPS))
+            fps = _actual_fps if _actual_fps > 0 else int(cam.get(cv2.CAP_PROP_FPS))
             return jsonify({'status': 'active', 'width': w, 'height': h, 'fps': fps})
         else:
             return jsonify({'status': 'inactive'})
@@ -960,9 +1146,65 @@ def restart_camera():
         else:
             return jsonify({'status': 'error', 'message': 'Camera failed to restart'}), 500
 
+@app.route('/api/camera/toggle', methods=['POST'])
+def toggle_camera():
+    global camera_enabled, camera
+    camera_enabled = not camera_enabled
+    if not camera_enabled:
+        with camera_lock:
+            if camera is not None:
+                camera.release()
+                camera = None
+            mqtt_data['camera']['status'] = 'inactive'
+            mqtt_data['camera']['person_detected'] = False
+            mqtt_data['camera']['count'] = 0
+            mqtt_data['camera']['confidence'] = 0
+        return jsonify({'status': 'success', 'enabled': False, 'message': 'Camera OFF'})
+    else:
+        with camera_lock:
+            cam = get_camera()
+            if cam and cam.isOpened():
+                return jsonify({'status': 'success', 'enabled': True, 'message': 'Camera ON'})
+            else:
+                return jsonify({'status': 'error', 'enabled': True, 'message': 'Camera failed to start'}), 500
+
 @app.route('/api/data')
 def get_data():
     return jsonify(mqtt_data)
+
+@app.route('/api/occupancy/feedback', methods=['POST'])
+def occupancy_feedback_submit():
+    try:
+        data = request.json or {}
+        rating = int(data.get('rating', 0))
+        comment = (data.get('comment') or '').strip()
+        occupancy_count = int(data.get('occupancy_count', 0))
+        google_form_url = (data.get('google_form_url') or GOOGLE_FORM_URL).strip()
+
+        if rating < 1 or rating > 5:
+            return jsonify({'status': 'error', 'message': 'Rating harus 1-5'}), 400
+
+        row = {
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'rating': rating,
+            'comment': comment,
+            'occupancy_count': occupancy_count,
+            'google_form_url': google_form_url
+        }
+        occupancy_feedback.appendleft(row)
+        log_messages.append({
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'msg': f'Occupancy Feedback: rating={rating}, occupancy={occupancy_count}, comment={comment[:40]}',
+            'level': 'info'
+        })
+
+        return jsonify({'status': 'success', 'message': 'Feedback tersimpan', 'google_form_url': google_form_url})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/occupancy/feedback/list')
+def occupancy_feedback_list():
+    return jsonify({'feedback': list(occupancy_feedback)[:20]})
 
 @app.route('/api/chart/<measurement>/<field>/<int:hours>')
 def get_chart_data(measurement, field, hours):
@@ -1006,9 +1248,21 @@ def ml_run():
 def control_ac():
     try:
         data = request.json
+        command = data.get('command', data.get('action', ''))
+
+        # Send command to ESP32 — ESP32 now uses IRMitsubishiAC library
+        # to construct and send proper Mitsubishi protocol frames directly.
+        # No need to send RAW IR codes from Flask anymore!
         mqtt_client.publish('smartroom/ac/control', json.dumps(data))
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {data}', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': 'AC command sent'})
+        print(f"[AC Control] Sent command '{command}' to ESP32 (Mitsubishi AC library handles IR)")
+
+        # Track AC operating mode locally for instant dashboard update
+        mode_map = {'MODE_COOL': 'COOL', 'MODE_HEAT': 'HEAT', 'MODE_DRY': 'DRY', 'MODE_FAN': 'FAN', 'MODE_AUTO': 'AUTO'}
+        if command in mode_map:
+            mqtt_data['ac']['ac_fan_mode'] = mode_map[command]
+
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
+        return jsonify({'status': 'success', 'message': f'AC command sent: {command}'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1070,6 +1324,40 @@ def update_optimization():
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
+        
+        # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
+        # Skip if camera auto-OFF is active (no person detected)
+        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_temp = mqtt_data['system'].get('ga_temp', 0)
+            opt_fan = mqtt_data['system'].get('ga_fan', 0)
+            if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
+                global _last_adaptive_ac_apply
+                now = time.time()
+                if now - _last_adaptive_ac_apply >= 5:
+                    _last_adaptive_ac_apply = now
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                    print(f"🤖 ADAPTIVE (HTTP) → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
+                else:
+                    print(f"🤖 ADAPTIVE (HTTP) → AC apply debounced (MQTT already handled it)")
+        elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            print(f"🤖 ADAPTIVE (HTTP) → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+        
+        # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
+            if opt_brightness > 0:
+                global _last_adaptive_lamp_apply
+                now = time.time()
+                if now - _last_adaptive_lamp_apply >= 5:
+                    _last_adaptive_lamp_apply = now
+                    lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
+                    print(f"🤖 ADAPTIVE (HTTP) → Applied to Lamp: {opt_brightness}%")
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
+                else:
+                    print(f"🤖 ADAPTIVE (HTTP) → Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -1540,7 +1828,7 @@ HTML_TEMPLATE = '''
 
         .main-content {
             margin-left: 260px;
-            padding: 30px;
+            padding: 22px;
             min-height: 100vh;
         }
 
@@ -1562,7 +1850,7 @@ HTML_TEMPLATE = '''
             background: var(--bg-card);
             padding: 20px 30px;
             border-radius: 12px;
-            margin-bottom: 30px;
+            margin-bottom: 16px;
             border: 1px solid var(--border);
         }
 
@@ -1579,13 +1867,122 @@ HTML_TEMPLATE = '''
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .dashboard-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            align-items: stretch;
+        }
+
+        .dashboard-grid .stat-card {
+            min-height: 185px;
+        }
+
+        .feedback-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
             gap: 20px;
-            margin-bottom: 30px;
+        }
+
+        .occupancy-top {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .occupancy-kpi {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .occupancy-kpi .kpi-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .occupancy-kpi .kpi-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: #06b6d4;
+            line-height: 1;
+        }
+
+        .occupancy-mini-note {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .occupancy-chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+        }
+
+        .occupancy-chart-card canvas {
+            max-height: 160px;
+        }
+
+        .rating-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .rating-btn {
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border-radius: 14px;
+            min-width: 74px;
+            min-height: 74px;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 22px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .rating-btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: #fff;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(99, 102, 241, 0.35);
+        }
+
+        .feedback-input {
+            width: 100%;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-primary);
+            padding: 10px 12px;
+            margin-top: 10px;
+        }
+
+        .feedback-history-item {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            background: var(--bg-card-hover);
         }
 
         .stat-card {
             background: var(--bg-card);
-            padding: 24px;
+            padding: 18px;
             border-radius: 12px;
             border: 1px solid var(--border);
             transition: all 0.3s;
@@ -2183,9 +2580,25 @@ HTML_TEMPLATE = '''
             .sidebar.open { transform: translateX(0); }
             .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
             .stats-grid { grid-template-columns: 1fr; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .feedback-grid { grid-template-columns: 1fr; }
+            .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
             .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
             .sidebar-overlay.active { display: block; }
+        }
+
+        @media (min-width: 769px) and (max-width: 1200px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .occupancy-top { grid-template-columns: 1fr; }
+        }
+
+        @media (min-width: 1201px) {
+            .dashboard-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         .hamburger-btn {
@@ -2324,29 +2737,37 @@ HTML_TEMPLATE = '''
             <i class="fas fa-brain"></i>
             Smart Room
         </div>
-        <div class="nav-item active" onclick="showPage('dashboard')">
-            <i class="fas fa-home"></i>
-            <span>Dashboard</span>
+        <div class="nav-item active" onclick="showPage('dashboard-ac')">
+            <i class="fas fa-snowflake"></i>
+            <span>AC Dashboard</span>
+        </div>
+        <div class="nav-item" onclick="showPage('dashboard-lamp')">
+            <i class="fas fa-lightbulb"></i>
+            <span>Lamp Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('ac-analytics')">
-            <i class="fas fa-snowflake"></i>
+            <i class="fas fa-chart-line"></i>
             <span>AC Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('lamp-analytics')">
-            <i class="fas fa-lightbulb"></i>
+            <i class="fas fa-chart-bar"></i>
             <span>Lamp Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('camera')">
             <i class="fas fa-video"></i>
             <span>Camera</span>
         </div>
-        <div class="nav-item" onclick="showPage('power')">
+        <div class="nav-item" onclick="showPage('energy')">
             <i class="fas fa-bolt"></i>
-            <span>Power Usage</span>
+            <span>Energy Usage</span>
         </div>
-        <div class="nav-item" onclick="showPage('control')">
+        <div class="nav-item" onclick="showPage('control-ac')">
             <i class="fas fa-sliders-h"></i>
-            <span>Control Panel</span>
+            <span>AC Control</span>
+        </div>
+        <div class="nav-item" onclick="showPage('control-lamp')">
+            <i class="fas fa-adjust"></i>
+            <span>Lamp Control</span>
         </div>
         <div class="nav-item" onclick="showPage('ml-optimization')">
             <i class="fas fa-brain"></i>
@@ -2355,6 +2776,10 @@ HTML_TEMPLATE = '''
         <div class="nav-item" onclick="showPage('logs')">
             <i class="fas fa-file-alt"></i>
             <span>System Logs</span>
+        </div>
+        <div class="nav-item" onclick="showPage('occupancy-feedback')">
+            <i class="fas fa-clipboard-check"></i>
+            <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
         <button class="theme-toggle" onclick="toggleTheme()" id="theme-toggle-btn">
@@ -2369,22 +2794,16 @@ HTML_TEMPLATE = '''
 
     <!-- Main Content -->
     <div class="main-content">
-        <!-- Dashboard Page -->
-        <div id="dashboard" class="page active">
+        <!-- AC Dashboard Page -->
+        <div id="dashboard-ac" class="page active">
             <div class="header">
-                <h1>Dashboard Overview</h1>
-                <p>Real-time monitoring of all systems</p>
-                <!-- Device Status Indicators -->
+                <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
+                <p>Air Conditioning monitoring & status</p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-ac">
                         <span class="device-dot offline"></span>
                         <span>ESP32-AC</span>
                         <span class="device-time" id="ds-ac-time">Never</span>
-                    </div>
-                    <div class="device-status-item" id="ds-esp32-lamp">
-                        <span class="device-dot offline"></span>
-                        <span>ESP32-Lamp</span>
-                        <span class="device-time" id="ds-lamp-time">Never</span>
                     </div>
                     <div class="device-status-item" id="ds-camera">
                         <span class="device-dot offline"></span>
@@ -2394,7 +2813,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <div class="stats-grid">
+            <div class="stats-grid dashboard-grid">
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Room Temperature</span>
@@ -2404,8 +2823,13 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-temp">0</span>°C</div>
                     <div class="stat-change up">
-                        <i class="fas fa-arrow-up"></i>
-                        <span>Real-time</span>
+                        <i class="fas fa-robot"></i>
+                        <span>Avg 3×DHT22 — Real-time</span>
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-temp1">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-temp2">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-temp3">0</strong>°C</span>
                     </div>
                 </div>
 
@@ -2418,10 +2842,227 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-hum">0</span>%</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <i class="fas fa-robot"></i>
+                        <span>Avg 3×DHT22 — Real-time</span>
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-hum1">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-hum2">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-hum3">0</strong>%</span>
                     </div>
                 </div>
 
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Heat Index</span>
+                        <div class="stat-icon" style="background: rgba(249, 115, 22, 0.2); color: #f97316;">
+                            <i class="fas fa-sun"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
+                    <div class="stat-change">
+                        <span>Suhu terasa — Kombinasi temp &amp; humidity</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">ESP32 Signal</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                            <i class="fas fa-wifi"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value" style="font-size: 24px;"><span id="dash-rssi">0</span> dBm</div>
+                    <div class="stat-change">
+                        <span>Uptime: <span id="dash-uptime" style="font-weight: bold;">0</span>s</span>
+                    </div>
+                </div>
+
+                <!-- AC Status - Full Width Detailed Panel -->
+                <div class="stat-card" id="ac-status-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
+                    <!-- Header Bar -->
+                    <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-snowflake" style="font-size: 18px; color: #6366f1;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">AC Status</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">Mitsubishi Heavy Industries — Real-time</div>
+                            </div>
+                        </div>
+                        <div id="ac-panel-power" style="display: flex; align-items: center; gap: 8px;">
+                            <div id="ac-panel-dot" style="width: 12px; height: 12px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);"></div>
+                            <span id="dash-ac-state" style="font-size: 16px; font-weight: 800; color: #ef4444;">OFF</span>
+                        </div>
+                    </div>
+                    <!-- Body Grid -->
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+                        <!-- Set Temperature -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-thermometer-half"></i> Set Suhu
+                            </div>
+                            <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
+                        </div>
+                        <!-- Fan Speed -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(139, 92, 246, 0.06); border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-fan"></i> Fan Speed
+                            </div>
+                            <div style="font-size: 28px; font-weight: 800; color: #8b5cf6;" id="dash-ac-fan">1</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="dash-ac-fan-label">Low</div>
+                        </div>
+                        <!-- AC Mode (COOL/HEAT/DRY/FAN/AUTO) -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(14, 165, 233, 0.06); border-radius: 12px; border: 1px solid rgba(14, 165, 233, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-cog"></i> Mode AC
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon"><i class="fas fa-snowflake"></i></div>
+                            <div style="font-size: 14px; font-weight: 700; color: #0ea5e9; margin-top: 2px;" id="dash-ac-mode">COOL</div>
+                        </div>
+                        <!-- Operating Mode (ADAPTIVE/MANUAL) -->
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-sliders-h"></i> Kontrol
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon"><i class="fas fa-robot"></i></div>
+                            <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
+                        </div>
+                    </div>
+                    <!-- Footer: Room Environment + extra info -->
+                    <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
+                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Avg: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
+                        </div>
+                        <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
+                            <i class="fas fa-robot"></i> AI Controlled
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Person Detection - Enhanced Card -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-user-friends" style="font-size: 18px; color: #ef4444;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">YOLOv8n — Camera Real-time</div>
+                            </div>
+                        </div>
+                        <div id="cam-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+                            <i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-users"></i> Jumlah Orang
+                            </div>
+                            <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
+                        </div>
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-crosshairs"></i> Confidence
+                            </div>
+                            <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">akurasi deteksi</div>
+                        </div>
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
+                                <i class="fas fa-bolt"></i> Auto Control
+                            </div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Aktif (10 min timeout)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GA + PSO Optimization - Full Width -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
+                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center;">
+                            <i class="fas fa-brain" style="font-size: 18px; color: #10b981;"></i>
+                        </div>
+                        <div>
+                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm → AC | PSO → Lamp</div>
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
+                        <!-- GA Section -->
+                        <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                            <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+                                <i class="fas fa-dna"></i> GA → AC Control
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #10b981;" id="ga-fitness">0.00</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Temp</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #3b82f6;" id="ga-temp">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">°C</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fan</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #8b5cf6;" id="ga-fan">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">speed</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- PSO Section -->
+                        <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
+                            <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+                                <i class="fas fa-lightbulb"></i> PSO → Lamp Control
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #f59e0b;" id="pso-fitness">0.00</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Brightness</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #eab308;" id="pso-brightness">--</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">%</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Runs</div>
+                                    <div style="font-size: 20px; font-weight: 800; color: #a855f7;" id="dash-opt-runs">0</div>
+                                    <div style="font-size: 10px; color: var(--text-secondary);">cycle</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lamp Dashboard Page -->
+        <div id="dashboard-lamp" class="page">
+            <div class="header">
+                <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
+                <p>Lighting monitoring & status</p>
+                <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
+                    <div class="device-status-item" id="ds-esp32-lamp">
+                        <span class="device-dot offline"></span>
+                        <span>ESP32-Lamp</span>
+                        <span class="device-time" id="ds-lamp-time">Never</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stats-grid dashboard-grid">
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Light Intensity</span>
@@ -2447,21 +3088,6 @@ HTML_TEMPLATE = '''
                         <span>Real-time</span>
                     </div>
                 </div>
-            </div>
-
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">AC Status</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-snowflake"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="dash-ac-state">OFF</span></div>
-                    <div class="stat-change">
-                        <span>Target: <span id="dash-ac-temp">24</span>°C</span>
-                    </div>
-                </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
@@ -2473,35 +3099,6 @@ HTML_TEMPLATE = '''
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-motion">NO MOTION</span></div>
                     <div class="stat-change">
                         <span>PIR Sensor</span>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Person Detection</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
-                            <i class="fas fa-user-friends"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value" style="font-size: 32px;">
-                        <span id="cam-count" style="color: #ef4444;">0</span> Person(s)
-                    </div>
-                    <div class="stat-change">
-                        <span><i class="fas fa-brain"></i> YOLO: <span id="cam-confidence" style="font-weight: bold;">0%</span></span>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">GA → AC Control</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-dna"></i>
-                        </div>
-                    </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="ga-fitness">0.00</span></div>
-                    <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
-                        <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;"><i class="fas fa-thermometer-half"></i> Temp: <span id="ga-temp" style="color: #10b981; font-weight: bold;">--</span>°C &nbsp; <i class="fas fa-fan"></i> Fan: <span id="ga-fan" style="color: #10b981; font-weight: bold;">--</span></span>
                     </div>
                 </div>
 
@@ -2600,8 +3197,8 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv4 Detection</h1>
-                <p>Real-time person detection menggunakan YOLOv4-tiny</p>
+                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
+                <p>Real-time person detection menggunakan YOLOv8n</p>
             </div>
 
             <div class="camera-view">
@@ -2657,6 +3254,9 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
+                        <i class="fas fa-video" id="camera-toggle-icon"></i> <span id="camera-toggle-text">Camera ON</span>
+                    </button>
                     <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
                         <i class="fas fa-volume-up" id="sound-toggle-icon"></i> <span id="sound-toggle-text">Sound ON</span>
                     </button>
@@ -2667,30 +3267,30 @@ HTML_TEMPLATE = '''
             </div>
         </div>
 
-        <!-- Power Usage Page -->
-        <div id="power" class="page">
+        <!-- Energy Usage Page -->
+        <div id="energy" class="page">
             <div class="header">
-                <h1>Power Usage</h1>
-                <p>Energy consumption monitoring and analysis</p>
+                <h1>Energy Usage</h1>
+                <p>Pemakaian energi AC dan Lamp dalam kWh</p>
             </div>
 
             <div class="power-grid">
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Power</div>
-                    <div class="power-value"><span id="ac-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Hari</div>
+                    <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Power</div>
-                    <div class="power-value"><span id="lamp-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Hari</div>
+                    <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Power</div>
-                    <div class="power-value"><span id="total-power">0</span>W</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Real-time</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Hari</div>
+                    <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
@@ -2702,36 +3302,112 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title">Power Consumption Trend</div>
+                    <div class="chart-title">Energy Trend (kWh/day equivalent)</div>
                 </div>
-                <canvas id="powerChart" height="80"></canvas>
+                <canvas id="energyChart" height="80"></canvas>
             </div>
         </div>
 
         <!-- Control Panel Page -->
-        <div id="control" class="page">
+        <!-- AC Control Page -->
+        <div id="control-ac" class="page">
             <div class="header">
-                <h1>Control Panel</h1>
-                <p>Manual control and mode selection</p>
+                <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
+                <p>Kontrol AC menggunakan IRMitsubishiHeavy library</p>
             </div>
 
-            <div class="control-panel">
+            <!-- ========== MODE SELECTOR (PROMINENT) ========== -->
+            <div id="ac-mode-selector" style="margin-bottom: 20px; padding: 20px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+                <div style="text-align: center; margin-bottom: 14px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">
+                    <i class="fas fa-cog"></i> Control Mode
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <i class="fas fa-robot" style="font-size: 28px;"></i>
+                        <span>ADAPTIVE</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI mengatur AC otomatis</span>
+                    </button>
+                    <button id="btn-mode-manual" onclick="setACMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
+                        <i class="fas fa-hand-paper" style="font-size: 28px;"></i>
+                        <span>MANUAL</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Atur AC sendiri</span>
+                    </button>
+                </div>
+                <!-- Current mode indicator -->
+                <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
+                    <i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)
+                </div>
+            </div>
+
+            <!-- ========== ADAPTIVE INFO BANNER (shown when ADAPTIVE) ========== -->
+            <div id="adaptive-info-banner" style="margin-bottom: 20px; padding: 20px; border-radius: 14px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.12)); border: 2px solid rgba(16, 185, 129, 0.3);">
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                    <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center;">
+                        <i class="fas fa-brain" style="color: white; font-size: 22px;"></i>
+                    </div>
+                    <div>
+                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Mode Adaptive Aktif</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization mengontrol suhu & fan speed secara otomatis</div>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
+                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 11px;">GA Temp</div>
+                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-temp">--</div>
+                    </div>
+                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fan</div>
+                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fan">--</div>
+                    </div>
+                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fitness</div>
+                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fitness">--</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
+                    <i class="fas fa-lock"></i> Kontrol manual dinonaktifkan saat mode Adaptive aktif. Beralih ke Manual untuk mengatur AC secara manual.
+                </div>
+            </div>
+
+            <div class="control-panel" style="position: relative;">
+                <!-- OVERLAY: blocks manual controls when ADAPTIVE -->
+                <div id="ac-manual-overlay" style="display: block; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); backdrop-filter: blur(3px); border-radius: 12px; z-index: 10; display: flex; align-items: center; justify-content: center; cursor: not-allowed;">
+                    <div style="text-align: center; color: white;">
+                        <i class="fas fa-lock" style="font-size: 36px; margin-bottom: 10px; opacity: 0.8;"></i>
+                        <div style="font-size: 14px; font-weight: 600;">Mode Adaptive Aktif</div>
+                        <div style="font-size: 12px; opacity: 0.7;">Beralih ke Manual untuk menggunakan kontrol ini</div>
+                    </div>
+                </div>
+
                 <div class="control-title">
                     <span>Air Conditioning Control</span>
-                    <div class="mode-badge adaptive" id="ac-mode-badge" onclick="toggleACMode()">ADAPTIVE MODE</div>
+                    <div class="mode-badge manual" id="ac-mode-badge" style="display:none;">MANUAL MODE</div>
+                </div>
+                
+                <!-- AC Realtime Status Bar -->
+                <div id="ac-live-status" style="margin-top: 12px; padding: 12px 16px; background: rgba(99, 102, 241, 0.08); border: 1px solid var(--border); border-radius: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <div id="ac-live-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #ef4444;"></div>
+                        <span style="font-weight: 600; color: var(--text);">AC <span id="ac-live-state">OFF</span></span>
+                    </div>
+                    <div style="display: flex; gap: 16px; color: var(--text-secondary);">
+                        <span><i class="fas fa-thermometer-half"></i> <span id="ac-live-temp">24</span>°C</span>
+                        <span><i class="fas fa-fan"></i> Fan <span id="ac-live-fan">1</span></span>
+                        <span><i class="fas fa-cog"></i> <span id="ac-live-mode">COOL</span></span>
+                    </div>
                 </div>
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
-                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_ON')">
+                    <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
                     </button>
-                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('POWER_OFF')">
+                    <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
                     </button>
-                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_UP')">
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
                         <i class="fas fa-temperature-high" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP +
                     </button>
-                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendIRCode('TEMP_DOWN')">
+                    <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_DOWN')">
                         <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
                     </button>
                 </div>
@@ -2776,158 +3452,42 @@ HTML_TEMPLATE = '''
                             <span>Low</span><span>Medium</span><span>High</span>
                         </div>
                     </div>
+                    <div class="control-group" style="margin-bottom: 15px;">
+                        <label class="control-label">AC Mode:</label>
+                        <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 8px;">
+                            <button class="btn ac-set-mode-btn" data-mode="AUTO" onclick="selectACSetMode('AUTO', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
+                                <i class="fas fa-magic"></i><br>Auto
+                            </button>
+                            <button class="btn ac-set-mode-btn active" data-mode="COOL" onclick="selectACSetMode('COOL', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--primary); border: 2px solid var(--primary); color: white; cursor: pointer;">
+                                <i class="fas fa-snowflake"></i><br>Cool
+                            </button>
+                            <button class="btn ac-set-mode-btn" data-mode="HEAT" onclick="selectACSetMode('HEAT', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
+                                <i class="fas fa-fire"></i><br>Heat
+                            </button>
+                            <button class="btn ac-set-mode-btn" data-mode="DRY" onclick="selectACSetMode('DRY', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
+                                <i class="fas fa-tint-slash"></i><br>Dry
+                            </button>
+                            <button class="btn ac-set-mode-btn" data-mode="FAN" onclick="selectACSetMode('FAN', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
+                                <i class="fas fa-fan"></i><br>Fan
+                            </button>
+                        </div>
+                    </div>
                     <button class="btn btn-primary" onclick="applyACSettings()" style="width: 100%; padding: 12px; border-radius: 10px; font-weight: 600;">
                         <i class="fas fa-paper-plane"></i> Apply AC Settings
                     </button>
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    <i class="fas fa-info-circle"></i> Tombol menggunakan kode IR yang sudah dipelajari. Pastikan sudah Learn di bawah.
+                    <i class="fas fa-info-circle"></i> Menggunakan IRMitsubishiHeavy library — tidak perlu learning manual.
                 </div>
             </div>
+        </div>
 
-            <div class="control-panel">
-                <div class="control-title">
-                    <span><i class="fas fa-satellite-dish"></i> IR Remote Learning - AC Mitsubishi</span>
-                    <div style="display: flex; gap: 10px;">
-                        <button class="btn btn-success btn-sm" onclick="saveAllIRCodes()">
-                            <i class="fas fa-save"></i> Save
-                        </button>
-                        <button class="btn btn-danger btn-sm" onclick="resetAllIRCodes()">
-                            <i class="fas fa-trash-alt"></i> Reset
-                        </button>
-                        <button class="btn btn-warning btn-sm" onclick="loadIRCodes()">
-                            <i class="fas fa-sync"></i> Refresh
-                        </button>
-                    </div>
-                </div>
-                
-                <div class="control-group" style="background: rgba(239, 68, 68, 0.1); padding: 15px; border-radius: 8px; border: 1px solid #ef4444; margin-bottom: 20px;">
-                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                        <i class="fas fa-exclamation-triangle" style="color: #ef4444; font-size: 20px;"></i>
-                        <strong style="color: #ef4444;">AC Mitsubishi Troubleshooting</strong>
-                    </div>
-                    <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
-                        <p><strong>Jika AC tidak merespon:</strong></p>
-                        <ol style="margin: 10px 0; padding-left: 20px;">
-                            <li>Pilih protokol "MITSUBISHI AC" atau "RAW" di bawah</li>
-                            <li>Pastikan IR LED <strong style="color: #ef4444;">menyala merah</strong> saat kirim</li>
-                            <li>Arahkan IR ke AC (jarak 1-3 meter, langsung ke sensor AC)</li>
-                            <li>Tekan remote <strong>2-3 detik</strong> saat learning</li>
-                            <li>Test pakai tombol POWER ON / POWER OFF terlebih dahulu</li>
-                            <li>Jika gagal, coba protokol RAW (lebih universal)</li>
-                        </ol>
-                        <p><strong>IR Transmitter Status:</strong> <span id="ir-tx-status" style="color: #10b981;">✓ Ready</span></p>
-                    </div>
-                </div>
-
-                <div class="control-group">
-                    <label class="control-label">
-                        <i class="fas fa-microchip"></i> IR Protocol Override
-                    </label>
-                    <select id="ir-protocol-selector" class="slider" style="height: 40px; padding: 8px; cursor: pointer; background: var(--bg-card); color: var(--text-primary);">
-                        <option value=\"AUTO\">AUTO (Detect from Remote)</option>
-                        <option value=\"MITSUBISHI_AC\">MITSUBISHI AC ⭐ Recommended</option>
-                        <option value=\"MITSUBISHI_HEAVY\">MITSUBISHI HEAVY</option>
-                        <option value=\"RAW\" selected>RAW (Universal - Use This!)</option>
-                        <option value=\"NEC\">NEC</option>
-                        <option value=\"SAMSUNG\">SAMSUNG</option>
-                        <option value=\"LG\">LG</option>
-                    </select>
-                    <div style="font-size: 12px; color: var(--warning); margin-top: 5px;">
-                        💡 Untuk AC Mitsubishi yang tidak merespon, gunakan <strong>RAW</strong> mode
-                    </div>
-                </div>
-                
-                <div class="control-label">
-                    <i class="fas fa-info-circle"></i> Click "Learn" button, then press the button on your AC remote within 60 seconds
-                </div>
-
-                <div class="ir-button-grid" id="ir-button-grid">
-                    <div class="ir-button" data-button="POWER_ON">
-                        <div class="ir-button-name">POWER ON</div>
-                        <div class="ir-button-icon"><i class="fas fa-power-off" style="color: #10b981;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('POWER_ON')">Learn</button>
-                        <button class="btn btn-success btn-sm" onclick="sendIRCode('POWER_ON')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-POWER_ON">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="POWER_OFF">
-                        <div class="ir-button-name">POWER OFF</div>
-                        <div class="ir-button-icon"><i class="fas fa-power-off" style="color: #ef4444;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('POWER_OFF')">Learn</button>
-                        <button class="btn btn-danger btn-sm" onclick="sendIRCode('POWER_OFF')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-POWER_OFF">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="TEMP_UP">
-                        <div class="ir-button-name">TEMP +</div>
-                        <div class="ir-button-icon"><i class="fas fa-temperature-high"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('TEMP_UP')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('TEMP_UP')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-TEMP_UP">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="TEMP_DOWN">
-                        <div class="ir-button-name">TEMP -</div>
-                        <div class="ir-button-icon"><i class="fas fa-temperature-low"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('TEMP_DOWN')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('TEMP_DOWN')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-TEMP_DOWN">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="MODE_AUTO">
-                        <div class="ir-button-name">MODE AUTO</div>
-                        <div class="ir-button-icon"><i class="fas fa-magic" style="color: #6366f1;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_AUTO')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_AUTO')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-MODE_AUTO">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="MODE_COOL">
-                        <div class="ir-button-name">MODE COOL</div>
-                        <div class="ir-button-icon"><i class="fas fa-snowflake" style="color: #0ea5e9;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_COOL')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_COOL')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-MODE_COOL">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="MODE_FAN">
-                        <div class="ir-button-name">MODE FAN</div>
-                        <div class="ir-button-icon"><i class="fas fa-fan" style="color: #8b5cf6;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_FAN')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_FAN')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-MODE_FAN">Not learned</div>
-                    </div>
-
-                    <div class="ir-button" data-button="MODE_DRY">
-                        <div class="ir-button-name">MODE DRY</div>
-                        <div class="ir-button-icon"><i class="fas fa-tint-slash" style="color: #f97316;"></i></div>
-                        <button class="btn btn-warning btn-sm" onclick="learnIRCode('MODE_DRY')">Learn</button>
-                        <button class="btn btn-primary btn-sm" onclick="sendIRCode('MODE_DRY')" style="margin-top: 5px;">Send</button>
-                        <div class="ir-status" id="status-MODE_DRY">Not learned</div>
-                    </div>
-                </div>
-                
-                <div style="margin-top: 20px; padding: 15px; background: rgba(99, 102, 241, 0.1); border-radius: 8px; border: 1px solid var(--primary);">
-                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px;">
-                        <i class="fas fa-book"></i> IR Codes Summary
-                    </div>
-                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">
-                        Total Learned: <strong id="ir-total-learned" style="color: var(--primary);">0</strong> / 8 buttons
-                    </div>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <button class="btn btn-primary btn-sm" onclick="exportIRCodes()">
-                            <i class="fas fa-download"></i> Export JSON
-                        </button>
-                        <button class="btn btn-warning btn-sm" onclick="showIRDebugInfo()">
-                            <i class="fas fa-bug"></i> Debug Info
-                        </button>
-                        <button class="btn btn-success btn-sm" onclick="testAllIRCodes()">
-                            <i class="fas fa-play"></i> Test All
-                        </button>
-                    </div>
-                </div>
+        <!-- Lamp Control Page -->
+        <div id="control-lamp" class="page">
+            <div class="header">
+                <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
+                <p>Manual lamp control and brightness settings</p>
             </div>
 
             <div class="control-panel">
@@ -3096,19 +3656,19 @@ HTML_TEMPLATE = '''
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
                             <label>Population Size</label>
-                            <input type="number" id="ml-ga-pop" value="20" min="5" max="100" class="ml-input">
+                            <input type="number" id="ml-ga-pop" value="15" min="5" max="100" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Generations</label>
-                            <input type="number" id="ml-ga-gen" value="50" min="10" max="500" class="ml-input">
+                            <input type="number" id="ml-ga-gen" value="30" min="10" max="500" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Mutation Rate</label>
-                            <input type="number" id="ml-ga-mut" value="0.1" min="0.01" max="0.5" step="0.01" class="ml-input">
+                            <input type="number" id="ml-ga-mut" value="0.25" min="0.01" max="0.5" step="0.01" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Crossover Rate</label>
-                            <input type="number" id="ml-ga-cross" value="0.7" min="0.1" max="1.0" step="0.05" class="ml-input">
+                            <input type="number" id="ml-ga-cross" value="0.8" min="0.1" max="1.0" step="0.05" class="ml-input">
                         </div>
                     </div>
                 </div>
@@ -3149,6 +3709,78 @@ HTML_TEMPLATE = '''
             <div class="log-container" id="log-container">
             </div>
         </div>
+
+        <!-- Occupancy Trend & Feedback Page -->
+        <div id="occupancy-feedback" class="page">
+            <div class="header">
+                <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
+                <p>Pantau tren okupansi dan kirim penilaian kenyamanan ruangan (1-5)</p>
+            </div>
+
+            <div class="occupancy-top">
+                <div class="occupancy-kpi">
+                    <div class="kpi-label">Occupancy Saat Ini</div>
+                    <div class="kpi-value" id="occ-live-count">0</div>
+                    <div class="occupancy-mini-note">Orang terdeteksi saat ini</div>
+                    <div class="occupancy-mini-note">Confidence: <span id="occ-live-confidence">0%</span></div>
+                </div>
+
+                <div class="occupancy-chart-card">
+                    <div class="chart-header" style="margin-bottom: 10px;">
+                        <div class="chart-title">Occupancy Trend</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
+                        </div>
+                    </div>
+                    <canvas id="occupancyChart" height="48"></canvas>
+                </div>
+            </div>
+
+            <div class="feedback-grid">
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-star"></i> Feedback Kenyamanan</div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
+                        Skala: 1 = Tidak Puas, 5 = Sangat Puas
+                    </div>
+                    <div class="rating-row" id="rating-row" style="margin-top: 14px;">
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Tidak puas">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Kurang puas">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Cukup">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Puas">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Sangat puas">5</button>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-secondary);">
+                        <span>Tidak Puas</span>
+                        <span>Sangat Puas</span>
+                    </div>
+                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Masukkan feedback pengguna ruangan..."></textarea>
+                    <input id="google-form-url" class="feedback-input" placeholder="Masukkan URL Google Form Anda" />
+
+                    <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
+                            <i class="fas fa-save"></i> Simpan Link Form
+                        </button>
+                        <button class="btn btn-success" onclick="openGoogleForm()">
+                            <i class="fas fa-external-link-alt"></i> Buka Google Form
+                        </button>
+                        <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
+                            <i class="fas fa-paper-plane"></i> Kirim Feedback
+                        </button>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-history"></i> Feedback Terbaru</div>
+                    </div>
+                    <div id="feedback-history"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Toast Notification -->
@@ -3183,8 +3815,12 @@ HTML_TEMPLATE = '''
             hum: 1,
             acTemp: 1,
             lampLux: 1,
-            lampBright: 1
+            lampBright: 1,
+            occupancy: 1
         };
+
+        let selectedFeedbackRating = 0;
+        const DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
 
         let learnedCodes = {};
 
@@ -3268,9 +3904,14 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
-            charts.power = new Chart(document.getElementById('powerChart'), {
+            charts.energy = new Chart(document.getElementById('energyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Total Power (W)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
             });
 
             // ML Optimization Charts
@@ -3308,6 +3949,7 @@ HTML_TEMPLATE = '''
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
+                case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
             }
 
             fetch(endpoint)
@@ -3398,6 +4040,10 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'ml-optimization') {
                 refreshMLData();
+            }
+            if (pageId === 'occupancy-feedback') {
+                updateChartData('occupancy', chartRanges.occupancy || 1);
+                loadFeedbackHistory();
             }
         }
 
@@ -3522,10 +4168,11 @@ HTML_TEMPLATE = '''
         function getMLParams(algo) {
             if (algo === 'ga') {
                 return {
-                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 20,
-                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 50,
-                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.1,
-                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.7
+                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 15,
+                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 30,
+                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.25,
+                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.8,
+                    elitism_ratio: 0.2
                 };
             } else {
                 return {
@@ -3606,6 +4253,49 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== CAMERA ====================
+        let cameraEnabled = true;
+
+        function toggleCamera() {
+            fetch('/api/camera/toggle', { method: 'POST' })
+                .then(r => r.json())
+                .then(result => {
+                    cameraEnabled = result.enabled;
+                    updateCameraToggleUI();
+                    const img = document.getElementById('camera-img');
+                    const error = document.getElementById('camera-error');
+                    if (cameraEnabled) {
+                        img.src = '/video_feed?' + new Date().getTime();
+                        img.style.display = 'block';
+                        error.style.display = 'none';
+                        showToast('Camera ON', 'success');
+                    } else {
+                        img.style.display = 'none';
+                        error.style.display = 'flex';
+                        error.querySelector('h3').textContent = 'Camera OFF';
+                        error.querySelector('p').textContent = 'Kamera dimatikan. Klik tombol Camera ON untuk mengaktifkan.';
+                        showToast('Camera OFF', 'info');
+                    }
+                    checkCameraStatus();
+                })
+                .catch(e => showToast('Error: ' + e, 'error'));
+        }
+
+        function updateCameraToggleUI() {
+            const btn = document.getElementById('camera-toggle-btn');
+            const icon = document.getElementById('camera-toggle-icon');
+            const text = document.getElementById('camera-toggle-text');
+            if (!btn) return;
+            if (cameraEnabled) {
+                btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                icon.className = 'fas fa-video';
+                text.textContent = 'Camera ON';
+            } else {
+                btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                icon.className = 'fas fa-video-slash';
+                text.textContent = 'Camera OFF';
+            }
+        }
+
         function retryCamera() {
             const img = document.getElementById('camera-img');
             const error = document.getElementById('camera-error');
@@ -3667,28 +4357,64 @@ HTML_TEMPLATE = '''
         }
 
         function sendACCommand(command) {
-            fetch('/api/ac/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: command })
-            })
-            .then(r => r.json())
-            .then(result => showToast(result.message))
-            .catch(e => showToast('Error: ' + e, 'error'));
+            // Block manual commands when in ADAPTIVE mode
+            fetch('/api/data').then(r => r.json()).then(data => {
+                if (data.ac.mode === 'ADAPTIVE') {
+                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    return;
+                }
+                fetch('/api/ac/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: command })
+                })
+                .then(r => r.json())
+                .then(result => {
+                    const label = command.replace('_', ' ');
+                    showToast('AC: ' + label, result.ir_sent ? 'success' : 'info');
+                })
+                .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+            });
+        }
+
+        let selectedACMode = 'COOL';
+
+        function selectACSetMode(mode, btn) {
+            selectedACMode = mode;
+            document.querySelectorAll('.ac-set-mode-btn').forEach(b => {
+                b.style.background = 'var(--card-bg)';
+                b.style.border = '2px solid var(--border)';
+                b.style.color = 'var(--text)';
+            });
+            btn.style.background = 'var(--primary)';
+            btn.style.border = '2px solid var(--primary)';
+            btn.style.color = 'white';
         }
 
         function applyACSettings() {
-            const temp = document.getElementById('ac-temp-slider').value;
-            const fan = document.getElementById('fan-speed-slider').value;
-            
-            fetch('/api/ac/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: 'SET', temperature: parseInt(temp), fan_speed: parseInt(fan) })
-            })
-            .then(r => r.json())
-            .then(result => showToast('AC settings applied!'))
-            .catch(e => showToast('Error: ' + e, 'error'));
+            // Block manual commands when in ADAPTIVE mode
+            fetch('/api/data').then(r => r.json()).then(data => {
+                if (data.ac.mode === 'ADAPTIVE') {
+                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    return;
+                }
+                const temp = document.getElementById('ac-temp-slider').value;
+                const fan = document.getElementById('fan-speed-slider').value;
+
+                fetch('/api/ac/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        command: 'SET',
+                        temperature: parseInt(temp),
+                        fan_speed: parseInt(fan),
+                        mode: selectedACMode
+                    })
+                })
+                .then(r => r.json())
+                .then(result => showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode))
+                .catch(e => showToast('Error: ' + e, 'error'));
+            });
         }
 
         // ==================== LAMP CONTROLS ====================
@@ -3711,19 +4437,114 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== MODE TOGGLES ====================
+        function setACMode(mode) {
+            fetch('/api/ac/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(r => r.json())
+            .then(result => {
+                applyACModeUI(mode);
+                showToast('AC Mode: ' + mode, 'success');
+            })
+            .catch(e => showToast('Error: ' + e, 'error'));
+        }
+
+        function applyACModeUI(mode) {
+            const overlay = document.getElementById('ac-manual-overlay');
+            const banner = document.getElementById('adaptive-info-banner');
+            const indicator = document.getElementById('ac-mode-indicator');
+            const btnAdaptive = document.getElementById('btn-mode-adaptive');
+            const btnManual = document.getElementById('btn-mode-manual');
+
+            if (mode === 'ADAPTIVE') {
+                // Show overlay on manual controls
+                if (overlay) overlay.style.display = 'flex';
+                if (banner) banner.style.display = 'block';
+                // Indicator
+                if (indicator) {
+                    indicator.style.background = 'rgba(16, 185, 129, 0.1)';
+                    indicator.style.color = '#10b981';
+                    indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    indicator.innerHTML = '<i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)';
+                }
+                // Button styles
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                    btnAdaptive.style.borderColor = '#10b981';
+                    btnAdaptive.style.color = 'white';
+                    btnAdaptive.style.opacity = '1';
+                }
+                if (btnManual) {
+                    btnManual.style.background = 'var(--bg-card)';
+                    btnManual.style.borderColor = 'var(--border)';
+                    btnManual.style.color = 'var(--text-secondary)';
+                    btnManual.style.opacity = '0.6';
+                }
+            } else {
+                // Hide overlay — allow manual controls
+                if (overlay) overlay.style.display = 'none';
+                if (banner) banner.style.display = 'none';
+                // Indicator
+                if (indicator) {
+                    indicator.style.background = 'rgba(245, 158, 11, 0.1)';
+                    indicator.style.color = '#f59e0b';
+                    indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Mode saat ini: <strong>MANUAL</strong> — Atur AC secara manual menggunakan tombol di bawah';
+                }
+                // Button styles
+                if (btnManual) {
+                    btnManual.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                    btnManual.style.borderColor = '#f59e0b';
+                    btnManual.style.color = 'white';
+                    btnManual.style.opacity = '1';
+                }
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'var(--bg-card)';
+                    btnAdaptive.style.borderColor = 'var(--border)';
+                    btnAdaptive.style.color = 'var(--text-secondary)';
+                    btnAdaptive.style.opacity = '0.6';
+                }
+            }
+            // Update adaptive info cards
+            updateAdaptiveInfo();
+        }
+
+        function updateAdaptiveInfo() {
+            fetch('/api/data')
+                .then(r => r.json())
+                .then(data => {
+                    const gaTemp = document.getElementById('adaptive-ga-temp');
+                    const gaFan = document.getElementById('adaptive-ga-fan');
+                    const gaFitness = document.getElementById('adaptive-ga-fitness');
+                    if (gaTemp) gaTemp.textContent = (data.system.ga_temp || 0) > 0 ? data.system.ga_temp + '°C' : '--';
+                    if (gaFan) gaFan.textContent = (data.system.ga_fan || 0) > 0 ? 'Lv ' + data.system.ga_fan : '--';
+                    if (gaFitness) gaFitness.textContent = (data.system.ga_fitness || 0) > 0 ? parseFloat(data.system.ga_fitness).toFixed(2) : '--';
+                });
+        }
+
+        // Keep old function name for backward compat (called elsewhere)
         function toggleACMode() {
             fetch('/api/data')
                 .then(r => r.json())
                 .then(data => {
                     const newMode = data.ac.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    fetch('/api/ac/mode', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ mode: newMode })
-                    })
-                    .then(r => r.json())
-                    .then(result => { updateModeBadges(); showToast('AC Mode: ' + newMode); })
-                    .catch(e => showToast('Error: ' + e, 'error'));
+                    setACMode(newMode);
+                });
+        }
+
+        function updateModeBadges() {
+            fetch('/api/data')
+                .then(r => r.json())
+                .then(data => {
+                    applyACModeUI(data.ac.mode);
+                    
+                    const lampBadge = document.getElementById('lamp-mode-badge');
+                    if (lampBadge) {
+                        lampBadge.textContent = data.lamp.mode + ' MODE';
+                        lampBadge.className = 'mode-badge ' + data.lamp.mode.toLowerCase();
+                    }
                 });
         }
 
@@ -3740,21 +4561,6 @@ HTML_TEMPLATE = '''
                     .then(r => r.json())
                     .then(result => { updateModeBadges(); showToast('Lamp Mode: ' + newMode); })
                     .catch(e => showToast('Error: ' + e, 'error'));
-                });
-        }
-
-        function updateModeBadges() {
-            fetch('/api/data')
-                .then(r => r.json())
-                .then(data => {
-                    const acBadge = document.getElementById('ac-mode-badge');
-                    const lampBadge = document.getElementById('lamp-mode-badge');
-                    
-                    acBadge.textContent = data.ac.mode + ' MODE';
-                    acBadge.className = 'mode-badge ' + data.ac.mode.toLowerCase();
-                    
-                    lampBadge.textContent = data.lamp.mode + ' MODE';
-                    lampBadge.className = 'mode-badge ' + data.lamp.mode.toLowerCase();
                 });
         }
 
@@ -3848,6 +4654,7 @@ HTML_TEMPLATE = '''
         }
 
         function sendIRCode(buttonName) {
+            // For IR Learning panel Send buttons - still uses learned codes
             fetch('/api/ir/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -3865,45 +4672,42 @@ HTML_TEMPLATE = '''
         }
 
         function sendACMode(modeName, btnElement) {
-            // Visual feedback - highlight active mode button
-            document.querySelectorAll('.ac-mode-btn').forEach(btn => {
-                btn.style.opacity = '0.6';
-                btn.style.transform = 'scale(0.95)';
-            });
-            if (btnElement) {
-                btnElement.style.opacity = '1';
-                btnElement.style.transform = 'scale(1.05)';
-            }
+            // Block manual commands when in ADAPTIVE mode
+            fetch('/api/data').then(r => r.json()).then(data => {
+                if (data.ac.mode === 'ADAPTIVE') {
+                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    return;
+                }
+                // Visual feedback
+                document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                    btn.style.opacity = '0.6';
+                    btn.style.transform = 'scale(0.95)';
+                });
+                if (btnElement) {
+                    btnElement.style.opacity = '1';
+                    btnElement.style.transform = 'scale(1.05)';
+                }
 
-            // Send IR code for this mode
-            fetch('/api/ir/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ button: modeName })
-            })
-            .then(r => r.json())
-            .then(result => {
-                if (result.status === 'success') {
-                    const modeLabel = modeName.replace('MODE_', '');
-                    showToast('AC Mode: ' + modeLabel, 'success');
-                    // Reset button styles after delay
-                    setTimeout(() => {
-                        document.querySelectorAll('.ac-mode-btn').forEach(btn => {
-                            btn.style.opacity = '1';
-                            btn.style.transform = 'scale(1)';
-                        });
-                        if (btnElement) {
-                            btnElement.style.transform = 'scale(1.05)';
-                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
-                        }
-                    }, 300);
-                } else {
-                    showToast('Mode belum dipelajari. Learn dulu di IR Remote!', 'error');
+                // Single endpoint handles state tracking + IR code transmission
+                fetch('/api/ac/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: modeName })
+                })
+                .then(r => r.json())
+                .then(result => {
+                const modeLabel = modeName.replace('MODE_', '');
+                showToast('AC Mode: ' + modeLabel, result.ir_sent ? 'success' : 'info');
+                setTimeout(() => {
                     document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                         btn.style.opacity = '1';
                         btn.style.transform = 'scale(1)';
                     });
-                }
+                    if (btnElement) {
+                        btnElement.style.transform = 'scale(1.05)';
+                        btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                    }
+                }, 300);
             })
             .catch(e => {
                 showToast('Error: ' + (e.message || e), 'error');
@@ -3912,6 +4716,7 @@ HTML_TEMPLATE = '''
                     btn.style.transform = 'scale(1)';
                 });
             });
+            }); // end fetch /api/data
         }
 
         function loadIRCodes() {
@@ -4123,7 +4928,7 @@ HTML_TEMPLATE = '''
 
         // ==================== DETECTION ALERT ====================
         let lastDetectionTime = 0;
-        const DETECTION_COOLDOWN = 8000; // 8 seconds between alerts
+        const DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
         let detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
 
         // Initialize sound toggle button visual on load
@@ -4245,6 +5050,95 @@ HTML_TEMPLATE = '''
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
 
+        // ==================== OCCUPANCY FEEDBACK ====================
+        function selectFeedbackRating(value) {
+            selectedFeedbackRating = value;
+            document.querySelectorAll('#rating-row .rating-btn').forEach((btn, idx) => {
+                btn.classList.toggle('active', idx + 1 === value);
+            });
+        }
+
+        function saveGoogleFormUrl() {
+            const url = (document.getElementById('google-form-url').value || '').trim();
+            if (!url) {
+                showToast('Masukkan URL Google Form terlebih dahulu', 'error');
+                return;
+            }
+            localStorage.setItem('googleFormUrl', url);
+            showToast('URL Google Form tersimpan', 'success');
+        }
+
+        function openGoogleForm() {
+            const url = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+            window.open(url, '_blank');
+        }
+
+        function submitOccupancyFeedback() {
+            const comment = (document.getElementById('feedback-comment').value || '').trim();
+            const formUrl = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+
+            if (!selectedFeedbackRating) {
+                showToast('Pilih rating 1-5 terlebih dahulu', 'error');
+                return;
+            }
+
+            fetch('/api/occupancy/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    rating: selectedFeedbackRating,
+                    comment: comment,
+                    google_form_url: formUrl,
+                    occupancy_count: parseInt(document.getElementById('cam-count')?.textContent || '0', 10)
+                })
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.status === 'success') {
+                    showToast('Feedback berhasil dikirim', 'success');
+                    document.getElementById('feedback-comment').value = '';
+                    selectFeedbackRating(0);
+                    loadFeedbackHistory();
+                    if (formUrl && formUrl !== DEFAULT_GOOGLE_FORM_URL) {
+                        window.open(formUrl, '_blank');
+                    }
+                } else {
+                    showToast(result.message || 'Gagal kirim feedback', 'error');
+                }
+            })
+            .catch(e => showToast('Error: ' + (e.message || e), 'error'));
+        }
+
+        function loadFeedbackHistory() {
+            fetch('/api/occupancy/feedback/list')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('feedback-history');
+                    if (!container) return;
+
+                    const rows = data.feedback || [];
+                    if (rows.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Belum ada feedback.</div>';
+                        return;
+                    }
+
+                    container.innerHTML = rows.map(item => {
+                        const safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        return `
+                            <div class="feedback-history-item">
+                                <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                                    <strong>Rating: ${item.rating}/5</strong>
+                                    <span style="font-size:12px; color: var(--text-secondary);">${item.time}</span>
+                                </div>
+                                <div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ${item.occupancy_count} person(s)</div>
+                                <div style="margin-top:6px; font-size:13px;">${safeComment || '-'}</div>
+                            </div>
+                        `;
+                    }).join('');
+                })
+                .catch(() => {});
+        }
+
         // ==================== DATA UPDATES ====================
         function updateDashboard() {
             fetch('/api/data')
@@ -4253,23 +5147,144 @@ HTML_TEMPLATE = '''
                     const temperature = data.ac.temperature;
                     document.getElementById('dash-temp').textContent = temperature.toFixed(1);
                     document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
+                    // Individual sensor readings
+                    const t1El = document.getElementById('dash-temp1');
+                    const t2El = document.getElementById('dash-temp2');
+                    const t3El = document.getElementById('dash-temp3');
+                    if (t1El) t1El.textContent = (data.ac.temp1 || 0).toFixed(1);
+                    if (t2El) t2El.textContent = (data.ac.temp2 || 0).toFixed(1);
+                    if (t3El) t3El.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    // Individual humidity readings
+                    const h1El = document.getElementById('dash-hum1');
+                    const h2El = document.getElementById('dash-hum2');
+                    const h3El = document.getElementById('dash-hum3');
+                    if (h1El) h1El.textContent = (data.ac.hum1 || 0).toFixed(1);
+                    if (h2El) h2El.textContent = (data.ac.hum2 || 0).toFixed(1);
+                    if (h3El) h3El.textContent = (data.ac.hum3 || 0).toFixed(1);
                     
-                    // AC State Logic: < 30°C = ON, >= 30°C = OFF
+                    // Heat Index
+                    const hiEl = document.getElementById('dash-heat-index');
+                    if (hiEl) hiEl.textContent = (data.ac.heat_index || 0).toFixed(1);
+                    
+                    // ESP32 Signal & Uptime
+                    const rssiEl = document.getElementById('dash-rssi');
+                    if (rssiEl) rssiEl.textContent = data.ac.rssi || 0;
+                    const uptEl = document.getElementById('dash-uptime');
+                    if (uptEl) {
+                        const secs = data.ac.uptime || 0;
+                        const h = Math.floor(secs / 3600);
+                        const m = Math.floor((secs % 3600) / 60);
+                        uptEl.textContent = h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (secs % 60) + 's';
+                    }
+                    
+                    // AC State - use REAL state from ESP32, not temperature guessing
                     const acStateEl = document.getElementById('dash-ac-state');
-                    let acState = data.ac.ac_state;
+                    let acState = data.ac.ac_state || 'OFF';
                     
-                    // Override AC state based on temperature logic
-                    if (temperature < 30) {
-                        acState = 'ON';
+                    if (acState === 'ON') {
                         acStateEl.style.color = '#10b981'; // Green
                     } else {
-                        acState = 'OFF';
                         acStateEl.style.color = '#ef4444'; // Red
                     }
                     
                     acStateEl.textContent = acState;
-                    document.getElementById('dash-ac-temp').textContent = data.ac.ac_temp;
                     
+                    // AC panel power dot
+                    const panelDot = document.getElementById('ac-panel-dot');
+                    if (panelDot) {
+                        panelDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
+                        panelDot.style.boxShadow = acState === 'ON' ? '0 0 8px rgba(16,185,129,0.5)' : '0 0 8px rgba(239,68,68,0.5)';
+                    }
+                    
+                    // Set Temperature
+                    const acTemp = data.ac.ac_temp || 24;
+                    document.getElementById('dash-ac-temp').textContent = acTemp;
+                    
+                    // Fan Speed with label
+                    const fanSpeed = data.ac.fan_speed || 1;
+                    document.getElementById('dash-ac-fan').textContent = fanSpeed;
+                    const fanLabel = document.getElementById('dash-ac-fan-label');
+                    if (fanLabel) {
+                        const fanNames = {1: 'Low', 2: 'Medium', 3: 'High'};
+                        fanLabel.textContent = fanNames[fanSpeed] || 'Level ' + fanSpeed;
+                    }
+                    
+                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color — uses ac_fan_mode from ESP32
+                    const acMode = data.ac.ac_fan_mode || 'COOL';
+                    document.getElementById('dash-ac-mode').textContent = acMode;
+                    const modeIconEl = document.getElementById('dash-ac-mode-icon');
+                    const modeTextEl = document.getElementById('dash-ac-mode');
+                    const modeIcons = {
+                        'COOL': {icon: 'fa-snowflake', color: '#0ea5e9'},
+                        'HEAT': {icon: 'fa-fire', color: '#f97316'},
+                        'DRY':  {icon: 'fa-tint-slash', color: '#a855f7'},
+                        'FAN':  {icon: 'fa-fan', color: '#8b5cf6'},
+                        'AUTO': {icon: 'fa-magic', color: '#6366f1'}
+                    };
+                    const modeInfo = modeIcons[acMode] || modeIcons['COOL'];
+                    if (modeIconEl) {
+                        modeIconEl.innerHTML = '<i class="fas ' + modeInfo.icon + '"></i>';
+                        modeIconEl.style.color = modeInfo.color;
+                    }
+                    if (modeTextEl) modeTextEl.style.color = modeInfo.color;
+                    
+                    // Operating Mode (ADAPTIVE / MANUAL)
+                    const ctrlMode = data.ac.mode || 'ADAPTIVE';
+                    const ctrlIcon = document.getElementById('dash-ac-ctrl-icon');
+                    const ctrlText = document.getElementById('dash-ac-ctrl-mode');
+                    if (ctrlIcon && ctrlText) {
+                        if (ctrlMode === 'ADAPTIVE') {
+                            ctrlIcon.innerHTML = '<i class="fas fa-robot"></i>';
+                            ctrlIcon.style.color = '#10b981';
+                            ctrlText.textContent = 'ADAPTIVE';
+                            ctrlText.style.color = '#10b981';
+                        } else {
+                            ctrlIcon.innerHTML = '<i class="fas fa-hand-paper"></i>';
+                            ctrlIcon.style.color = '#f59e0b';
+                            ctrlText.textContent = 'MANUAL';
+                            ctrlText.style.color = '#f59e0b';
+                        }
+                    }
+                    
+                    // Source badge
+                    const srcBadge = document.getElementById('dash-ac-source');
+                    if (srcBadge) {
+                        if (ctrlMode === 'ADAPTIVE') {
+                            srcBadge.innerHTML = '<i class="fas fa-robot"></i> AI Controlled';
+                            srcBadge.style.background = 'rgba(16, 185, 129, 0.12)';
+                            srcBadge.style.color = '#10b981';
+                            srcBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
+                        } else {
+                            srcBadge.innerHTML = '<i class="fas fa-hand-paper"></i> Manual Control';
+                            srcBadge.style.background = 'rgba(245, 158, 11, 0.12)';
+                            srcBadge.style.color = '#f59e0b';
+                            srcBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                        }
+                    }
+                    
+                    // Room environment in AC panel footer
+                    const roomTemp = document.getElementById('dash-ac-room-temp');
+                    const roomHum = document.getElementById('dash-ac-room-hum');
+                    if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
+                    if (roomHum) roomHum.textContent = data.ac.humidity.toFixed(1);
+                    // Individual sensors in AC panel footer
+                    const acT1 = document.getElementById('dash-ac-temp1');
+                    const acT2 = document.getElementById('dash-ac-temp2');
+                    const acT3 = document.getElementById('dash-ac-temp3');
+                    if (acT1) acT1.textContent = (data.ac.temp1 || 0).toFixed(1);
+                    if (acT2) acT2.textContent = (data.ac.temp2 || 0).toFixed(1);
+                    if (acT3) acT3.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    
+                    // Update AC Live Status Bar in control panel
+                    const liveDot = document.getElementById('ac-live-dot');
+                    const liveState = document.getElementById('ac-live-state');
+                    if (liveDot && liveState) {
+                        liveState.textContent = acState;
+                        liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
+                        document.getElementById('ac-live-temp').textContent = acTemp;
+                        document.getElementById('ac-live-fan').textContent = fanSpeed;
+                        document.getElementById('ac-live-mode').textContent = acMode;
+                    }
                     document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
                     document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
@@ -4296,6 +5311,27 @@ HTML_TEMPLATE = '''
                         camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
                     }
                     
+                    // Person detection status badge
+                    const camBadge = document.getElementById('cam-status-badge');
+                    if (camBadge) {
+                        if (personCount > 0) {
+                            camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> ' + personCount + ' Person Detected';
+                            camBadge.style.background = 'rgba(16, 185, 129, 0.12)';
+                            camBadge.style.color = '#10b981';
+                            camBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                        } else {
+                            camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person';
+                            camBadge.style.background = 'rgba(239, 68, 68, 0.12)';
+                            camBadge.style.color = '#ef4444';
+                            camBadge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                        }
+                    }
+
+                    const occCountEl = document.getElementById('occ-live-count');
+                    const occConfEl = document.getElementById('occ-live-confidence');
+                    if (occCountEl) occCountEl.textContent = personCount;
+                    if (occConfEl) occConfEl.textContent = confidence + '%';
+                    
                     // Show detection alert if person detected
                     if (personDetected && personCount > 0) {
                         showDetectionAlert(personCount, confidence);
@@ -4317,6 +5353,19 @@ HTML_TEMPLATE = '''
                         psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
                     }
                     
+                    // PSO Brightness
+                    const psoBrightEl = document.getElementById('pso-brightness');
+                    if (psoBrightEl) {
+                        const psoBright = data.system.pso_brightness || 0;
+                        psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
+                    }
+                    
+                    // Optimization Runs
+                    const optRunsEl = document.getElementById('dash-opt-runs');
+                    if (optRunsEl) {
+                        optRunsEl.textContent = data.system.optimization_runs || 0;
+                    }
+                    
                     // Calculate AC power based on temperature logic
                     let acPower = 0;
                     const actualACState = temperature < 30 ? 'ON' : 'OFF';
@@ -4326,12 +5375,30 @@ HTML_TEMPLATE = '''
                     }
                     let lampPower = (data.lamp.brightness / 255) * 10;
                     let totalPower = acPower + lampPower;
+                    let acEnergyKwh = (acPower / 1000) * 24;
+                    let lampEnergyKwh = (lampPower / 1000) * 24;
+                    let totalEnergyKwh = acEnergyKwh + lampEnergyKwh;
                     let dailyCost = (totalPower / 1000) * 24 * 1500;
                     
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
                     document.getElementById('total-power').textContent = totalPower.toFixed(1);
+                    document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
+                    document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
+                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(2);
                     document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
+
+                    if (charts.energy) {
+                        const now = new Date();
+                        const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
+                        if (charts.energy.data.labels.length >= 50) {
+                            charts.energy.data.labels.shift();
+                            charts.energy.data.datasets[0].data.shift();
+                        }
+                        charts.energy.data.labels.push(timeLabel);
+                        charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
+                        charts.energy.update();
+                    }
                     
                     updateModeBadges();
                 });
@@ -4683,8 +5750,12 @@ HTML_TEMPLATE = '''
 
         // ==================== INIT ====================
         function loadSavedPreferences() {
-            const savedPage = localStorage.getItem('currentPage');
-            if (savedPage) {
+            let savedPage = localStorage.getItem('currentPage');
+            // Migrate old page IDs to new split pages
+            if (savedPage === 'dashboard') savedPage = 'dashboard-ac';
+            if (savedPage === 'control') savedPage = 'control-ac';
+            if (savedPage === 'power') savedPage = 'energy';
+            if (savedPage && document.getElementById(savedPage)) {
                 document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
                 
@@ -4703,11 +5774,19 @@ HTML_TEMPLATE = '''
             loadSavedPreferences();
             loadSavedSettings();
             updateSoundToggleUI();
+            updateCameraToggleUI();
             updateDashboard();
             updateDeviceStatus();
             updateLogs();
-            loadIRCodes();
             checkCameraStatus();
+            const googleFormInput = document.getElementById('google-form-url');
+            if (googleFormInput) {
+                googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
+            }
+            loadFeedbackHistory();
+            
+            // Initialize AC mode UI on page load
+            updateModeBadges();
             
             Object.keys(chartRanges).forEach(chartName => {
                 updateChartData(chartName, chartRanges[chartName]);
@@ -4732,7 +5811,7 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  🏠 Smart Room Dashboard - 4K Camera + YOLOv4 Detection")
+    print("  🏠 Smart Room Dashboard - YOLOv8n + Auto AC Control")
     print("=" * 60)
     
     # Load saved IR codes from file
@@ -4767,14 +5846,21 @@ if __name__ == '__main__':
     else:
         print("  ⚠️  YOLO failed to load, running without detection")
     
+    # Start background camera detection thread (runs 24/7 for auto ON/OFF)
+    print("  🎥 Starting background camera detection thread...")
+    detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
+    detection_thread.start()
+    print("  ✅ Detection thread running — auto ON/OFF active")
+    
     print("=" * 60)
     print("  🌐 Dashboard URL: http://172.20.0.65:5000")
     print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
     print("  ✨ Features:")
-    print("     - YOLOv4-tiny Person Detection")
+    print("     - YOLOv8n Person Detection (background thread)")
+    print("     - Auto ON: 3 frames (~2s) person confirmed → AC ON")
+    print("     - Auto OFF: 10 min no person → AC OFF")
     print("     - 4K Camera (fallback 1080p)")
-    print("     - localStorage Settings Persistence")
     print("     - Real-time Person Count & Confidence")
     print("=" * 60)
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
