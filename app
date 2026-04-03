@@ -458,6 +458,8 @@ def camera_detection_loop():
     fps_timer = time.time()
     
     print("🎥 Camera detection background thread started (runs 24/7)")
+    last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
+    CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
     while _detection_thread_running:
         if not camera_enabled:
@@ -508,8 +510,49 @@ def camera_detection_loop():
                     save_person_detection(person_count, confidence)
                     last_save_time = current_time
                 
+                # Publish person status to ESP32 OLED every CAMERA_STATUS_INTERVAL seconds
+                if current_time - last_camera_status_publish >= CAMERA_STATUS_INTERVAL:
+                    last_camera_status_publish = current_time
+                    # Calculate seconds since last person confirmed
+                    if _last_person_confirmed_time > 0:
+                        last_seen_ago = int(current_time - _last_person_confirmed_time)
+                    else:
+                        last_seen_ago = -1  # Never detected
+                    
+                    # Calculate no-person timer if running
+                    no_person_elapsed = 0
+                    if _no_person_start_time is not None:
+                        no_person_elapsed = int(current_time - _no_person_start_time)
+                    
+                    camera_status_data = {
+                        'person_detected': person_count > 0,
+                        'person_count': person_count,
+                        'last_seen_ago': last_seen_ago,
+                        'no_person_elapsed': no_person_elapsed,
+                        'auto_off_in': max(0, NO_PERSON_TIMEOUT_SECONDS - no_person_elapsed) if no_person_elapsed > 0 else -1,
+                        'auto_off_triggered': _auto_off_triggered,
+                        'ac_mode': mqtt_data['ac'].get('mode', 'MANUAL')
+                    }
+                    try:
+                        mqtt_client.publish('smartroom/camera/status', json.dumps(camera_status_data))
+                    except Exception:
+                        pass
+                
                 # Emit to WebSocket for live dashboard updates
-                socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+                # Include last person detection time for dashboard display
+                camera_ws_data = dict(mqtt_data['camera'])
+                if _last_person_confirmed_time > 0:
+                    camera_ws_data['last_seen_ago'] = int(time.time() - _last_person_confirmed_time)
+                else:
+                    camera_ws_data['last_seen_ago'] = -1
+                if _no_person_start_time is not None:
+                    camera_ws_data['no_person_elapsed'] = int(time.time() - _no_person_start_time)
+                    camera_ws_data['auto_off_in'] = max(0, NO_PERSON_TIMEOUT_SECONDS - int(time.time() - _no_person_start_time))
+                else:
+                    camera_ws_data['no_person_elapsed'] = 0
+                    camera_ws_data['auto_off_in'] = -1
+                camera_ws_data['auto_off_triggered'] = _auto_off_triggered
+                socketio.emit('mqtt_update', {'type': 'camera', 'data': camera_ws_data})
             else:
                 # Non-YOLO frame: just draw cached bounding boxes
                 for (x1, y1, x2, y2, conf) in last_boxes:
@@ -2983,6 +3026,23 @@ HTML_TEMPLATE = '''
                             </div>
                             <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Aktif (10 min timeout)</div>
+                        </div>
+                    </div>
+                    <!-- Last Person Detection + Auto-OFF Timer -->
+                    <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
+                            <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
+                                <i class="fas fa-clock"></i> Terakhir Deteksi Orang
+                            </div>
+                            <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Belum terdeteksi</div>
+                        </div>
+                        <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
+                            <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
+                                <i class="fas fa-power-off"></i> Auto-OFF AC
+                            </div>
+                            <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Tidak aktif</div>
                         </div>
                     </div>
                 </div>
@@ -5650,6 +5710,51 @@ HTML_TEMPLATE = '''
                 // Show alert when person detected
                 if (personDetected && personCount > 0) {
                     showDetectionAlert(personCount, confidence);
+                }
+                
+                // Update "Last Person Detected" display
+                const lastSeenEl = document.getElementById('cam-last-seen');
+                const lastSeenLabel = document.getElementById('cam-last-seen-label');
+                const lastSeenAgo = data.data.last_seen_ago;
+                if (lastSeenEl) {
+                    if (personDetected && personCount > 0) {
+                        lastSeenEl.textContent = 'Sekarang';
+                        lastSeenEl.style.color = '#10b981';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Orang terdeteksi saat ini';
+                    } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
+                        const mins = Math.floor(lastSeenAgo / 60);
+                        const secs = lastSeenAgo % 60;
+                        lastSeenEl.textContent = mins > 0 ? `${mins}m ${secs}s lalu` : `${secs}s lalu`;
+                        lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Sejak terakhir terdeteksi';
+                    } else {
+                        lastSeenEl.textContent = '--';
+                        lastSeenEl.style.color = '#94a3b8';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Belum pernah terdeteksi';
+                    }
+                }
+                
+                // Update "Auto-OFF AC" countdown
+                const autoOffEl = document.getElementById('cam-auto-off-timer');
+                const autoOffLabel = document.getElementById('cam-auto-off-label');
+                const autoOffIn = data.data.auto_off_in;
+                const autoOffTriggered = data.data.auto_off_triggered;
+                if (autoOffEl) {
+                    if (autoOffTriggered) {
+                        autoOffEl.textContent = 'MATI';
+                        autoOffEl.style.color = '#ef4444';
+                        if (autoOffLabel) autoOffLabel.textContent = 'AC sudah auto-OFF';
+                    } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
+                        const offMins = Math.floor(autoOffIn / 60);
+                        const offSecs = autoOffIn % 60;
+                        autoOffEl.textContent = `${offMins}m ${offSecs}s`;
+                        autoOffEl.style.color = autoOffIn < 120 ? '#ef4444' : '#f59e0b';
+                        if (autoOffLabel) autoOffLabel.textContent = 'Countdown auto-OFF AC';
+                    } else {
+                        autoOffEl.textContent = '--';
+                        autoOffEl.style.color = '#10b981';
+                        if (autoOffLabel) autoOffLabel.textContent = 'Orang terdeteksi, AC aman';
+                    }
                 }
                 
                 console.log('📹 Camera Update:', {
