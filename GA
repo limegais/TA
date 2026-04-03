@@ -1,0 +1,285 @@
+"""
+Smart Room IoT - Genetic Algorithm for AC Optimization (Enhanced)
+Continuous encoding, seeding from previous cycle, 20% elitism,
+adaptive mutation, exhaustive validation against brute-force
+Data from InfluxDB sensor readings
+"""
+
+import random
+import math
+from fitness import calculate_ac_fitness, TEMP_MIN, TEMP_MAX, FAN_MIN, FAN_MAX
+
+class GeneticAlgorithm:
+    """
+    Enhanced Genetic Algorithm for AC Control Optimization
+    
+    Chromosome: [temperature (float), fan_speed (int)]
+    - temperature: 16.0-30.0°C (continuous — rounded to int when applied to AC)
+    - fan_speed: 1-3 (discrete)
+    
+    Improvements:
+    - Continuous temperature encoding (float) for smooth fitness landscape
+    - Seeding: inject previous cycle's best solution into initial population
+    - 20% elitism: top 20% survive to next generation unchanged
+    - Adaptive mutation: higher rate in early gens, lower in late gens
+    - Brute-force validation: final answer verified against exhaustive search
+    """
+    
+    def __init__(self, population_size=20, generations=30, 
+                 mutation_rate=0.25, crossover_rate=0.8, elitism_ratio=0.2,
+                 seed_solutions=None):
+        self.population_size = max(population_size, 10)
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.crossover_rate = crossover_rate
+        self.elitism_ratio = elitism_ratio
+        self.elite_count = max(2, int(self.population_size * elitism_ratio))
+        self.seed_solutions = seed_solutions or []  # List of [temp, fan] from previous cycles
+        
+        self.best_solution = None
+        self.best_fitness = 0
+        self.fitness_history = []
+        self.generation_stats = []
+        self.brute_force_best = None  # For validation
+    
+    def create_individual(self):
+        """Create random individual [temp (float), fan_speed (int)]"""
+        return [
+            round(random.uniform(TEMP_MIN, TEMP_MAX), 1),  # Continuous temperature
+            random.randint(FAN_MIN, FAN_MAX)
+        ]
+    
+    def create_population(self):
+        """Create initial population with optional seeding from previous cycle"""
+        population = []
+        
+        # Seed with previous cycle's best solutions (up to 30% of population)
+        max_seeds = max(1, int(self.population_size * 0.3))
+        for i, seed in enumerate(self.seed_solutions[:max_seeds]):
+            # Add seed as-is
+            population.append([float(seed[0]), int(seed[1])])
+            # Add mutated variant of seed (explore neighborhood)
+            if len(population) < self.population_size:
+                variant = [
+                    round(max(TEMP_MIN, min(TEMP_MAX, seed[0] + random.uniform(-1.5, 1.5))), 1),
+                    max(FAN_MIN, min(FAN_MAX, seed[1] + random.choice([-1, 0, 0, 1])))
+                ]
+                population.append(variant)
+        
+        # Fill rest with random individuals
+        while len(population) < self.population_size:
+            population.append(self.create_individual())
+        
+        return population[:self.population_size]
+    
+    def evaluate_fitness(self, individual):
+        """Evaluate fitness — handles float temp by rounding to int for fitness calc"""
+        temp_rounded = int(round(individual[0]))
+        temp_rounded = max(int(TEMP_MIN), min(int(TEMP_MAX), temp_rounded))
+        return calculate_ac_fitness(temp_rounded, individual[1])
+    
+    def evaluate_population(self, population):
+        """Calculate AC fitness for all individuals"""
+        return [self.evaluate_fitness(ind) for ind in population]
+    
+    def selection_tournament(self, population, fitness_scores, tournament_size=3):
+        """Tournament selection"""
+        selected = []
+        for _ in range(len(population)):
+            contestants = random.sample(range(len(population)), min(tournament_size, len(population)))
+            best_idx = max(contestants, key=lambda i: fitness_scores[i])
+            selected.append(population[best_idx][:])
+        return selected
+    
+    def crossover_blend(self, parent1, parent2):
+        """BLX-α crossover: blends float genes for smoother exploration"""
+        if random.random() < self.crossover_rate:
+            alpha = 0.3
+            child1, child2 = [], []
+            for i in range(len(parent1)):
+                lo = min(parent1[i], parent2[i])
+                hi = max(parent1[i], parent2[i])
+                span = hi - lo
+                if i == 0:  # Temperature (float)
+                    c1_val = round(random.uniform(lo - alpha * span, hi + alpha * span), 1)
+                    c2_val = round(random.uniform(lo - alpha * span, hi + alpha * span), 1)
+                    child1.append(max(TEMP_MIN, min(TEMP_MAX, c1_val)))
+                    child2.append(max(TEMP_MIN, min(TEMP_MAX, c2_val)))
+                else:  # Fan speed (int) — standard swap
+                    if random.random() < 0.5:
+                        child1.append(parent1[i])
+                        child2.append(parent2[i])
+                    else:
+                        child1.append(parent2[i])
+                        child2.append(parent1[i])
+            return child1, child2
+        return parent1[:], parent2[:]
+    
+    def mutate(self, individual, generation, max_generations):
+        """Adaptive mutation: higher rate in early gens, lower in late gens"""
+        mutated = individual[:]
+        # Adaptive rate: starts at mutation_rate, decays to mutation_rate * 0.3
+        progress = generation / max(1, max_generations)
+        adaptive_rate = self.mutation_rate * (1.0 - 0.7 * progress)
+        
+        for i in range(len(mutated)):
+            if random.random() < adaptive_rate:
+                if i == 0:  # Temperature (continuous)
+                    # Gaussian mutation with adaptive step size
+                    step = random.gauss(0, 2.0 * (1 - progress) + 0.5)
+                    mutated[i] = round(max(TEMP_MIN, min(TEMP_MAX, mutated[i] + step)), 1)
+                elif i == 1:  # Fan speed (discrete)
+                    mutated[i] = random.randint(FAN_MIN, FAN_MAX)
+        return mutated
+    
+    def brute_force_validate(self):
+        """Exhaustive search over all 45 integer combinations to verify GA result"""
+        best_bf_fitness = -1
+        best_bf_solution = None
+        for temp in range(int(TEMP_MIN), int(TEMP_MAX) + 1):
+            for fan in range(FAN_MIN, FAN_MAX + 1):
+                fit = calculate_ac_fitness(temp, fan)
+                if fit > best_bf_fitness:
+                    best_bf_fitness = fit
+                    best_bf_solution = [temp, fan]
+        return best_bf_solution, best_bf_fitness
+    
+    def optimize(self, verbose=True, selection_method='tournament'):
+        """
+        Run enhanced GA optimization for AC settings
+        
+        Returns:
+        - best_solution: [temp (int), fan_speed] — rounded for AC application
+        - best_fitness: fitness score
+        """
+        if verbose:
+            print("\n" + "="*70)
+            print("🧬 GENETIC ALGORITHM - AC OPTIMIZATION (Enhanced)")
+            print("="*70)
+            print(f"Population: {self.population_size} | Generations: {self.generations}")
+            print(f"Mutation: {self.mutation_rate} (adaptive) | Crossover: {self.crossover_rate} (BLX-α)")
+            print(f"Elitism: top {self.elite_count} ({self.elitism_ratio*100:.0f}%) | Seeds: {len(self.seed_solutions)}")
+            
+            from fitness import get_current_conditions, _get_time_period, _get_temp_uniformity
+            cond = get_current_conditions()
+            print(f"\nSensor Data ({cond.get('data_source', 'unknown')}):")
+            print(f"  Room Temp: {cond['temperature']}°C | Humidity: {cond['humidity']}%")
+            print(f"  Person: {'Yes' if cond['person_detected'] else 'No'}")
+            print(f"  Time Period: {_get_time_period()} | Trend: {cond.get('temp_trend', 0):.2f}°C/min")
+            print(f"  3-Sensor Uniformity: {_get_temp_uniformity():.2f}")
+            print("="*70 + "\n")
+        
+        # Reset state
+        self.best_solution = None
+        self.best_fitness = 0
+        self.fitness_history = []
+        self.generation_stats = []
+        
+        # Initialize population (with seeding)
+        population = self.create_population()
+        if verbose and self.seed_solutions:
+            print(f"🌱 Seeded {min(len(self.seed_solutions), int(self.population_size * 0.3))} solutions from previous cycle")
+        
+        for gen in range(self.generations):
+            fitness_scores = self.evaluate_population(population)
+            
+            # Sort population by fitness (descending)
+            paired = list(zip(population, fitness_scores))
+            paired.sort(key=lambda x: x[1], reverse=True)
+            population = [p[0] for p in paired]
+            fitness_scores = [p[1] for p in paired]
+            
+            # Track best
+            if fitness_scores[0] > self.best_fitness:
+                self.best_fitness = fitness_scores[0]
+                self.best_solution = population[0][:]
+            
+            avg_fitness = sum(fitness_scores) / len(fitness_scores)
+            min_fitness = min(fitness_scores)
+            self.fitness_history.append(self.best_fitness)
+            self.generation_stats.append({
+                'generation': gen + 1,
+                'best': self.best_fitness,
+                'avg': round(avg_fitness, 2),
+                'min': round(min_fitness, 2)
+            })
+            
+            if verbose and (gen + 1) % 5 == 0:
+                sol_temp = int(round(self.best_solution[0]))
+                print(f"Gen {gen+1:3d}/{self.generations} | "
+                      f"Best: {self.best_fitness:6.2f} | "
+                      f"Avg: {avg_fitness:6.2f} | "
+                      f"AC={sol_temp}°C, Fan={self.best_solution[1]}")
+            
+            # Elitism: keep top elite_count unchanged
+            next_population = [ind[:] for ind in population[:self.elite_count]]
+            
+            # Selection from entire population
+            selected = self.selection_tournament(population, fitness_scores)
+            
+            # Create children to fill remaining slots
+            while len(next_population) < self.population_size:
+                p1, p2 = random.sample(selected, 2)
+                child1, child2 = self.crossover_blend(p1, p2)
+                next_population.append(self.mutate(child1, gen, self.generations))
+                if len(next_population) < self.population_size:
+                    next_population.append(self.mutate(child2, gen, self.generations))
+            
+            population = next_population[:self.population_size]
+        
+        # ===== BRUTE-FORCE VALIDATION =====
+        bf_solution, bf_fitness = self.brute_force_validate()
+        self.brute_force_best = {'solution': bf_solution, 'fitness': bf_fitness}
+        
+        # Use brute-force result if GA missed the optimum
+        ga_rounded = [int(round(self.best_solution[0])), self.best_solution[1]]
+        if bf_fitness > self.best_fitness:
+            if verbose:
+                print(f"\n⚠️  GA result ({ga_rounded[0]}°C, Fan {ga_rounded[1]}, fit={self.best_fitness:.2f})"
+                      f" < Brute-force ({bf_solution[0]}°C, Fan {bf_solution[1]}, fit={bf_fitness:.2f})")
+                print(f"   → Using brute-force optimum instead")
+            self.best_solution = [float(bf_solution[0]), bf_solution[1]]
+            self.best_fitness = bf_fitness
+        else:
+            if verbose:
+                print(f"\n✅ GA found optimum! (matches brute-force: {bf_solution[0]}°C, Fan {bf_solution[1]})")
+        
+        # Round to int for final output
+        final_solution = [int(round(self.best_solution[0])), self.best_solution[1]]
+        
+        if verbose:
+            print("\n" + "="*70)
+            print("✅ GA OPTIMIZATION COMPLETED!")
+            print("="*70)
+            print(f"Best Fitness: {self.best_fitness:.2f}")
+            print(f"Best AC Setting:")
+            print(f"  Temperature: {final_solution[0]}°C")
+            print(f"  Fan Speed:   {final_solution[1]}")
+            print(f"Brute-Force Validation: {bf_solution[0]}°C, Fan {bf_solution[1]} (fit={bf_fitness:.2f})")
+            print("="*70 + "\n")
+        
+        return final_solution, self.best_fitness
+    
+    def get_statistics(self):
+        """Return optimization statistics"""
+        return {
+            'fitness_history': self.fitness_history,
+            'generation_stats': self.generation_stats,
+            'best_solution': self.best_solution,
+            'best_fitness': self.best_fitness,
+            'brute_force_best': self.brute_force_best
+        }
+
+# ==================== STANDALONE TEST ====================
+if __name__ == '__main__':
+    print("\n🧬 Testing Enhanced GA - AC Optimization")
+    print("="*70)
+    
+    ga = GeneticAlgorithm(population_size=15, generations=30)
+    solution, fitness = ga.optimize(verbose=True)
+    
+    print(f"\nResult: AC={solution[0]}°C, Fan={solution[1]}, Fitness={fitness:.2f}")
+    stats = ga.get_statistics()
+    if stats['brute_force_best']:
+        bf = stats['brute_force_best']
+        print(f"Brute-Force: AC={bf['solution'][0]}°C, Fan={bf['solution'][1]}, Fitness={bf['fitness']:.2f}")
