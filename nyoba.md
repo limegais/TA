@@ -82,8 +82,9 @@ _last_adaptive_lamp_apply = 0
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
-    'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness3': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
+    'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
@@ -153,20 +154,22 @@ def save_sensor_data(temperature, humidity, heat_index):
         import traceback
         traceback.print_exc()
 
-def save_lamp_data(lux, brightness, motion):
-    """Save lamp sensor data to InfluxDB"""
+def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
+    """Save lamp sensor data to InfluxDB (3 lamps)"""
     try:
+        lux_avg = (lux1 + lux2 + lux3) / 3.0
+        bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
         result = write_to_influxdb(
             measurement="lamp_sensor",
             fields={
-                "lux": float(lux),
-                "brightness": float(brightness),
+                "lux1": float(lux1), "lux2": float(lux2), "lux3": float(lux3), "lux_avg": float(lux_avg),
+                "brightness1": float(brightness1), "brightness2": float(brightness2), "brightness3": float(brightness3), "brightness_avg": float(bright_avg),
                 "motion": bool(motion)
             },
             tags={"device": "esp32_lamp", "location": "room"}
         )
         if result:
-            print(f"✅ Lamp data saved: {lux} lux, {brightness}%")
+            print(f"✅ Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
     except Exception as e:
         print(f"❌ Error saving lamp data: {e}")
         import traceback
@@ -458,6 +461,8 @@ def camera_detection_loop():
     fps_timer = time.time()
     
     print("🎥 Camera detection background thread started (runs 24/7)")
+    last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
+    CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
     while _detection_thread_running:
         if not camera_enabled:
@@ -508,8 +513,49 @@ def camera_detection_loop():
                     save_person_detection(person_count, confidence)
                     last_save_time = current_time
                 
+                # Publish person status to ESP32 OLED every CAMERA_STATUS_INTERVAL seconds
+                if current_time - last_camera_status_publish >= CAMERA_STATUS_INTERVAL:
+                    last_camera_status_publish = current_time
+                    # Calculate seconds since last person confirmed
+                    if _last_person_confirmed_time > 0:
+                        last_seen_ago = int(current_time - _last_person_confirmed_time)
+                    else:
+                        last_seen_ago = -1  # Never detected
+                    
+                    # Calculate no-person timer if running
+                    no_person_elapsed = 0
+                    if _no_person_start_time is not None:
+                        no_person_elapsed = int(current_time - _no_person_start_time)
+                    
+                    camera_status_data = {
+                        'person_detected': person_count > 0,
+                        'person_count': person_count,
+                        'last_seen_ago': last_seen_ago,
+                        'no_person_elapsed': no_person_elapsed,
+                        'auto_off_in': max(0, NO_PERSON_TIMEOUT_SECONDS - no_person_elapsed) if no_person_elapsed > 0 else -1,
+                        'auto_off_triggered': _auto_off_triggered,
+                        'ac_mode': mqtt_data['ac'].get('mode', 'MANUAL')
+                    }
+                    try:
+                        mqtt_client.publish('smartroom/camera/status', json.dumps(camera_status_data))
+                    except Exception:
+                        pass
+                
                 # Emit to WebSocket for live dashboard updates
-                socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+                # Include last person detection time for dashboard display
+                camera_ws_data = dict(mqtt_data['camera'])
+                if _last_person_confirmed_time > 0:
+                    camera_ws_data['last_seen_ago'] = int(time.time() - _last_person_confirmed_time)
+                else:
+                    camera_ws_data['last_seen_ago'] = -1
+                if _no_person_start_time is not None:
+                    camera_ws_data['no_person_elapsed'] = int(time.time() - _no_person_start_time)
+                    camera_ws_data['auto_off_in'] = max(0, NO_PERSON_TIMEOUT_SECONDS - int(time.time() - _no_person_start_time))
+                else:
+                    camera_ws_data['no_person_elapsed'] = 0
+                    camera_ws_data['auto_off_in'] = -1
+                camera_ws_data['auto_off_triggered'] = _auto_off_triggered
+                socketio.emit('mqtt_update', {'type': 'camera', 'data': camera_ws_data})
             else:
                 # Non-YOLO frame: just draw cached bounding boxes
                 for (x1, y1, x2, y2, conf) in last_boxes:
@@ -720,24 +766,51 @@ def on_message(client, userdata, msg):
             check_alert_rules()
             
         elif 'lamp/sensors' in topic:
+            l1 = payload.get('lux1', payload.get('lux', 0))
+            l2 = payload.get('lux2', l1)
+            l3 = payload.get('lux3', l1)
+            b1 = payload.get('brightness1', payload.get('brightness', 0))
+            b2 = payload.get('brightness2', b1)
+            b3 = payload.get('brightness3', b1)
             mqtt_data['lamp'].update({
-                'lux': payload.get('lux', 0),
+                'lux1': l1, 'lux2': l2, 'lux3': l3,
+                'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
                 'motion': payload.get('motion', False),
-                'brightness': payload.get('brightness', 0),
+                'brightness1': b1, 'brightness2': b2, 'brightness3': b3,
+                'brightness_avg': round((b1 + b2 + b3) / 3.0, 1),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(
-                mqtt_data['lamp']['lux'],
-                mqtt_data['lamp']['brightness'],
-                mqtt_data['lamp']['motion']
-            )
+            save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
             device_last_seen['esp32_lamp']['status'] = 'online'
             
+        elif 'energy/data' in topic:
+            mqtt_data['energy'].update({
+                'voltage': payload.get('voltage', 0),
+                'current': payload.get('current', 0),
+                'power': payload.get('power', 0),
+                'energy': payload.get('energy', 0),
+                'frequency': payload.get('frequency', 0),
+                'pf': payload.get('pf', 0),
+                'connected': payload.get('connected', False),
+                'ac_state': payload.get('ac_state', 'OFF')
+            })
+            print(f"   ⚡ Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
+            # Save to InfluxDB
+            write_to_influxdb('energy_monitor', {
+                'voltage': float(mqtt_data['energy']['voltage']),
+                'current': float(mqtt_data['energy']['current']),
+                'power': float(mqtt_data['energy']['power']),
+                'energy_kwh': float(mqtt_data['energy']['energy']),
+                'frequency': float(mqtt_data['energy']['frequency']),
+                'power_factor': float(mqtt_data['energy']['pf'])
+            }, tags={'device': 'pzem016', 'ac_state': mqtt_data['energy']['ac_state']})
+            socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
+
         elif 'camera/detection' in topic:
             mqtt_data['camera'].update({
                 'person_detected': payload.get('person_detected', False),
@@ -799,8 +872,8 @@ def on_message(client, userdata, msg):
                     now = time.time()
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
-                        client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
-                        print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
+                        print(f"🤖 ADAPTIVE → Applied to All Lamps: {opt_brightness}%")
                     else:
                         print(f"🤖 ADAPTIVE → Lamp apply debounced")
         
@@ -1182,7 +1255,7 @@ def occupancy_feedback_submit():
         google_form_url = (data.get('google_form_url') or GOOGLE_FORM_URL).strip()
 
         if rating < 1 or rating > 5:
-            return jsonify({'status': 'error', 'message': 'Rating harus 1-5'}), 400
+            return jsonify({'status': 'error', 'message': 'Rating must be 1-5'}), 400
 
         row = {
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1198,7 +1271,7 @@ def occupancy_feedback_submit():
             'level': 'info'
         })
 
-        return jsonify({'status': 'success', 'message': 'Feedback tersimpan', 'google_form_url': google_form_url})
+        return jsonify({'status': 'success', 'message': 'Feedback saved', 'google_form_url': google_form_url})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -2861,7 +2934,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
                     <div class="stat-change">
-                        <span>Suhu terasa — Kombinasi temp &amp; humidity</span>
+                        <span>Feels like — Combination of temp &amp; humidity</span>
                     </div>
                 </div>
 
@@ -2901,7 +2974,7 @@ HTML_TEMPLATE = '''
                         <!-- Set Temperature -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-thermometer-half"></i> Set Suhu
+                                <i class="fas fa-thermometer-half"></i> Set Temperature
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
@@ -2946,6 +3019,57 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- Energy Monitor Panel (PZEM-016) -->
+                <div class="stat-card" id="energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-bolt" style="font-size: 18px; color: #f59e0b;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Monitor</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">PZEM-016 + CT — AC Energy Usage</div>
+                            </div>
+                        </div>
+                        <div id="energy-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(107, 114, 128, 0.15); color: #6b7280; border: 1px solid rgba(107, 114, 128, 0.3);">
+                            <i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-plug" style="color: #f59e0b;"></i> Voltage</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-voltage">0</span><span style="font-size: 12px; color: var(--text-secondary);"> V</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-wave-square" style="color: #ef4444;"></i> Current</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-current">0</span><span style="font-size: 12px; color: var(--text-secondary);"> A</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-fire" style="color: #f97316;"></i> Power</div>
+                                <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="energy-power">0</span><span style="font-size: 12px; color: var(--text-secondary);"> W</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-battery-half" style="color: #10b981;"></i> Energy</div>
+                                <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="energy-kwh">0</span><span style="font-size: 12px; color: var(--text-secondary);"> kWh</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-signal" style="color: #6366f1;"></i> Frequency</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-freq">0</span><span style="font-size: 12px; color: var(--text-secondary);"> Hz</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-tachometer-alt" style="color: #8b5cf6;"></i> Power Factor</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-pf">0</span></div>
+                            </div>
+                        </div>
+                        <!-- Estimasi biaya harian -->
+                        <div style="margin-top: 12px; padding: 10px 14px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(217, 119, 6, 0.05)); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
+                            <div style="font-size: 12px; color: var(--text-secondary);"><i class="fas fa-coins" style="color: #f59e0b;"></i> Cost Estimate (Rp 1.444,70/kWh)</div>
+                            <div style="font-size: 14px; font-weight: 700; color: #f59e0b;">Rp <span id="energy-cost">0</span></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Person Detection - Enhanced Card -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
@@ -2965,7 +3089,7 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
                         <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-users"></i> Jumlah Orang
+                                <i class="fas fa-users"></i> Person Count
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
@@ -2975,14 +3099,31 @@ HTML_TEMPLATE = '''
                                 <i class="fas fa-crosshairs"></i> Confidence
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">akurasi deteksi</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
                                 <i class="fas fa-bolt"></i> Auto Control
                             </div>
                             <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
-                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Aktif (10 min timeout)</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
+                        </div>
+                    </div>
+                    <!-- Last Person Detection + Auto-OFF Timer -->
+                    <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
+                            <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
+                                <i class="fas fa-clock"></i> Last Person Detection
+                            </div>
+                            <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
+                        </div>
+                        <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
+                            <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
+                                <i class="fas fa-power-off"></i> Auto-OFF AC
+                            </div>
+                            <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
                         </div>
                     </div>
                 </div>
@@ -3052,7 +3193,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-lamp" class="page">
             <div class="header">
                 <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
-                <p>Lighting monitoring & status</p>
+                <p>Lighting monitoring & status — 3 Lamps</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
                         <span class="device-dot offline"></span>
@@ -3063,32 +3204,63 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="stats-grid dashboard-grid">
+                <!-- Lamp 1 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Light Intensity</span>
+                        <span class="stat-title">Lamp 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             <i class="fas fa-sun"></i>
                         </div>
                     </div>
-                    <div class="stat-value"><span id="dash-lux">0</span> lx</div>
+                    <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <span>Brightness: <span id="dash-bright1">0</span>%</span>
                     </div>
                 </div>
 
+                <!-- Lamp 2 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp Brightness</span>
+                        <span class="stat-title">Lamp 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-lightbulb"></i>
+                            <i class="fas fa-sun"></i>
                         </div>
                     </div>
-                    <div class="stat-value"><span id="dash-brightness">0</span>%</div>
+                    <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <span>Brightness: <span id="dash-bright2">0</span>%</span>
                     </div>
                 </div>
 
+                <!-- Lamp 3 -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 3 — Lux</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                            <i class="fas fa-sun"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
+                    <div class="stat-change">
+                        <span>Brightness: <span id="dash-bright3">0</span>%</span>
+                    </div>
+                </div>
+
+                <!-- Average -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Average (3 Lamps)</span>
+                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                            <i class="fas fa-chart-bar"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
+                    <div class="stat-change">
+                        <span>Avg Brightness: <span id="dash-bright-avg">0</span>%</span>
+                    </div>
+                </div>
+
+                <!-- Motion Detection -->
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Motion Detection</span>
@@ -3102,6 +3274,7 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- PSO Control -->
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PSO → Lamp Control</span>
@@ -3171,7 +3344,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Light Intensity (Lux)</div>
+                    <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
@@ -3183,7 +3356,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Brightness Level</div>
+                    <div class="chart-title">Average Brightness Level — 3 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
@@ -3198,7 +3371,7 @@ HTML_TEMPLATE = '''
         <div id="camera" class="page">
             <div class="header">
                 <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
-                <p>Real-time person detection menggunakan YOLOv8n</p>
+                <p>Real-time person detection using YOLOv8n</p>
             </div>
 
             <div class="camera-view">
@@ -3218,7 +3391,7 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-video-slash"></i>
                         <h3>Camera Not Available</h3>
                         <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
-                            Pastikan kamera USB terhubung dengan benar
+                            Make sure USB camera is properly connected
                         </p>
                         <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
                             <i class="fas fa-sync"></i> Retry Connection
@@ -3271,24 +3444,24 @@ HTML_TEMPLATE = '''
         <div id="energy" class="page">
             <div class="header">
                 <h1>Energy Usage</h1>
-                <p>Pemakaian energi AC dan Lamp dalam kWh</p>
+                <p>AC and Lamp energy consumption in kWh</p>
             </div>
 
             <div class="power-grid">
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Day</div>
                     <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Day</div>
                     <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
                     <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
                 </div>
@@ -3313,7 +3486,7 @@ HTML_TEMPLATE = '''
         <div id="control-ac" class="page">
             <div class="header">
                 <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
-                <p>Kontrol AC menggunakan IRMitsubishiHeavy library</p>
+                <p>AC Control using IRMitsubishiHeavy library</p>
             </div>
 
             <!-- ========== MODE SELECTOR (PROMINENT) ========== -->
@@ -3325,17 +3498,17 @@ HTML_TEMPLATE = '''
                     <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
                         <i class="fas fa-robot" style="font-size: 28px;"></i>
                         <span>ADAPTIVE</span>
-                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI mengatur AC otomatis</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically</span>
                     </button>
                     <button id="btn-mode-manual" onclick="setACMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
                         <i class="fas fa-hand-paper" style="font-size: 28px;"></i>
                         <span>MANUAL</span>
-                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Atur AC sendiri</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control AC manually</span>
                     </button>
                 </div>
                 <!-- Current mode indicator -->
                 <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
-                    <i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)
+                    <i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)
                 </div>
             </div>
 
@@ -3346,8 +3519,8 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-brain" style="color: white; font-size: 22px;"></i>
                     </div>
                     <div>
-                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Mode Adaptive Aktif</div>
-                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization mengontrol suhu & fan speed secara otomatis</div>
+                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Adaptive Mode Active</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed automatically</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
@@ -3365,7 +3538,7 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
-                    <i class="fas fa-lock"></i> Kontrol manual dinonaktifkan saat mode Adaptive aktif. Beralih ke Manual untuk mengatur AC secara manual.
+                    <i class="fas fa-lock"></i> Manual control is disabled in Adaptive mode. Switch to Manual to control AC manually.
                 </div>
             </div>
 
@@ -3374,8 +3547,8 @@ HTML_TEMPLATE = '''
                 <div id="ac-manual-overlay" style="display: block; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); backdrop-filter: blur(3px); border-radius: 12px; z-index: 10; display: flex; align-items: center; justify-content: center; cursor: not-allowed;">
                     <div style="text-align: center; color: white;">
                         <i class="fas fa-lock" style="font-size: 36px; margin-bottom: 10px; opacity: 0.8;"></i>
-                        <div style="font-size: 14px; font-weight: 600;">Mode Adaptive Aktif</div>
-                        <div style="font-size: 12px; opacity: 0.7;">Beralih ke Manual untuk menggunakan kontrol ini</div>
+                        <div style="font-size: 14px; font-weight: 600;">Adaptive Mode Active</div>
+                        <div style="font-size: 12px; opacity: 0.7;">Switch to Manual to use these controls</div>
                     </div>
                 </div>
 
@@ -3478,7 +3651,7 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    <i class="fas fa-info-circle"></i> Menggunakan IRMitsubishiHeavy library — tidak perlu learning manual.
+                    <i class="fas fa-info-circle"></i> Using IRMitsubishiHeavy library — no manual learning needed.
                 </div>
             </div>
         </div>
@@ -3487,7 +3660,7 @@ HTML_TEMPLATE = '''
         <div id="control-lamp" class="page">
             <div class="header">
                 <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
-                <p>Manual lamp control and brightness settings</p>
+                <p>Manual lamp control and brightness settings — 3 Lamps</p>
             </div>
 
             <div class="control-panel">
@@ -3497,13 +3670,28 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label">Brightness: <span id="brightness-display">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider" oninput="updateBrightness(this.value)">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #f59e0b;"></i> Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
-                <button class="btn btn-primary" onclick="applyLampSettings()">
-                    <i class="fas fa-check"></i> Apply Brightness
-                </button>
+                <div class="control-group">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #10b981;"></i> Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
+                </div>
+
+                <div class="control-group">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #6366f1;"></i> Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
+                </div>
+
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="applyLampSettings()">
+                        <i class="fas fa-check"></i> Apply All
+                    </button>
+                    <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
+                        <i class="fas fa-sync"></i> Sync All to Lamp 1
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -3656,19 +3844,19 @@ HTML_TEMPLATE = '''
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
                             <label>Population Size</label>
-                            <input type="number" id="ml-ga-pop" value="20" min="5" max="100" class="ml-input">
+                            <input type="number" id="ml-ga-pop" value="15" min="5" max="100" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Generations</label>
-                            <input type="number" id="ml-ga-gen" value="50" min="10" max="500" class="ml-input">
+                            <input type="number" id="ml-ga-gen" value="30" min="10" max="500" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Mutation Rate</label>
-                            <input type="number" id="ml-ga-mut" value="0.1" min="0.01" max="0.5" step="0.01" class="ml-input">
+                            <input type="number" id="ml-ga-mut" value="0.25" min="0.01" max="0.5" step="0.01" class="ml-input">
                         </div>
                         <div class="ml-param-item">
                             <label>Crossover Rate</label>
-                            <input type="number" id="ml-ga-cross" value="0.7" min="0.1" max="1.0" step="0.05" class="ml-input">
+                            <input type="number" id="ml-ga-cross" value="0.8" min="0.1" max="1.0" step="0.05" class="ml-input">
                         </div>
                     </div>
                 </div>
@@ -3714,14 +3902,14 @@ HTML_TEMPLATE = '''
         <div id="occupancy-feedback" class="page">
             <div class="header">
                 <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
-                <p>Pantau tren okupansi dan kirim penilaian kenyamanan ruangan (1-5)</p>
+                <p>Monitor occupancy trends and submit room comfort ratings (1-5)</p>
             </div>
 
             <div class="occupancy-top">
                 <div class="occupancy-kpi">
-                    <div class="kpi-label">Occupancy Saat Ini</div>
+                    <div class="kpi-label">Current Occupancy</div>
                     <div class="kpi-value" id="occ-live-count">0</div>
-                    <div class="occupancy-mini-note">Orang terdeteksi saat ini</div>
+                    <div class="occupancy-mini-note">Currently detected persons</div>
                     <div class="occupancy-mini-note">Confidence: <span id="occ-live-confidence">0%</span></div>
                 </div>
 
@@ -3741,41 +3929,41 @@ HTML_TEMPLATE = '''
             <div class="feedback-grid">
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-star"></i> Feedback Kenyamanan</div>
+                        <div class="chart-title"><i class="fas fa-star"></i> Comfort Feedback</div>
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
-                        Skala: 1 = Tidak Puas, 5 = Sangat Puas
+                        Scale: 1 = Not Satisfied, 5 = Very Satisfied
                     </div>
                     <div class="rating-row" id="rating-row" style="margin-top: 14px;">
-                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Tidak puas">1</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Kurang puas">2</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Cukup">3</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Puas">4</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Sangat puas">5</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Not satisfied">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Less satisfied">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Fair">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Satisfied">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Very satisfied">5</button>
                     </div>
                     <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-secondary);">
-                        <span>Tidak Puas</span>
-                        <span>Sangat Puas</span>
+                        <span>Not Satisfied</span>
+                        <span>Very Satisfied</span>
                     </div>
-                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Masukkan feedback pengguna ruangan..."></textarea>
-                    <input id="google-form-url" class="feedback-input" placeholder="Masukkan URL Google Form Anda" />
+                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Enter room user feedback..."></textarea>
+                    <input id="google-form-url" class="feedback-input" placeholder="Enter your Google Form URL" />
 
                     <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
                         <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
-                            <i class="fas fa-save"></i> Simpan Link Form
+                            <i class="fas fa-save"></i> Save Form Link
                         </button>
                         <button class="btn btn-success" onclick="openGoogleForm()">
-                            <i class="fas fa-external-link-alt"></i> Buka Google Form
+                            <i class="fas fa-external-link-alt"></i> Open Google Form
                         </button>
                         <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
-                            <i class="fas fa-paper-plane"></i> Kirim Feedback
+                            <i class="fas fa-paper-plane"></i> Submit Feedback
                         </button>
                     </div>
                 </div>
 
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-history"></i> Feedback Terbaru</div>
+                        <div class="chart-title"><i class="fas fa-history"></i> Recent Feedback</div>
                     </div>
                     <div id="feedback-history"></div>
                 </div>
@@ -3829,7 +4017,9 @@ HTML_TEMPLATE = '''
             const settings = {
                 acTemp: document.getElementById('ac-temp-slider')?.value || 24,
                 fanSpeed: document.getElementById('fan-speed-slider')?.value || 1,
-                lampBrightness: document.getElementById('brightness-slider')?.value || 0
+                lampBrightness1: document.getElementById('brightness-slider-1')?.value || 0,
+                lampBrightness2: document.getElementById('brightness-slider-2')?.value || 0,
+                lampBrightness3: document.getElementById('brightness-slider-3')?.value || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -3842,7 +4032,6 @@ HTML_TEMPLATE = '''
                     
                     const acTempSlider = document.getElementById('ac-temp-slider');
                     const fanSpeedSlider = document.getElementById('fan-speed-slider');
-                    const brightnessSlider = document.getElementById('brightness-slider');
                     
                     if (acTempSlider) {
                         acTempSlider.value = settings.acTemp || 24;
@@ -3854,9 +4043,12 @@ HTML_TEMPLATE = '''
                         document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
                     }
                     
-                    if (brightnessSlider) {
-                        brightnessSlider.value = settings.lampBrightness || 0;
-                        document.getElementById('brightness-display').textContent = brightnessSlider.value;
+                    for (let i = 1; i <= 3; i++) {
+                        const slider = document.getElementById('brightness-slider-' + i);
+                        if (slider) {
+                            slider.value = settings['lampBrightness' + i] || 0;
+                            document.getElementById('brightness-display-' + i).textContent = slider.value;
+                        }
                     }
                 } catch (e) {
                     console.error('Error loading settings:', e);
@@ -4168,10 +4360,11 @@ HTML_TEMPLATE = '''
         function getMLParams(algo) {
             if (algo === 'ga') {
                 return {
-                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 20,
-                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 50,
-                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.1,
-                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.7
+                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 15,
+                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 30,
+                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.25,
+                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.8,
+                    elitism_ratio: 0.2
                 };
             } else {
                 return {
@@ -4271,7 +4464,7 @@ HTML_TEMPLATE = '''
                         img.style.display = 'none';
                         error.style.display = 'flex';
                         error.querySelector('h3').textContent = 'Camera OFF';
-                        error.querySelector('p').textContent = 'Kamera dimatikan. Klik tombol Camera ON untuk mengaktifkan.';
+                        error.querySelector('p').textContent = 'Camera is off. Click Camera ON button to activate.';
                         showToast('Camera OFF', 'info');
                     }
                     checkCameraStatus();
@@ -4359,7 +4552,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 fetch('/api/ac/control', {
@@ -4394,7 +4587,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 const temp = document.getElementById('ac-temp-slider').value;
@@ -4417,21 +4610,32 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== LAMP CONTROLS ====================
-        function updateBrightness(value) {
-            document.getElementById('brightness-display').textContent = value;
+        function updateBrightness(lampNum, value) {
+            document.getElementById('brightness-display-' + lampNum).textContent = value;
+            saveSettings();
+        }
+
+        function syncAllSliders() {
+            const val = document.getElementById('brightness-slider-1').value;
+            document.getElementById('brightness-slider-2').value = val;
+            document.getElementById('brightness-slider-3').value = val;
+            document.getElementById('brightness-display-2').textContent = val;
+            document.getElementById('brightness-display-3').textContent = val;
             saveSettings();
         }
 
         function applyLampSettings() {
-            const brightness = document.getElementById('brightness-slider').value;
+            const b1 = parseInt(document.getElementById('brightness-slider-1').value);
+            const b2 = parseInt(document.getElementById('brightness-slider-2').value);
+            const b3 = parseInt(document.getElementById('brightness-slider-3').value);
             
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness: parseInt(brightness) })
+                body: JSON.stringify({ brightness1: b1, brightness2: b2, brightness3: b3 })
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp brightness set!'))
+            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '% L3=' + b3 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -4466,7 +4670,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(16, 185, 129, 0.1)';
                     indicator.style.color = '#10b981';
                     indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)';
+                    indicator.innerHTML = '<i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)';
                 }
                 // Button styles
                 if (btnAdaptive) {
@@ -4490,7 +4694,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(245, 158, 11, 0.1)';
                     indicator.style.color = '#f59e0b';
                     indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Mode saat ini: <strong>MANUAL</strong> — Atur AC secara manual menggunakan tombol di bawah';
+                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
@@ -4674,7 +4878,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 // Visual feedback
@@ -5032,9 +5236,9 @@ HTML_TEMPLATE = '''
             updateSoundToggleUI();
             if (detectionSoundEnabled) {
                 playDetectionSound();
-                showToast('🔊 Sound alerts ON — anda akan mendengar suara saat orang terdeteksi', 'success');
+                showToast('🔊 Sound alerts ON — you will hear a sound when a person is detected', 'success');
             } else {
-                showToast('🔇 Sound alerts OFF — notifikasi suara dimatikan', 'info');
+                showToast('🔇 Sound alerts OFF — sound notifications disabled', 'info');
             }
         }
 
@@ -5060,11 +5264,11 @@ HTML_TEMPLATE = '''
         function saveGoogleFormUrl() {
             const url = (document.getElementById('google-form-url').value || '').trim();
             if (!url) {
-                showToast('Masukkan URL Google Form terlebih dahulu', 'error');
+                showToast('Please enter Google Form URL first', 'error');
                 return;
             }
             localStorage.setItem('googleFormUrl', url);
-            showToast('URL Google Form tersimpan', 'success');
+            showToast('Google Form URL saved', 'success');
         }
 
         function openGoogleForm() {
@@ -5077,7 +5281,7 @@ HTML_TEMPLATE = '''
             const formUrl = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
 
             if (!selectedFeedbackRating) {
-                showToast('Pilih rating 1-5 terlebih dahulu', 'error');
+                showToast('Please select a rating 1-5 first', 'error');
                 return;
             }
 
@@ -5094,7 +5298,7 @@ HTML_TEMPLATE = '''
             .then(r => r.json())
             .then(result => {
                 if (result.status === 'success') {
-                    showToast('Feedback berhasil dikirim', 'success');
+                    showToast('Feedback submitted successfully', 'success');
                     document.getElementById('feedback-comment').value = '';
                     selectFeedbackRating(0);
                     loadFeedbackHistory();
@@ -5102,7 +5306,7 @@ HTML_TEMPLATE = '''
                         window.open(formUrl, '_blank');
                     }
                 } else {
-                    showToast(result.message || 'Gagal kirim feedback', 'error');
+                    showToast(result.message || 'Failed to submit feedback', 'error');
                 }
             })
             .catch(e => showToast('Error: ' + (e.message || e), 'error'));
@@ -5117,7 +5321,7 @@ HTML_TEMPLATE = '''
 
                     const rows = data.feedback || [];
                     if (rows.length === 0) {
-                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Belum ada feedback.</div>';
+                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">No feedback yet.</div>';
                         return;
                     }
 
@@ -5284,8 +5488,14 @@ HTML_TEMPLATE = '''
                         document.getElementById('ac-live-fan').textContent = fanSpeed;
                         document.getElementById('ac-live-mode').textContent = acMode;
                     }
-                    document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
-                    document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
+                    document.getElementById('dash-lux1').textContent = (data.lamp.lux1 || 0).toFixed(0);
+                    document.getElementById('dash-lux2').textContent = (data.lamp.lux2 || 0).toFixed(0);
+                    document.getElementById('dash-lux3').textContent = (data.lamp.lux3 || 0).toFixed(0);
+                    document.getElementById('dash-lux-avg').textContent = (data.lamp.lux_avg || 0).toFixed(1);
+                    document.getElementById('dash-bright1').textContent = Math.round((data.lamp.brightness1 || 0) / 255 * 100);
+                    document.getElementById('dash-bright2').textContent = Math.round((data.lamp.brightness2 || 0) / 255 * 100);
+                    document.getElementById('dash-bright3').textContent = Math.round((data.lamp.brightness3 || 0) / 255 * 100);
+                    document.getElementById('dash-bright-avg').textContent = Math.round((data.lamp.brightness_avg || 0) / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
                     
                     const personDetected = data.camera.person_detected;
@@ -5372,7 +5582,7 @@ HTML_TEMPLATE = '''
                     if (actualACState === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
                     }
-                    let lampPower = (data.lamp.brightness / 255) * 10;
+                    let lampPower = ((data.lamp.brightness1 || 0) + (data.lamp.brightness2 || 0) + (data.lamp.brightness3 || 0)) / 255 * 10;
                     let totalPower = acPower + lampPower;
                     let acEnergyKwh = (acPower / 1000) * 24;
                     let lampEnergyKwh = (lampPower / 1000) * 24;
@@ -5399,6 +5609,40 @@ HTML_TEMPLATE = '''
                         charts.energy.update();
                     }
                     
+                    // Energy Monitor (PZEM-016) data
+                    if (data.energy) {
+                        const e = data.energy;
+                        const eVolt = document.getElementById('energy-voltage');
+                        const eCurr = document.getElementById('energy-current');
+                        const ePow = document.getElementById('energy-power');
+                        const eKwh = document.getElementById('energy-kwh');
+                        const eFreq = document.getElementById('energy-freq');
+                        const ePf = document.getElementById('energy-pf');
+                        const eCost = document.getElementById('energy-cost');
+                        const eBadge = document.getElementById('energy-status-badge');
+                        if (eVolt) eVolt.textContent = parseFloat(e.voltage || 0).toFixed(1);
+                        if (eCurr) eCurr.textContent = parseFloat(e.current || 0).toFixed(2);
+                        if (ePow) ePow.textContent = parseFloat(e.power || 0).toFixed(1);
+                        if (eKwh) eKwh.textContent = parseFloat(e.energy || 0).toFixed(3);
+                        if (eFreq) eFreq.textContent = parseFloat(e.frequency || 0).toFixed(1);
+                        if (ePf) ePf.textContent = parseFloat(e.pf || 0).toFixed(2);
+                        if (eCost) {
+                            const cost = parseFloat(e.energy || 0) * 1444.70;
+                            eCost.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+                        }
+                        if (eBadge) {
+                            if (e.connected) {
+                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
+                                eBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+                                eBadge.style.color = '#10b981';
+                            } else {
+                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
+                                eBadge.style.background = 'rgba(107, 114, 128, 0.15)';
+                                eBadge.style.color = '#6b7280';
+                            }
+                        }
+                    }
+
                     updateModeBadges();
                 });
         }
@@ -5480,18 +5724,60 @@ HTML_TEMPLATE = '''
                 const now = new Date();
                 const timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
                 
+                const luxAvg = data.data.lux_avg || 0;
+                const brightAvg = data.data.brightness_avg || 0;
+                
                 if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
                     charts.lampLux.data.labels.push(timeStr);
-                    charts.lampLux.data.datasets[0].data.push(data.data.lux);
+                    charts.lampLux.data.datasets[0].data.push(luxAvg);
                     charts.lampLux.update();
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
-                    charts.lampBright.data.datasets[0].data.push(Math.round(data.data.brightness / 255 * 100));
+                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
                     charts.lampBright.update();
                 }
             }
             
+            if (data.type === 'energy') {
+                const e = data.data;
+                const voltEl = document.getElementById('energy-voltage');
+                const currEl = document.getElementById('energy-current');
+                const powEl = document.getElementById('energy-power');
+                const kwhEl = document.getElementById('energy-kwh');
+                const freqEl = document.getElementById('energy-freq');
+                const pfEl = document.getElementById('energy-pf');
+                const costEl = document.getElementById('energy-cost');
+                const badge = document.getElementById('energy-status-badge');
+                
+                if (voltEl) voltEl.textContent = parseFloat(e.voltage || 0).toFixed(1);
+                if (currEl) currEl.textContent = parseFloat(e.current || 0).toFixed(2);
+                if (powEl) powEl.textContent = parseFloat(e.power || 0).toFixed(1);
+                if (kwhEl) kwhEl.textContent = parseFloat(e.energy || 0).toFixed(3);
+                if (freqEl) freqEl.textContent = parseFloat(e.frequency || 0).toFixed(1);
+                if (pfEl) pfEl.textContent = parseFloat(e.pf || 0).toFixed(2);
+                
+                // Estimasi biaya: tarif PLN R1/1300VA = Rp 1.444,70/kWh
+                if (costEl) {
+                    const cost = parseFloat(e.energy || 0) * 1444.70;
+                    costEl.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+                }
+                
+                if (badge) {
+                    if (e.connected) {
+                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
+                        badge.style.background = 'rgba(16, 185, 129, 0.15)';
+                        badge.style.color = '#10b981';
+                        badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    } else {
+                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
+                        badge.style.background = 'rgba(107, 114, 128, 0.15)';
+                        badge.style.color = '#6b7280';
+                        badge.style.borderColor = 'rgba(107, 114, 128, 0.3)';
+                    }
+                }
+            }
+
             // Real-time optimization (GA→AC / PSO→Lamp) updates
             if (data.type === 'system') {
                 const gaFitness = parseFloat(data.data.ga_fitness) || 0;
@@ -5649,6 +5935,51 @@ HTML_TEMPLATE = '''
                 // Show alert when person detected
                 if (personDetected && personCount > 0) {
                     showDetectionAlert(personCount, confidence);
+                }
+                
+                // Update "Last Person Detected" display
+                const lastSeenEl = document.getElementById('cam-last-seen');
+                const lastSeenLabel = document.getElementById('cam-last-seen-label');
+                const lastSeenAgo = data.data.last_seen_ago;
+                if (lastSeenEl) {
+                    if (personDetected && personCount > 0) {
+                        lastSeenEl.textContent = 'Sekarang';
+                        lastSeenEl.style.color = '#10b981';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Person currently detected';
+                    } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
+                        const mins = Math.floor(lastSeenAgo / 60);
+                        const secs = lastSeenAgo % 60;
+                        lastSeenEl.textContent = mins > 0 ? `${mins}m ${secs}s lalu` : `${secs}s lalu`;
+                        lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Since last detection';
+                    } else {
+                        lastSeenEl.textContent = '--';
+                        lastSeenEl.style.color = '#94a3b8';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Never detected';
+                    }
+                }
+                
+                // Update "Auto-OFF AC" countdown
+                const autoOffEl = document.getElementById('cam-auto-off-timer');
+                const autoOffLabel = document.getElementById('cam-auto-off-label');
+                const autoOffIn = data.data.auto_off_in;
+                const autoOffTriggered = data.data.auto_off_triggered;
+                if (autoOffEl) {
+                    if (autoOffTriggered) {
+                        autoOffEl.textContent = 'MATI';
+                        autoOffEl.style.color = '#ef4444';
+                        if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
+                    } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
+                        const offMins = Math.floor(autoOffIn / 60);
+                        const offSecs = autoOffIn % 60;
+                        autoOffEl.textContent = `${offMins}m ${offSecs}s`;
+                        autoOffEl.style.color = autoOffIn < 120 ? '#ef4444' : '#f59e0b';
+                        if (autoOffLabel) autoOffLabel.textContent = 'Countdown auto-OFF AC';
+                    } else {
+                        autoOffEl.textContent = '--';
+                        autoOffEl.style.color = '#10b981';
+                        if (autoOffLabel) autoOffLabel.textContent = 'Person detected, AC safe';
+                    }
                 }
                 
                 console.log('📹 Camera Update:', {
