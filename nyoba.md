@@ -39,6 +39,9 @@ active_alerts = deque(maxlen=50)
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
 occupancy_feedback = deque(maxlen=200)
 
+# Energy Phase: 'before' = sebelum adaptive AC, 'after' = sesudah adaptive AC
+energy_phase = 'before'
+
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
 INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb_I0leIREUnMhvQQXtgETfg=="
@@ -807,7 +810,7 @@ def on_message(client, userdata, msg):
                 'energy_kwh': float(mqtt_data['energy']['energy']),
                 'frequency': float(mqtt_data['energy']['frequency']),
                 'power_factor': float(mqtt_data['energy']['pf'])
-            }, tags={'device': 'pzem016'})
+            }, tags={'device': 'pzem016', 'phase': energy_phase})
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
             # Track device status
             device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
@@ -1284,6 +1287,91 @@ def occupancy_feedback_list():
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
+
+@app.route('/api/energy/phase', methods=['GET', 'POST'])
+def energy_phase_api():
+    """Get or set energy monitoring phase (before/after adaptive AC)"""
+    global energy_phase
+    if request.method == 'POST':
+        new_phase = request.json.get('phase', '').lower()
+        if new_phase not in ('before', 'after'):
+            return jsonify({'error': 'Phase must be before or after'}), 400
+        energy_phase = new_phase
+        print(f"⚡ Energy phase changed to: {energy_phase}")
+        socketio.emit('energy_phase', {'phase': energy_phase})
+        return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
+    return jsonify({'phase': energy_phase})
+
+@app.route('/api/energy/compare')
+def energy_compare():
+    """Compare energy data between before and after adaptive AC phases"""
+    period = request.args.get('period', '7d')
+    field = request.args.get('field', 'power')
+    
+    period_map = {
+        '24h': {'range': '-24h', 'window': '15m'},
+        '7d':  {'range': '-7d',  'window': '1h'},
+        '30d': {'range': '-30d', 'window': '6h'}
+    }
+    
+    if period not in period_map:
+        return jsonify({'error': 'Invalid period. Use: 24h, 7d, 30d'}), 400
+    
+    allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
+    if field not in allowed_fields:
+        return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
+    
+    p = period_map[period]
+    time_format = '%H:%M' if period == '24h' else '%m/%d %H:%M'
+    
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        
+        results = {}
+        for phase in ['before', 'after']:
+            query = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {p['range']})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["_field"] == "{field}")
+              |> filter(fn: (r) => r["phase"] == "{phase}")
+              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> yield(name: "mean")
+            '''
+            result = query_api.query(query=query)
+            data_points = []
+            for table in result:
+                for record in table.records:
+                    data_points.append({
+                        'time': record.get_time().strftime(time_format),
+                        'value': round(float(record.get_value()), 2)
+                    })
+            results[phase] = data_points
+        
+        # Calculate averages for summary
+        before_vals = [d['value'] for d in results['before']] if results['before'] else []
+        after_vals = [d['value'] for d in results['after']] if results['after'] else []
+        avg_before = round(sum(before_vals) / len(before_vals), 2) if before_vals else 0
+        avg_after = round(sum(after_vals) / len(after_vals), 2) if after_vals else 0
+        savings_pct = round((1 - avg_after / avg_before) * 100, 1) if avg_before > 0 else 0
+        
+        client.close()
+        return jsonify({
+            'period': period,
+            'field': field,
+            'before': results['before'],
+            'after': results['after'],
+            'summary': {
+                'avg_before': avg_before,
+                'avg_after': avg_after,
+                'savings_percent': savings_pct
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Energy compare error: {e}")
+        return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
 @app.route('/api/energy/history')
 def energy_history():
@@ -2440,6 +2528,11 @@ HTML_TEMPLATE = '''
             50% { opacity: 0.5; }
         }
 
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.2; }
+        }
+
         .ir-button-name {
             font-size: 12px;
             color: var(--text-secondary);
@@ -3582,6 +3675,71 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
+
+            <!-- ===== BEFORE vs AFTER Adaptive AC Comparison ===== -->
+            <div style="margin-top: 40px; padding: 24px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
+                        <i class="fas fa-exchange-alt"></i> Before vs After Adaptive AC
+                    </h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
+                </div>
+
+                <!-- Phase Selector -->
+                <div style="display: flex; justify-content: center; gap: 12px; margin-bottom: 20px;">
+                    <button id="btn-phase-before" onclick="setEnergyPhase('before')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px;">
+                        <i class="fas fa-clock"></i> BEFORE (Recording)
+                    </button>
+                    <button id="btn-phase-after" onclick="setEnergyPhase('after')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px; opacity: 0.6;">
+                        <i class="fas fa-robot"></i> AFTER (Recording)
+                    </button>
+                </div>
+                <div id="phase-indicator" style="text-align: center; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 600; margin-bottom: 20px; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
+                    <i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC
+                </div>
+
+                <!-- Savings Summary Cards -->
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px;">
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="compare-avg-before">--</span> W</div>
+                    </div>
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg After</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="compare-avg-after">--</span> W</div>
+                    </div>
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Energy Savings</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #6366f1;"><span id="compare-savings">--</span>%</div>
+                    </div>
+                </div>
+
+                <!-- Comparison Chart -->
+                <div class="chart-container" style="border: none; padding: 0;">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyCompareChart" height="100"></canvas>
+                </div>
+
+                <!-- Energy kWh Comparison -->
+                <div class="chart-container" style="border: none; padding: 0; margin-top: 16px;">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyCompareKwhChart" height="100"></canvas>
+                </div>
+            </div>
         </div>
 
         <!-- Control Panel Page -->
@@ -4220,6 +4378,37 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
             });
 
+            // Before vs After Comparison Charts
+            charts.energyCompare = new Chart(document.getElementById('energyCompareChart'), {
+                ...chartConfig,
+                options: {
+                    ...chartConfig.options,
+                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
+                },
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                    ]
+                }
+            });
+
+            charts.energyCompareKwh = new Chart(document.getElementById('energyCompareKwhChart'), {
+                ...chartConfig,
+                options: {
+                    ...chartConfig.options,
+                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
+                },
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                    ]
+                }
+            });
+
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
                 ...chartConfig,
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
@@ -4325,7 +4514,128 @@ HTML_TEMPLATE = '''
             loadEnergyHistory('power', '1h', null);
             loadEnergyHistory('voltage', '1h', null);
             loadEnergyHistory('energy_kwh', '24h', null);
+            loadEnergyCompare('power', '7d', null);
+            loadEnergyCompare('energy_kwh', '7d', null);
+            loadCurrentPhase();
         }
+
+        // ==================== BEFORE vs AFTER COMPARISON ====================
+        let currentEnergyPhase = 'before';
+
+        function loadCurrentPhase() {
+            fetch('/api/energy/phase')
+                .then(r => r.json())
+                .then(data => {
+                    currentEnergyPhase = data.phase;
+                    updatePhaseUI(data.phase);
+                })
+                .catch(e => console.error('Phase load error:', e));
+        }
+
+        function setEnergyPhase(phase) {
+            fetch('/api/energy/phase', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({phase: phase})
+            })
+            .then(r => r.json())
+            .then(data => {
+                currentEnergyPhase = data.phase;
+                updatePhaseUI(data.phase);
+            })
+            .catch(e => console.error('Phase set error:', e));
+        }
+
+        function updatePhaseUI(phase) {
+            const btnBefore = document.getElementById('btn-phase-before');
+            const btnAfter = document.getElementById('btn-phase-after');
+            const indicator = document.getElementById('phase-indicator');
+
+            if (phase === 'before') {
+                btnBefore.style.border = '3px solid #f59e0b';
+                btnBefore.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                btnBefore.style.color = 'white';
+                btnBefore.style.opacity = '1';
+                btnAfter.style.border = '3px solid var(--border)';
+                btnAfter.style.background = 'var(--bg-card)';
+                btnAfter.style.color = 'var(--text-secondary)';
+                btnAfter.style.opacity = '0.6';
+                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC';
+                indicator.style.background = 'rgba(245, 158, 11, 0.1)';
+                indicator.style.color = '#f59e0b';
+                indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            } else {
+                btnAfter.style.border = '3px solid #10b981';
+                btnAfter.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                btnAfter.style.color = 'white';
+                btnAfter.style.opacity = '1';
+                btnBefore.style.border = '3px solid var(--border)';
+                btnBefore.style.background = 'var(--bg-card)';
+                btnBefore.style.color = 'var(--text-secondary)';
+                btnBefore.style.opacity = '0.6';
+                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>AFTER</strong> adaptive AC';
+                indicator.style.background = 'rgba(16, 185, 129, 0.1)';
+                indicator.style.color = '#10b981';
+                indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+            }
+        }
+
+        function loadEnergyCompare(field, period, btnElement) {
+            if (btnElement) {
+                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
+                buttons.forEach(btn => btn.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
+
+            const chartName = field === 'energy_kwh' ? 'energyCompareKwh' : 'energyCompare';
+            if (!charts[chartName]) return;
+
+            fetch('/api/energy/compare?field=' + field + '&period=' + period)
+                .then(r => r.json())
+                .then(result => {
+                    const beforeData = result.before || [];
+                    const afterData = result.after || [];
+                    const summary = result.summary || {};
+
+                    // Use the longer dataset's time labels
+                    const allTimes = [...new Set([
+                        ...beforeData.map(d => d.time),
+                        ...afterData.map(d => d.time)
+                    ])].sort();
+
+                    const beforeMap = {};
+                    beforeData.forEach(d => beforeMap[d.time] = d.value);
+                    const afterMap = {};
+                    afterData.forEach(d => afterMap[d.time] = d.value);
+
+                    const chart = charts[chartName];
+                    chart.data.labels = allTimes;
+                    chart.data.datasets[0].data = allTimes.map(t => beforeMap[t] !== undefined ? beforeMap[t] : null);
+                    chart.data.datasets[1].data = allTimes.map(t => afterMap[t] !== undefined ? afterMap[t] : null);
+                    chart.options.spanGaps = true;
+                    chart.update();
+
+                    // Update summary cards (only for power comparison)
+                    if (field === 'power') {
+                        document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
+                        document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
+                        const savingsEl = document.getElementById('compare-savings');
+                        savingsEl.textContent = summary.savings_percent || '--';
+                        if (summary.savings_percent > 0) {
+                            savingsEl.style.color = '#10b981';
+                        } else if (summary.savings_percent < 0) {
+                            savingsEl.style.color = '#ef4444';
+                        }
+                    }
+                })
+                .catch(e => console.error('Energy compare error:', e));
+        }
+
+        // Listen for phase changes from server
+        socket.on('energy_phase', function(data) {
+            currentEnergyPhase = data.phase;
+            updatePhaseUI(data.phase);
+        });
 
         // ==================== THEME TOGGLE ====================
         function initTheme() {
