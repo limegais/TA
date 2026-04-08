@@ -796,11 +796,10 @@ def on_message(client, userdata, msg):
                 'energy': payload.get('energy', 0),
                 'frequency': payload.get('frequency', 0),
                 'pf': payload.get('pf', 0),
-                'connected': payload.get('connected', False),
-                'ac_state': payload.get('ac_state', 'OFF')
+                'connected': True
             })
             print(f"   ⚡ Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
-            # Save to InfluxDB
+            # Save to InfluxDB for historical data (30 day retention)
             write_to_influxdb('energy_monitor', {
                 'voltage': float(mqtt_data['energy']['voltage']),
                 'current': float(mqtt_data['energy']['current']),
@@ -808,8 +807,10 @@ def on_message(client, userdata, msg):
                 'energy_kwh': float(mqtt_data['energy']['energy']),
                 'frequency': float(mqtt_data['energy']['frequency']),
                 'power_factor': float(mqtt_data['energy']['pf'])
-            }, tags={'device': 'pzem016', 'ac_state': mqtt_data['energy']['ac_state']})
+            }, tags={'device': 'pzem016'})
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
+            # Track device status
+            device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
 
         elif 'camera/detection' in topic:
             mqtt_data['camera'].update({
@@ -1283,6 +1284,63 @@ def occupancy_feedback_list():
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
+
+@app.route('/api/energy/history')
+def energy_history():
+    """Get PZEM energy history from InfluxDB — supports 1h to 30 days"""
+    period = request.args.get('period', '24h')  # 1h, 6h, 24h, 7d, 30d
+    field = request.args.get('field', 'power')  # voltage, current, power, energy_kwh, frequency, power_factor
+    
+    # Map period to InfluxDB range and aggregation window
+    period_map = {
+        '1h':  {'range': '-1h',  'window': '1m'},
+        '6h':  {'range': '-6h',  'window': '5m'},
+        '24h': {'range': '-24h', 'window': '15m'},
+        '7d':  {'range': '-7d',  'window': '1h'},
+        '30d': {'range': '-30d', 'window': '6h'}
+    }
+    
+    if period not in period_map:
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
+    
+    allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
+    if field not in allowed_fields:
+        return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
+    
+    p = period_map[period]
+    
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        
+        # Use different time format based on period
+        time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
+        
+        query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {p['range']})
+          |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+          |> filter(fn: (r) => r["_field"] == "{field}")
+          |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+          |> yield(name: "mean")
+        '''
+        
+        result = query_api.query(query=query)
+        
+        data_points = []
+        for table in result:
+            for record in table.records:
+                data_points.append({
+                    'time': record.get_time().strftime(time_format),
+                    'value': round(float(record.get_value()), 2)
+                })
+        
+        client.close()
+        return jsonify({'period': period, 'field': field, 'data': data_points})
+        
+    except Exception as e:
+        print(f"❌ Energy history query error: {e}")
+        return jsonify({'error': str(e), 'data': []}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
@@ -3443,10 +3501,11 @@ HTML_TEMPLATE = '''
         <!-- Energy Usage Page -->
         <div id="energy" class="page">
             <div class="header">
-                <h1>Energy Usage</h1>
-                <p>AC and Lamp energy consumption in kWh</p>
+                <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
+                <p>Real-time & historical energy monitoring from PZEM-016</p>
             </div>
 
+            <!-- Real-time summary cards -->
             <div class="power-grid">
                 <div class="power-card">
                     <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Day</div>
@@ -3473,9 +3532,53 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
+            <!-- Historical Power Chart -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title">Energy Trend (kWh/day equivalent)</div>
+                    <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- Historical Voltage Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyVoltageChart" height="80"></canvas>
+            </div>
+
+            <!-- Historical Energy kWh Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyKwhChart" height="80"></canvas>
+            </div>
+
+            <!-- Estimated daily energy (real-time) -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
@@ -4101,6 +4204,22 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
             });
 
+            // Historical Energy Charts (PZEM-016 from InfluxDB)
+            charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
+            charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
+            charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
                 ...chartConfig,
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
@@ -4165,6 +4284,47 @@ HTML_TEMPLATE = '''
             event.target.classList.add('active');
             
             updateChartData(chartName, hours);
+        }
+
+        // ==================== ENERGY HISTORY (PZEM-016 from InfluxDB) ====================
+        const energyChartMap = {
+            'power': 'energyPower',
+            'voltage': 'energyVoltage',
+            'energy_kwh': 'energyKwh'
+        };
+
+        function loadEnergyHistory(field, period, btnElement) {
+            // Update button active state
+            if (btnElement) {
+                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
+                buttons.forEach(btn => btn.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
+
+            const chartName = energyChartMap[field];
+            if (!chartName || !charts[chartName]) return;
+
+            fetch('/api/energy/history?field=' + field + '&period=' + period)
+                .then(r => r.json())
+                .then(result => {
+                    const data = result.data || [];
+                    const chart = charts[chartName];
+
+                    chart.data.labels = data.map(d => d.time);
+                    chart.data.datasets[0].data = data.map(d => d.value);
+                    chart.update();
+
+                    if (data.length === 0) {
+                        console.log('No energy data for ' + field + ' / ' + period);
+                    }
+                })
+                .catch(e => console.error('Energy history error:', e));
+        }
+
+        function loadAllEnergyCharts() {
+            loadEnergyHistory('power', '1h', null);
+            loadEnergyHistory('voltage', '1h', null);
+            loadEnergyHistory('energy_kwh', '24h', null);
         }
 
         // ==================== THEME TOGGLE ====================
@@ -4236,6 +4396,9 @@ HTML_TEMPLATE = '''
             if (pageId === 'occupancy-feedback') {
                 updateChartData('occupancy', chartRanges.occupancy || 1);
                 loadFeedbackHistory();
+            }
+            if (pageId === 'energy') {
+                loadAllEnergyCharts();
             }
         }
 
@@ -5584,17 +5747,27 @@ HTML_TEMPLATE = '''
                     }
                     let lampPower = ((data.lamp.brightness1 || 0) + (data.lamp.brightness2 || 0) + (data.lamp.brightness3 || 0)) / 255 * 10;
                     let totalPower = acPower + lampPower;
+
+                    // Use real PZEM data if available, otherwise estimate
+                    let realPower = null;
+                    let realEnergyKwh = null;
+                    if (data.energy && data.energy.connected) {
+                        realPower = parseFloat(data.energy.power || 0);
+                        realEnergyKwh = parseFloat(data.energy.energy || 0);
+                    }
+
                     let acEnergyKwh = (acPower / 1000) * 24;
                     let lampEnergyKwh = (lampPower / 1000) * 24;
-                    let totalEnergyKwh = acEnergyKwh + lampEnergyKwh;
-                    let dailyCost = (totalPower / 1000) * 24 * 1500;
+                    let totalEnergyKwh = realEnergyKwh !== null ? realEnergyKwh : (acEnergyKwh + lampEnergyKwh);
+                    let displayPower = realPower !== null ? realPower : totalPower;
+                    let dailyCost = totalEnergyKwh * 1500;
                     
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
-                    document.getElementById('total-power').textContent = totalPower.toFixed(1);
+                    document.getElementById('total-power').textContent = displayPower.toFixed(1);
                     document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
                     document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
-                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(2);
+                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
                     document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
 
                     if (charts.energy) {
@@ -5627,7 +5800,7 @@ HTML_TEMPLATE = '''
                         if (eFreq) eFreq.textContent = parseFloat(e.frequency || 0).toFixed(1);
                         if (ePf) ePf.textContent = parseFloat(e.pf || 0).toFixed(2);
                         if (eCost) {
-                            const cost = parseFloat(e.energy || 0) * 1444.70;
+                            const cost = parseFloat(e.energy || 0) * 1500;
                             eCost.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
                         }
                         if (eBadge) {
@@ -6109,6 +6282,7 @@ HTML_TEMPLATE = '''
             updateDeviceStatus();
             updateLogs();
             checkCameraStatus();
+            loadAllEnergyCharts();
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
