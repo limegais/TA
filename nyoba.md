@@ -1309,20 +1309,21 @@ def energy_compare():
     field = request.args.get('field', 'power')
     
     period_map = {
+        '30m': {'range': '-30m', 'window': '30s'},
         '24h': {'range': '-24h', 'window': '15m'},
         '7d':  {'range': '-7d',  'window': '1h'},
         '30d': {'range': '-30d', 'window': '6h'}
     }
     
     if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 24h, 7d, 30d'}), 400
+        return jsonify({'error': 'Invalid period. Use: 30m, 24h, 7d, 30d'}), 400
     
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
     
     p = period_map[period]
-    time_format = '%H:%M' if period == '24h' else '%m/%d %H:%M'
+    time_format = '%H:%M:%S' if period == '30m' else ('%H:%M' if period == '24h' else '%m/%d %H:%M')
     
     try:
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
@@ -3717,10 +3718,11 @@ HTML_TEMPLATE = '''
                 <!-- Comparison Chart -->
                 <div class="chart-container" style="border: none; padding: 0;">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison</div>
+                        <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '30d', this)">30d</button>
                         </div>
                     </div>
@@ -3732,8 +3734,9 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '30d', this)">30d</button>
                         </div>
                     </div>
@@ -4514,8 +4517,8 @@ HTML_TEMPLATE = '''
             loadEnergyHistory('power', '1h', null);
             loadEnergyHistory('voltage', '1h', null);
             loadEnergyHistory('energy_kwh', '24h', null);
-            loadEnergyCompare('power', '7d', null);
-            loadEnergyCompare('energy_kwh', '7d', null);
+            loadEnergyCompare('power', '30m', null);
+            loadEnergyCompare('energy_kwh', '30m', null);
             loadCurrentPhase();
         }
 
