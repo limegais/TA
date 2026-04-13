@@ -1278,6 +1278,57 @@ def mqtt_reconnect():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/simulate', methods=['POST'])
+def simulate_data():
+    """Inject dummy sensor data directly into mqtt_data (bypasses MQTT) for frontend testing"""
+    import random
+    mqtt_data['ac'].update({
+        'temperature': round(27.5 + random.uniform(-2, 2), 1),
+        'humidity': round(65.0 + random.uniform(-5, 5), 1),
+        'heat_index': round(29.5 + random.uniform(-2, 2), 1),
+        'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2,
+        'temp1': round(27.0 + random.uniform(-1, 1), 1),
+        'temp2': round(27.3 + random.uniform(-1, 1), 1),
+        'temp3': round(27.8 + random.uniform(-1, 1), 1),
+        'hum1': round(64.0 + random.uniform(-3, 3), 1),
+        'hum2': round(65.0 + random.uniform(-3, 3), 1),
+        'hum3': round(66.0 + random.uniform(-3, 3), 1),
+        'rssi': -55, 'uptime': 3600
+    })
+    mqtt_data['lamp'].update({
+        'lux1': round(350 + random.uniform(-50, 50)),
+        'lux2': round(380 + random.uniform(-50, 50)),
+        'lux3': round(340 + random.uniform(-50, 50)),
+        'lux_avg': round(357 + random.uniform(-30, 30)),
+        'brightness1': 80, 'brightness2': 75, 'brightness3': 70, 'brightness_avg': 75,
+        'motion': True, 'rssi': -60, 'uptime': 3600
+    })
+    mqtt_data['energy'].update({
+        'voltage': round(220.0 + random.uniform(-5, 5), 1),
+        'current': round(1.5 + random.uniform(-0.2, 0.2), 2),
+        'power': round(330.0 + random.uniform(-10, 10), 1),
+        'energy': round(1.25 + random.uniform(0, 0.1), 3),
+        'frequency': 50.0, 'pf': 0.95, 'connected': True, 'ac_state': 'ON'
+    })
+    socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+    socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+    print(f"[SIMULATE] Dummy data injected into mqtt_data successfully")
+    return jsonify({'status': 'ok', 'message': 'Dummy data injected', 'ac_temp': mqtt_data['ac']['temperature'], 'lamp_lux': mqtt_data['lamp']['lux1']})
+
+@app.route('/api/mqtt/selftest', methods=['POST'])
+def mqtt_selftest():
+    """Publish a test message to MQTT broker to verify broker connection works"""
+    if not mqtt_client.is_connected():
+        return jsonify({'status': 'error', 'message': f'MQTT client not connected to {MQTT_BROKER}:{MQTT_PORT}. Is Mosquitto running?'}), 503
+    try:
+        test_payload = json.dumps({'temperature': 28.5, 'humidity': 65.0, 'heat_index': 30.0, 'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2, 'rssi': -55, 'uptime': 100, 'temp1': 28.0, 'temp2': 28.5, 'temp3': 29.0, 'hum1': 64.0, 'hum2': 65.0, 'hum3': 66.0})
+        result = mqtt_client.publish('smartroom/ac/sensors', test_payload, qos=1)
+        result.wait_for_publish(timeout=3)
+        print(f"[SELFTEST] Published test AC message to smartroom/ac/sensors")
+        return jsonify({'status': 'ok', 'message': 'Test message published to smartroom/ac/sensors. Check if data appears in dashboard.'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/occupancy/feedback', methods=['POST'])
 def occupancy_feedback_submit():
     try:
@@ -3087,7 +3138,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-ac" class="page active">
             <div class="header">
                 <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status</p>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;"><i class="fas fa-stethoscope"></i> Diagnostik</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -3104,6 +3155,30 @@ HTML_TEMPLATE = '''
                         <span>Camera</span>
                         <span class="device-time" id="ds-cam-time">Never</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- DIAGNOSTIC PANEL -->
+            <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #f59e0b; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <i class="fas fa-stethoscope" style="color: #f59e0b; font-size: 18px;"></i>
+                    <strong style="color: #f59e0b;">Diagnostic Mode</strong>
+                    <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
+                </div>
+                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
+                        <i class="fas fa-vial"></i> Test Frontend (Inject Data Dummy)
+                    </button>
+                    <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-satellite-dish"></i> Test MQTT Broker (Self-Test)
+                    </button>
+                    <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #8b5cf6; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-sync"></i> Reconnect MQTT
+                    </button>
+                    <button onclick="checkMqttStatus(true)" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #6b7280; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-info-circle"></i> MQTT Status Detail
+                    </button>
                 </div>
             </div>
 
@@ -6416,7 +6491,16 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== DEVICE STATUS ====================
-        function checkMqttStatus() {
+        function diagLog(msg) {
+            var el = document.getElementById('diag-result');
+            if (el) el.textContent += msg + '\n';
+        }
+        function diagClear(title) {
+            var el = document.getElementById('diag-result');
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
+        }
+
+        function checkMqttStatus(showDetail) {
             fetch('/api/mqtt/status')
                 .then(r => r.json())
                 .then(data => {
@@ -6431,16 +6515,21 @@ HTML_TEMPLATE = '''
                             txt.textContent = data.error ? data.error.substring(0, 30) : 'Disconnected';
                         }
                     }
-                    // Show details if clicked
-                    if (event && event.type === 'click') {
-                        var info = 'MQTT Broker: ' + data.broker + '\\n';
-                        info += 'Connected: ' + data.connected + '\\n';
-                        info += 'Messages received: ' + data.message_count + '\\n';
-                        info += 'Last connect: ' + (data.last_connect || 'Never') + '\\n';
-                        info += 'Last message: ' + (data.last_message || 'Never') + '\\n';
-                        if (data.error) info += 'Error: ' + data.error + '\\n';
-                        info += '\\nSubscriptions: ' + data.subscriptions.join(', ');
-                        alert(info);
+                    if (showDetail) {
+                        diagClear('=== MQTT STATUS ===');
+                        diagLog('Broker: ' + data.broker);
+                        diagLog('Connected: ' + (data.connected ? 'YES' : 'NO'));
+                        diagLog('Messages received: ' + data.message_count);
+                        diagLog('Last connect: ' + (data.last_connect || 'Never'));
+                        diagLog('Last message: ' + (data.last_message || 'Never'));
+                        diagLog('Error: ' + (data.error || 'None'));
+                        diagLog('Subscriptions: ' + (data.subscriptions || []).join(', '));
+                        if (!data.connected) {
+                            diagLog('');
+                            diagLog('SOLUSI: Pastikan MQTT broker (Mosquitto) berjalan!');
+                            diagLog('Windows: net start mosquitto');
+                            diagLog('Linux/Pi: sudo systemctl start mosquitto');
+                        }
                     }
                 })
                 .catch(function() {
@@ -6448,11 +6537,72 @@ HTML_TEMPLATE = '''
                     var txt = document.getElementById('mqtt-status-text');
                     if (dot) dot.className = 'device-dot offline';
                     if (txt) txt.textContent = 'API Error';
+                    if (showDetail) diagLog('ERROR: Tidak bisa fetch /api/mqtt/status');
                 });
         }
 
+        function runSimulate() {
+            diagClear('=== TEST FRONTEND (INJECT DATA DUMMY) ===');
+            diagLog('Mengirim data dummy ke server...');
+            fetch('/api/simulate', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        diagLog('BERHASIL! Data dummy sudah diinjek:');
+                        diagLog('  AC Temperature: ' + data.ac_temp + ' C');
+                        diagLog('  Lamp Lux1: ' + data.lamp_lux + ' lux');
+                        diagLog('');
+                        diagLog('Jika nilai di dashboard berubah dari 0 -> FRONTEND OK');
+                        diagLog('Jika tetap 0 -> Ada masalah di JavaScript/DOM');
+                        updateDashboard();
+                    } else {
+                        diagLog('ERROR: ' + data.message);
+                    }
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
+        function runMqttSelftest() {
+            diagClear('=== TEST MQTT BROKER (SELF-TEST) ===');
+            diagLog('Server akan publish ke smartroom/ac/sensors...');
+            fetch('/api/mqtt/selftest', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        diagLog('BERHASIL! Pesan test berhasil dipublish ke broker.');
+                        diagLog(data.message);
+                        diagLog('');
+                        diagLog('Tunggu 2 detik... lalu cek apakah data muncul di dashboard.');
+                        diagLog('Jika muncul -> MQTT Broker OK, masalah ada di ESP32');
+                        diagLog('Jika tidak muncul -> Ada masalah subscribe/routing topic');
+                        setTimeout(function() { updateDashboard(); diagLog('Dashboard refreshed.'); }, 2000);
+                    } else {
+                        diagLog('GAGAL: ' + data.message);
+                        diagLog('');
+                        diagLog('Artinya: MQTT Broker tidak berjalan atau tidak bisa terkoneksi!');
+                        diagLog('Jalankan Mosquitto terlebih dahulu.');
+                    }
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
+        function runMqttReconnect() {
+            diagClear('=== RECONNECT MQTT ===');
+            diagLog('Mencoba reconnect ke MQTT broker...');
+            fetch('/api/mqtt/reconnect', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    diagLog('Response: ' + data.message);
+                    setTimeout(function() {
+                        checkMqttStatus(true);
+                        diagLog('Status setelah reconnect dicek.');
+                    }, 2000);
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
         function updateDeviceStatus() {
-            checkMqttStatus();
+            checkMqttStatus(false);
             fetch('/api/device/status')
                 .then(r => r.json())
                 .then(data => {
@@ -6904,6 +7054,19 @@ HTML_TEMPLATE = '''
             try { updateCameraToggleUI(); } catch(e) { console.error('[ERROR] updateCameraToggleUI:', e); }
             try { updateDashboard(); } catch(e) { console.error('[ERROR] updateDashboard:', e); }
             try { updateDeviceStatus(); } catch(e) { console.error('[ERROR] updateDeviceStatus:', e); }
+            // Auto-show diagnostic panel if MQTT is not connected
+            setTimeout(function() {
+                fetch('/api/mqtt/status').then(r => r.json()).then(function(d) {
+                    if (!d.connected) {
+                        var p = document.getElementById('diag-panel');
+                        if (p) {
+                            p.style.display = 'block';
+                            var res = document.getElementById('diag-result');
+                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Tidak diketahui') + '\n\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                        }
+                    }
+                }).catch(function() {});
+            }, 2000);
             try { updateLogs(); } catch(e) { console.error('[ERROR] updateLogs:', e); }
             try { checkCameraStatus(); } catch(e) { console.error('[ERROR] checkCameraStatus:', e); }
             try { loadAllEnergyCharts(); } catch(e) { console.error('[ERROR] loadAllEnergyCharts:', e); }
