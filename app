@@ -4759,8 +4759,15 @@ HTML_TEMPLATE = '''
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             
-            document.getElementById(pageId).classList.add('active');
-            event.target.closest('.nav-item').classList.add('active');
+            const pageEl = document.getElementById(pageId);
+            if (pageEl) pageEl.classList.add('active');
+            
+            // Mark the correct nav-item as active
+            document.querySelectorAll('.nav-item').forEach(item => {
+                if (item.getAttribute('onclick') && item.getAttribute('onclick').includes("'" + pageId + "'")) {
+                    item.classList.add('active');
+                }
+            });
             
             localStorage.setItem('currentPage', pageId);
 
