@@ -39,6 +39,9 @@ active_alerts = deque(maxlen=50)
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
 occupancy_feedback = deque(maxlen=200)
 
+# Energy Phase: 'before' = sebelum adaptive AC, 'after' = sesudah adaptive AC
+energy_phase = 'before'
+
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
 INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb_I0leIREUnMhvQQXtgETfg=="
@@ -62,9 +65,9 @@ yolo_lock = threading.Lock()
 # Smart Person-Based Auto ON/OFF
 _person_consecutive_frames = 0
 _no_person_start_time = None
-PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
+PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person → auto OFF
+NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person -> auto OFF
 AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
@@ -82,8 +85,9 @@ _last_adaptive_lamp_apply = 0
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
-    'lamp': {'lux': 0, 'motion': False, 'brightness': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness3': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
+    'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
@@ -98,7 +102,7 @@ ir_learning_device = ""  # Track device name
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
     try:
-        print(f"🔄 Attempting to write to InfluxDB: {measurement}")
+        print(f"[DB] Attempting to write to InfluxDB: {measurement}")
         print(f"   URL: {INFLUX_URL}, ORG: {INFLUX_ORG}, BUCKET: {INFLUX_BUCKET}")
         
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
@@ -126,10 +130,10 @@ def write_to_influxdb(measurement, fields, tags=None):
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
         write_api.close()
         client.close()
-        print(f"✅ Successfully written to InfluxDB: {measurement}")
+        print(f"[OK] Successfully written to InfluxDB: {measurement}")
         return True
     except Exception as e:
-        print(f"❌ InfluxDB Write Error ({measurement}): {str(e)}")
+        print(f"[ERROR] InfluxDB Write Error ({measurement}): {str(e)}")
         import traceback
         traceback.print_exc()
         return False
@@ -147,28 +151,30 @@ def save_sensor_data(temperature, humidity, heat_index):
             tags={"device": "esp32_ac", "location": "room"}
         )
         if result:
-            print(f"✅ Sensor data saved: {temperature}°C, {humidity}%")
+            print(f"[OK] Sensor data saved: {temperature}°C, {humidity}%")
     except Exception as e:
-        print(f"❌ Error saving sensor data: {e}")
+        print(f"[ERROR] Error saving sensor data: {e}")
         import traceback
         traceback.print_exc()
 
-def save_lamp_data(lux, brightness, motion):
-    """Save lamp sensor data to InfluxDB"""
+def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
+    """Save lamp sensor data to InfluxDB (3 lamps)"""
     try:
+        lux_avg = (lux1 + lux2 + lux3) / 3.0
+        bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
         result = write_to_influxdb(
             measurement="lamp_sensor",
             fields={
-                "lux": float(lux),
-                "brightness": float(brightness),
+                "lux1": float(lux1), "lux2": float(lux2), "lux3": float(lux3), "lux_avg": float(lux_avg),
+                "brightness1": float(brightness1), "brightness2": float(brightness2), "brightness3": float(brightness3), "brightness_avg": float(bright_avg),
                 "motion": bool(motion)
             },
             tags={"device": "esp32_lamp", "location": "room"}
         )
         if result:
-            print(f"✅ Lamp data saved: {lux} lux, {brightness}%")
+            print(f"[OK] Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
     except Exception as e:
-        print(f"❌ Error saving lamp data: {e}")
+        print(f"[ERROR] Error saving lamp data: {e}")
         import traceback
         traceback.print_exc()
 
@@ -185,9 +191,9 @@ def save_person_detection(person_count, confidence):
             tags={"device": "camera_yolo", "model": "yolov8n"}
         )
         if person_count > 0:
-            print(f"✅ Detection saved: {person_count} person(s), {confidence:.2f} confidence")
+            print(f"[OK] Detection saved: {person_count} person(s), {confidence:.2f} confidence")
     except Exception as e:
-        print(f"❌ Error saving detection data: {e}")
+        print(f"[ERROR] Error saving detection data: {e}")
 
 def save_ir_command(device, command, signal_length):
     """Save IR remote command to InfluxDB"""
@@ -201,9 +207,9 @@ def save_ir_command(device, command, signal_length):
             },
             tags={"device": str(device), "type": "ir_code"}
         )
-        print(f"✅ IR command saved: {device} - {command}")
+        print(f"[OK] IR command saved: {device} - {command}")
     except Exception as e:
-        print(f"❌ Error saving IR command: {e}")
+        print(f"[ERROR] Error saving IR command: {e}")
 
 def save_ac_control(ac_temp, fan_speed, ac_state):
     """Save AC control settings to InfluxDB"""
@@ -217,9 +223,9 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
             },
             tags={"device": "esp32_ac", "type": "control"}
         )
-        print(f"✅ AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
+        print(f"[OK] AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
     except Exception as e:
-        print(f"❌ Error saving AC control: {e}")
+        print(f"[ERROR] Error saving AC control: {e}")
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -243,13 +249,13 @@ def load_yolo_model():
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
         yolo_model.predict(dummy, verbose=False)
         
-        print("✅ YOLOv8n model loaded successfully!")
+        print("[OK] YOLOv8n model loaded successfully!")
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                            'msg': 'YOLOv8n loaded successfully', 'level': 'success'})
         return True
         
     except Exception as e:
-        print(f"❌ YOLO loading error: {str(e)}")
+        print(f"[ERROR] YOLO loading error: {str(e)}")
         import traceback
         traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
@@ -291,7 +297,7 @@ def detect_persons(frame):
             return frame, person_count, max_confidence, boxes_list
             
     except Exception as e:
-        print(f"❌ YOLO detection error: {str(e)}")
+        print(f"[ERROR] YOLO detection error: {str(e)}")
         import traceback
         traceback.print_exc()
         return frame, 0, 0.0, []
@@ -314,8 +320,8 @@ def handle_person_based_control(person_count):
         return
     
     # How many consecutive frames needed to confirm person?
-    # After auto-OFF → require 15 frames (~10s) to prevent false positives from turning AC on
-    # Normal mode → require 3 frames (~2s)
+    # After auto-OFF -> require 15 frames (~10s) to prevent false positives from turning AC on
+    # Normal mode -> require 3 frames (~2s)
     in_cooldown = _auto_off_time > 0 and (time.time() - _auto_off_time) < AUTO_OFF_COOLDOWN
     required_frames = PERSON_RECONFIRM_FRAMES if _auto_off_triggered else PERSON_CONFIRM_FRAMES
     
@@ -329,16 +335,16 @@ def handle_person_based_control(person_count):
             _no_person_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
             _auto_off_time = 0.0  # Clear cooldown
-            print(f"✅ Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+            print(f"[OK] Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
             if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
-                print(f"⏳ Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
+                print(f"[WAIT] Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
         
         # Auto ON: person confirmed AND cooldown elapsed
         if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) → Auto turning ON AC")
+                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -353,7 +359,7 @@ def handle_person_based_control(person_count):
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"❌ Auto ON error: {e}")
+                    print(f"[ERROR] Auto ON error: {e}")
             _person_consecutive_frames = required_frames  # Cap to avoid overflow
     else:
         _person_consecutive_frames = 0
@@ -368,7 +374,7 @@ def handle_person_based_control(person_count):
             _auto_off_triggered = True  # Always set flag to block adaptive SET
             _auto_off_time = time.time()  # Start cooldown timer
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
+                print(f"🔴 No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
@@ -383,7 +389,7 @@ def handle_person_based_control(person_count):
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"❌ Auto OFF error: {e}")
+                    print(f"[ERROR] Auto OFF error: {e}")
 
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
@@ -398,7 +404,7 @@ def get_camera():
                 ret, test_frame = cam.read()
                 if ret and test_frame is not None:
                     camera = cam
-                    print(f"✅ Camera found at index {idx}")
+                    print(f"[OK] Camera found at index {idx}")
                     break
                 else:
                     cam.release()
@@ -432,7 +438,7 @@ def get_camera():
             actual_fps = int(camera.get(cv2.CAP_PROP_FPS))
             
             mqtt_data['camera']['status'] = 'active'
-            print(f"✅ Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
+            print(f"[OK] Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
             log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                                'msg': f'Camera: {actual_w}x{actual_h} @ {actual_fps}fps', 
                                'level': 'success'})
@@ -457,7 +463,7 @@ def camera_detection_loop():
     fps_counter = 0
     fps_timer = time.time()
     
-    print("🎥 Camera detection background thread started (runs 24/7)")
+    print("[CAM] Camera detection background thread started (runs 24/7)")
     last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
     CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
@@ -480,7 +486,7 @@ def camera_detection_loop():
                             camera.release()
                             camera = None
                         mqtt_data['camera']['status'] = 'reconnecting'
-                        print("⚠️ Camera read failed, will retry...")
+                        print("[WARN] Camera read failed, will retry...")
             
             # If no frame captured, wait and retry (lock is released)
             if frame is None:
@@ -590,7 +596,7 @@ def camera_detection_loop():
                 fps_timer = time.time()
             
         except Exception as e:
-            print(f"❌ Detection loop error: {e}")
+            print(f"[ERROR] Detection loop error: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(retry_delay)
@@ -637,29 +643,29 @@ def on_connect(client, userdata, flags, rc):
     print("="*70)
     
     if rc == 0:
-        print("✅ MQTT CONNECTED SUCCESSFULLY!\n")
+        print("[OK] MQTT CONNECTED SUCCESSFULLY!\n")
         
         # Subscribe to all smartroom topics
         result1, mid1 = client.subscribe("smartroom/#")
-        print(f"📡 Subscribe smartroom/# - Result: {result1} (MID: {mid1})")
+        print(f"[SUB] Subscribe smartroom/# - Result: {result1} (MID: {mid1})")
         
         # Also subscribe to alternative IR topics
         result2, mid2 = client.subscribe("ir/#")
-        print(f"📡 Subscribe ir/# - Result: {result2} (MID: {mid2})")
+        print(f"[SUB] Subscribe ir/# - Result: {result2} (MID: {mid2})")
         
         result3, mid3 = client.subscribe("IR/#")
-        print(f"📡 Subscribe IR/# - Result: {result3} (MID: {mid3})")
+        print(f"[SUB] Subscribe IR/# - Result: {result3} (MID: {mid3})")
         
         result4, mid4 = client.subscribe("+/ir/#")
-        print(f"📡 Subscribe +/ir/# - Result: {result4} (MID: {mid4})")
+        print(f"[SUB] Subscribe +/ir/# - Result: {result4} (MID: {mid4})")
         
-        print("\n✅ All subscriptions sent!")
+        print("\n[OK] All subscriptions sent!")
         print("Waiting for messages from ESP32...\n")
         print("="*70 + "\n")
         
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {rc}', 'level': 'success'})
     else:
-        print(f"❌ MQTT CONNECTION FAILED! RC={rc}")
+        print(f"[ERROR] MQTT CONNECTION FAILED! RC={rc}")
         print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
@@ -718,7 +724,7 @@ def on_message(client, userdata, msg):
         print(f"   'IR/learned' in topic.lower(): {'IR/learned' in topic.lower()}")
         
         if 'ac/sensors' in topic:
-            print("🌡️  Processing AC Sensor Data:")
+            print("[SENSOR] Processing AC Sensor Data:")
             print(f"   Temperature: {payload.get('temperature', 0)}°C")
             print(f"   Humidity: {payload.get('humidity', 0)}%")
             print(f"   Heat Index: {payload.get('heat_index', 0)}°C")
@@ -754,33 +760,61 @@ def on_message(client, userdata, msg):
                 mqtt_data['ac']['fan_speed'],
                 mqtt_data['ac']['ac_state']
             )
-            print("   ✅ AC data updated in memory & InfluxDB")
+            print("   [OK] AC data updated in memory & InfluxDB")
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
-            print("   📡 Sent to frontend via WebSocket")
+            print("   [WS] Sent to frontend via WebSocket")
             # Track device status & check alerts
             device_last_seen['esp32_ac']['last_seen'] = datetime.now()
             device_last_seen['esp32_ac']['status'] = 'online'
             check_alert_rules()
             
         elif 'lamp/sensors' in topic:
+            l1 = payload.get('lux1', payload.get('lux', 0))
+            l2 = payload.get('lux2', l1)
+            l3 = payload.get('lux3', l1)
+            b1 = payload.get('brightness1', payload.get('brightness', 0))
+            b2 = payload.get('brightness2', b1)
+            b3 = payload.get('brightness3', b1)
             mqtt_data['lamp'].update({
-                'lux': payload.get('lux', 0),
+                'lux1': l1, 'lux2': l2, 'lux3': l3,
+                'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
                 'motion': payload.get('motion', False),
-                'brightness': payload.get('brightness', 0),
+                'brightness1': b1, 'brightness2': b2, 'brightness3': b3,
+                'brightness_avg': round((b1 + b2 + b3) / 3.0, 1),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(
-                mqtt_data['lamp']['lux'],
-                mqtt_data['lamp']['brightness'],
-                mqtt_data['lamp']['motion']
-            )
+            save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
             device_last_seen['esp32_lamp']['status'] = 'online'
             
+        elif 'energy/data' in topic:
+            mqtt_data['energy'].update({
+                'voltage': payload.get('voltage', 0),
+                'current': payload.get('current', 0),
+                'power': payload.get('power', 0),
+                'energy': payload.get('energy', 0),
+                'frequency': payload.get('frequency', 0),
+                'pf': payload.get('pf', 0),
+                'connected': True
+            })
+            print(f"   ⚡ Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
+            # Save to InfluxDB for historical data (30 day retention)
+            write_to_influxdb('energy_monitor', {
+                'voltage': float(mqtt_data['energy']['voltage']),
+                'current': float(mqtt_data['energy']['current']),
+                'power': float(mqtt_data['energy']['power']),
+                'energy_kwh': float(mqtt_data['energy']['energy']),
+                'frequency': float(mqtt_data['energy']['frequency']),
+                'power_factor': float(mqtt_data['energy']['pf'])
+            }, tags={'device': 'pzem016', 'phase': energy_phase})
+            socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
+            # Track device status
+            device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
+
         elif 'camera/detection' in topic:
             mqtt_data['camera'].update({
                 'person_detected': payload.get('person_detected', False),
@@ -793,7 +827,7 @@ def on_message(client, userdata, msg):
             device_last_seen['camera']['status'] = 'online'
             
         elif 'dashboard/state' in topic or 'optimization/stats' in topic or 'ml/result' in topic:
-            # Update from optimization algorithm (GA→AC / PSO→Lamp)
+            # Update from optimization algorithm (GA->AC / PSO->Lamp)
             ga_sol = payload.get('ga_solution', {})
             pso_sol = payload.get('pso_solution', {})
             mqtt_data['system'].update({
@@ -806,7 +840,7 @@ def on_message(client, userdata, msg):
                 'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                 'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
             })
-            print(f"📊 Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
+            print(f"[ML] Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
             # Write optimization history to InfluxDB
             write_to_influxdb('optimization_result', {
@@ -829,11 +863,11 @@ def on_message(client, userdata, msg):
                         _last_adaptive_ac_apply = now
                         ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                        print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                        print(f"[ADAPTIVE] -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     else:
-                        print(f"🤖 ADAPTIVE → AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
+                        print(f"[ADAPTIVE] -> AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                print(f"🤖 ADAPTIVE → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+                print(f"[ADAPTIVE] -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
@@ -842,14 +876,14 @@ def on_message(client, userdata, msg):
                     now = time.time()
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
-                        client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_brightness), 'source': 'adaptive'}))
-                        print(f"🤖 ADAPTIVE → Applied to Lamp: {opt_brightness}%")
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
+                        print(f"[ADAPTIVE] -> Applied to All Lamps: {opt_brightness}%")
                     else:
-                        print(f"🤖 ADAPTIVE → Lamp apply debounced")
+                        print(f"[ADAPTIVE] -> Lamp apply debounced")
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
-            print(f"🤖 ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
+            print(f"[ML] ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
             socketio.emit('ml_status', payload)
             log_messages.append({
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -873,7 +907,7 @@ def on_message(client, userdata, msg):
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
-                    print(f"📊 ML Completed → Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
+                    print(f"[ML] ML Completed -> Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
                     socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         elif 'ac/mode' in topic:
@@ -931,19 +965,19 @@ def on_message(client, userdata, msg):
             print(f"   Parsed - Button: {button_name}, Device: {device}")
             print(f"   Code length: {len(ir_code)} chars")
             if raw_value_count > 0:
-                print(f"   ✅ RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
+                print(f"   [OK] RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
                 if raw_value_count < 100:
-                    print(f"   ⚠️  WARNING: Only {raw_value_count} values! Signal mungkin tidak lengkap!")
-                    print(f"   ⚠️  Mitsubishi SRK AC butuh ~200+ values (2 frame)")
+                    print(f"   [WARN] Only {raw_value_count} values! Signal mungkin tidak lengkap!")
+                    print(f"   [WARN] Mitsubishi SRK AC butuh ~200+ values (2 frame)")
             
             # CHECK: Is Flask in learning mode?
             if not ir_learning_mode:
-                print(f"⚠️  Flask NOT in learning mode — ignoring signal")
+                print(f"[WARN] Flask NOT in learning mode — ignoring signal")
                 print(f"   (Signal has {len(ir_code)} chars, {raw_value_count} RAW values)")
                 print(f"   To capture: click Learn button on dashboard first")
                 print("="*70)
             elif button_name and ir_code and len(ir_code) > 0:
-                print(f"✅ Flask IS in learning mode — SAVING signal!")
+                print(f"[OK] Flask IS in learning mode — SAVING signal!")
                 
                 # Check if this is a power toggle (same code for ON/OFF)
                 is_power_toggle = False
@@ -959,18 +993,18 @@ def on_message(client, userdata, msg):
                         is_power_toggle = True
                         button_name = f"{device}_power_toggle"
                         mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
-                        print(f"⚠️ Power toggle detected for {device}: Same code for ON/OFF")
+                        print(f"[WARN] Power toggle detected for {device}: Same code for ON/OFF")
                 
                 # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
-                print(f"✅ IR code saved to memory: {button_name}")
+                print(f"[OK] IR code saved to memory: {button_name}")
                 
                 # Verify code integrity
                 if ir_code.startswith('RAW:'):
                     raw_cnt = ir_code[4:].count(',') + 1
-                    print(f"   ✅ Verified RAW signal: {raw_cnt} values stored for {button_name}")
+                    print(f"   [OK] Verified RAW signal: {raw_cnt} values stored for {button_name}")
                 else:
-                    print(f"   ✅ Non-RAW code stored: {len(ir_code)} chars")
+                    print(f"   [OK] Non-RAW code stored: {len(ir_code)} chars")
                 
                 # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
@@ -989,13 +1023,13 @@ def on_message(client, userdata, msg):
                     if button_name in verify:
                         saved_code = verify[button_name]
                         if saved_code == ir_code:
-                            print(f"   ✅ File verified: {button_name} saved correctly ({len(saved_code)} chars)")
+                            print(f"   [OK] File verified: {button_name} saved correctly ({len(saved_code)} chars)")
                         else:
-                            print(f"   ⚠️  File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
+                            print(f"   [WARN] File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
                     else:
-                        print(f"   ⚠️  Button {button_name} NOT found in saved file!")
+                        print(f"   [WARN] Button {button_name} NOT found in saved file!")
                 except Exception as e:
-                    print(f"❌ Error saving IR codes to file: {e}")
+                    print(f"[ERROR] Error saving IR codes to file: {e}")
                 
                 log_messages.append({
                     'time': datetime.now().strftime('%H:%M:%S'),
@@ -1004,7 +1038,7 @@ def on_message(client, userdata, msg):
                 })
                 
                 # Emit to frontend
-                print("\n📡 Emitting 'ir_learned' event to frontend via WebSocket...")
+                print("\n[WS] Emitting 'ir_learned' event to frontend via WebSocket...")
                 print(f"   Event data: button={button_name}, device={device}, is_toggle={is_power_toggle}")
                 
                 socketio.emit('ir_learned', {
@@ -1015,17 +1049,17 @@ def on_message(client, userdata, msg):
                     'status': 'success'
                 })
                 
-                print("✅ WebSocket event emitted successfully!")
+                print("[OK] WebSocket event emitted successfully!")
                 print("   Frontend should update NOW!")
                 print("="*70)
                 
-                print(f"✅ IR learning completed for: {button_name}")
+                print(f"[OK] IR learning completed for: {button_name}")
                 
                 ir_learning_mode = False
                 ir_learning_button = ""
                 ir_learning_device = ""
             else:
-                print(f"❌ IR learning failed: Missing button name or code")
+                print(f"[ERROR] IR learning failed: Missing button name or code")
                 socketio.emit('ir_learned', {
                     'status': 'error',
                     'message': 'Invalid IR data received'
@@ -1033,28 +1067,28 @@ def on_message(client, userdata, msg):
         
         else:
             # No handler matched this topic
-            print(f"⚠️  UNHANDLED TOPIC: {topic}")
+            print(f"[WARN] UNHANDLED TOPIC: {topic}")
             print(f"   No matching handler found for this topic!")
             print(f"   Available handlers: ac/sensors, lamp/sensors, camera/detection, ir/learned, etc.")
             
         print("─"*70 + "\n")
         
     except Exception as e:
-        print(f"❌ MQTT Message Handler Error: {str(e)}")
+        print(f"[ERROR] MQTT Message Handler Error: {str(e)}")
         import traceback
         traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
 def on_disconnect(client, userdata, rc):
     print("\n" + "="*70)
-    print("  ⚠️  FLASK MQTT DISCONNECTION EVENT")
+    print("  [WARN] FLASK MQTT DISCONNECTION EVENT")
     print("="*70)
     print(f"Disconnect Reason Code: {rc}")
     if rc != 0:
-        print("❌ Unexpected disconnection!")
+        print("[ERROR] Unexpected disconnection!")
         print("Will attempt to reconnect...")
     else:
-        print("✅ Clean disconnection")
+        print("[OK] Clean disconnection")
     print("="*70 + "\n")
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {rc}', 'level': 'warning'})
 
@@ -1063,7 +1097,7 @@ mqtt_client.on_message = on_message
 mqtt_client.on_disconnect = on_disconnect
 
 print("\n" + "="*70)
-print("  🚀 INITIALIZING FLASK MQTT CLIENT")
+print("  [INIT] INITIALIZING FLASK MQTT CLIENT")
 print("="*70)
 print(f"Broker: {MQTT_BROKER}:{MQTT_PORT}")
 print(f"Attempting connection...")
@@ -1078,14 +1112,14 @@ try:
     time.sleep(2)
     
     if mqtt_client.is_connected():
-        print("✅ MQTT Client connected and running!")
-        print("📡 Loop thread started\n")
+        print("[OK] MQTT Client connected and running!")
+        print("[OK] Loop thread started\n")
     else:
-        print("⚠️  MQTT Client started but not yet connected")
+        print("[WARN] MQTT Client started but not yet connected")
         print("Waiting for on_connect callback...\n")
         
 except Exception as e:
-    print(f"❌ MQTT Connection Error: {e}")
+    print(f"[ERROR] MQTT Connection Error: {e}")
     import traceback
     traceback.print_exc()
 
@@ -1225,7 +1259,7 @@ def occupancy_feedback_submit():
         google_form_url = (data.get('google_form_url') or GOOGLE_FORM_URL).strip()
 
         if rating < 1 or rating > 5:
-            return jsonify({'status': 'error', 'message': 'Rating harus 1-5'}), 400
+            return jsonify({'status': 'error', 'message': 'Rating must be 1-5'}), 400
 
         row = {
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1241,7 +1275,7 @@ def occupancy_feedback_submit():
             'level': 'info'
         })
 
-        return jsonify({'status': 'success', 'message': 'Feedback tersimpan', 'google_form_url': google_form_url})
+        return jsonify({'status': 'success', 'message': 'Feedback saved', 'google_form_url': google_form_url})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1253,6 +1287,149 @@ def occupancy_feedback_list():
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
+
+@app.route('/api/energy/phase', methods=['GET', 'POST'])
+def energy_phase_api():
+    """Get or set energy monitoring phase (before/after adaptive AC)"""
+    global energy_phase
+    if request.method == 'POST':
+        new_phase = request.json.get('phase', '').lower()
+        if new_phase not in ('before', 'after'):
+            return jsonify({'error': 'Phase must be before or after'}), 400
+        energy_phase = new_phase
+        print(f"⚡ Energy phase changed to: {energy_phase}")
+        socketio.emit('energy_phase', {'phase': energy_phase})
+        return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
+    return jsonify({'phase': energy_phase})
+
+@app.route('/api/energy/compare')
+def energy_compare():
+    """Compare energy data between before and after adaptive AC phases"""
+    period = request.args.get('period', '7d')
+    field = request.args.get('field', 'power')
+    
+    period_map = {
+        '30m': {'range': '-30m', 'window': '30s'},
+        '24h': {'range': '-24h', 'window': '15m'},
+        '7d':  {'range': '-7d',  'window': '1h'},
+        '30d': {'range': '-30d', 'window': '6h'}
+    }
+    
+    if period not in period_map:
+        return jsonify({'error': 'Invalid period. Use: 30m, 24h, 7d, 30d'}), 400
+    
+    allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
+    if field not in allowed_fields:
+        return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
+    
+    p = period_map[period]
+    time_format = '%H:%M:%S' if period == '30m' else ('%H:%M' if period == '24h' else '%m/%d %H:%M')
+    
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        
+        results = {}
+        for phase in ['before', 'after']:
+            query = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {p['range']})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["_field"] == "{field}")
+              |> filter(fn: (r) => r["phase"] == "{phase}")
+              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> yield(name: "mean")
+            '''
+            result = query_api.query(query=query)
+            data_points = []
+            for table in result:
+                for record in table.records:
+                    data_points.append({
+                        'time': record.get_time().strftime(time_format),
+                        'value': round(float(record.get_value()), 2)
+                    })
+            results[phase] = data_points
+        
+        # Calculate averages for summary
+        before_vals = [d['value'] for d in results['before']] if results['before'] else []
+        after_vals = [d['value'] for d in results['after']] if results['after'] else []
+        avg_before = round(sum(before_vals) / len(before_vals), 2) if before_vals else 0
+        avg_after = round(sum(after_vals) / len(after_vals), 2) if after_vals else 0
+        savings_pct = round((1 - avg_after / avg_before) * 100, 1) if avg_before > 0 else 0
+        
+        client.close()
+        return jsonify({
+            'period': period,
+            'field': field,
+            'before': results['before'],
+            'after': results['after'],
+            'summary': {
+                'avg_before': avg_before,
+                'avg_after': avg_after,
+                'savings_percent': savings_pct
+            }
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Energy compare error: {e}")
+        return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
+
+@app.route('/api/energy/history')
+def energy_history():
+    """Get PZEM energy history from InfluxDB — supports 1h to 30 days"""
+    period = request.args.get('period', '24h')  # 1h, 6h, 24h, 7d, 30d
+    field = request.args.get('field', 'power')  # voltage, current, power, energy_kwh, frequency, power_factor
+    
+    # Map period to InfluxDB range and aggregation window
+    period_map = {
+        '1h':  {'range': '-1h',  'window': '1m'},
+        '6h':  {'range': '-6h',  'window': '5m'},
+        '24h': {'range': '-24h', 'window': '15m'},
+        '7d':  {'range': '-7d',  'window': '1h'},
+        '30d': {'range': '-30d', 'window': '6h'}
+    }
+    
+    if period not in period_map:
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
+    
+    allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
+    if field not in allowed_fields:
+        return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
+    
+    p = period_map[period]
+    
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        
+        # Use different time format based on period
+        time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
+        
+        query = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {p['range']})
+          |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+          |> filter(fn: (r) => r["_field"] == "{field}")
+          |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+          |> yield(name: "mean")
+        '''
+        
+        result = query_api.query(query=query)
+        
+        data_points = []
+        for table in result:
+            for record in table.records:
+                data_points.append({
+                    'time': record.get_time().strftime(time_format),
+                    'value': round(float(record.get_value()), 2)
+                })
+        
+        client.close()
+        return jsonify({'period': period, 'field': field, 'data': data_points})
+        
+    except Exception as e:
+        print(f"[ERROR] Energy history query error: {e}")
+        return jsonify({'error': str(e), 'data': []}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
@@ -1345,7 +1522,7 @@ def set_lamp_mode():
 
 @app.route('/api/optimization/update', methods=['POST'])
 def update_optimization():
-    """Receive optimization data from main.py — GA→AC / PSO→Lamp"""
+    """Receive optimization data from main.py — GA->AC / PSO->Lamp"""
     try:
         data = request.json
         ga_sol = data.get('ga_solution', {})
@@ -1366,7 +1543,7 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
+        print(f"[ML] Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
         
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
         # Skip if camera auto-OFF is active (no person detected)
@@ -1380,12 +1557,12 @@ def update_optimization():
                     _last_adaptive_ac_apply = now
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    print(f"🤖 ADAPTIVE (HTTP) → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    print(f"[ADAPTIVE] (HTTP) -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
                 else:
-                    print(f"🤖 ADAPTIVE (HTTP) → AC apply debounced (MQTT already handled it)")
+                    print(f"[ADAPTIVE] (HTTP) -> AC apply debounced (MQTT already handled it)")
         elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            print(f"🤖 ADAPTIVE (HTTP) → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+            print(f"[ADAPTIVE] (HTTP) -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
@@ -1397,14 +1574,14 @@ def update_optimization():
                     _last_adaptive_lamp_apply = now
                     lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    print(f"🤖 ADAPTIVE (HTTP) → Applied to Lamp: {opt_brightness}%")
+                    print(f"[ADAPTIVE] (HTTP) -> Applied to Lamp: {opt_brightness}%")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
                 else:
-                    print(f"🤖 ADAPTIVE (HTTP) → Lamp apply debounced")
+                    print(f"[ADAPTIVE] (HTTP) -> Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
-        print(f"❌ Optimization update error: {e}")
+        print(f"[ERROR] Optimization update error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/learn', methods=['POST'])
@@ -1447,9 +1624,9 @@ def learn_ir():
         
         print(f"Publish Result: {result.rc}")
         if result.rc == 0:
-            print("✅ MQTT PUBLISH SUCCESS!")
+            print("[OK] MQTT PUBLISH SUCCESS!")
         else:
-            print(f"❌ MQTT PUBLISH FAILED! RC={result.rc}")
+            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
         print("="*60 + "\n")
         
         log_messages.append({
@@ -1464,7 +1641,7 @@ def learn_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"❌ EXCEPTION in learn_ir(): {e}")
+        print(f"[ERROR] EXCEPTION in learn_ir(): {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1482,7 +1659,7 @@ def send_ir():
         print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
         
         if button_name not in mqtt_data['ir_codes']:
-            print(f"❌ ERROR: Button '{button_name}' not found in learned codes!")
+            print(f"[ERROR] Button '{button_name}' not found in learned codes!")
             print("="*70 + "\n")
             return jsonify({'status': 'error', 'message': 'IR code not learned yet'}), 400
         
@@ -1494,12 +1671,12 @@ def send_ir():
             raw_part = ir_code[4:]
             raw_value_count = raw_part.count(',') + 1 if raw_part else 0
         
-        print(f"✅ IR code found!")
+        print(f"[OK] IR code found!")
         print(f"Code length: {len(ir_code)} chars")
         if raw_value_count > 0:
             print(f"RAW values: {raw_value_count} values")
             if raw_value_count < 100:
-                print(f"⚠️  WARNING: Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
+                print(f"[WARN] Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
         print(f"Code preview: {ir_code[:100]}..." if len(ir_code) > 100 else f"Code: {ir_code}")
         
         # Handle toggle buttons (power ON/OFF with same code)
@@ -1510,7 +1687,7 @@ def send_ir():
             new_state = 'ON' if current_state == 'OFF' else 'OFF'
             mqtt_data['ir_states'][button_name] = new_state
             action_suffix = f' ({new_state})'
-            print(f"🔄 Toggle button: {current_state} → {new_state}")
+            print(f"[IR] Toggle button: {current_state} -> {new_state}")
         
         # MQTT Payload - send COMPLETE code, no truncation!
         mqtt_payload = {
@@ -1526,7 +1703,7 @@ def send_ir():
         if verify_code.startswith('RAW:'):
             verify_raw_count = verify_code[4:].count(',') + 1
         
-        print(f"\n📡 Publishing to MQTT...")
+        print(f"\n[PUB] Publishing to MQTT...")
         print(f"Topic: smartroom/ir/send")
         print(f"Payload size: {len(mqtt_payload_str)} bytes")
         if verify_raw_count > 0:
@@ -1537,10 +1714,10 @@ def send_ir():
         
         print(f"Publish Result: {result.rc}")
         if result.rc == 0:
-            print("✅ MQTT PUBLISH SUCCESS!")
+            print("[OK] MQTT PUBLISH SUCCESS!")
             print("ESP32 should transmit IR signal NOW!")
         else:
-            print(f"❌ MQTT PUBLISH FAILED! RC={result.rc}")
+            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
         print("="*70 + "\n")
         
         log_messages.append({
@@ -1556,7 +1733,7 @@ def send_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"❌ EXCEPTION in send_ir(): {e}")
+        print(f"[ERROR] EXCEPTION in send_ir(): {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1588,7 +1765,7 @@ def delete_ir_code():
                 with open(ir_file, 'w') as f:
                     json.dump(mqtt_data['ir_codes'], f, indent=2)
             except Exception as e:
-                print(f"❌ Error updating IR codes file: {e}")
+                print(f"[ERROR] Error updating IR codes file: {e}")
             
             return jsonify({'status': 'success', 'message': f'IR code {button_name} deleted'})
         else:
@@ -1632,7 +1809,7 @@ def manual_save_ir():
             with open(ir_file, 'w') as f:
                 json.dump(mqtt_data['ir_codes'], f, indent=2)
         except Exception as e:
-            print(f"❌ Error saving to file: {e}")
+            print(f"[ERROR] Error saving to file: {e}")
         
         # Notify frontend
         socketio.emit('ir_learned', {
@@ -1707,7 +1884,7 @@ def check_alert_rules():
     else:
         rule['triggered'] = False
     
-    # No person timeout → suggest turning off AC
+    # No person timeout -> suggest turning off AC
     rule = alert_rules['no_person_timeout']
     if rule['enabled']:
         if person:
@@ -2352,6 +2529,11 @@ HTML_TEMPLATE = '''
             50% { opacity: 0.5; }
         }
 
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.2; }
+        }
+
         .ir-button-name {
             font-size: 12px;
             color: var(--text-secondary);
@@ -2410,7 +2592,42 @@ HTML_TEMPLATE = '''
 
         .toast.show { display: block; }
 
-        .power-grid {
+        /* Energy data bubble notification */
+        .energy-bubble {
+            position: fixed;
+            top: 80px;
+            right: 30px;
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95));
+            color: #fff;
+            padding: 10px 18px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 9998;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(-10px) scale(0.9);
+            transition: opacity 0.3s, transform 0.3s;
+            box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .energy-bubble.show {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+        .energy-bubble .bubble-dot {
+            width: 8px;
+            height: 8px;
+            background: #fff;
+            border-radius: 50%;
+            animation: bubblePulse 1s infinite;
+        }
+        @keyframes bubblePulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
@@ -2904,7 +3121,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
                     <div class="stat-change">
-                        <span>Suhu terasa — Kombinasi temp &amp; humidity</span>
+                        <span>Feels like — Combination of temp &amp; humidity</span>
                     </div>
                 </div>
 
@@ -2944,7 +3161,7 @@ HTML_TEMPLATE = '''
                         <!-- Set Temperature -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-thermometer-half"></i> Set Suhu
+                                <i class="fas fa-thermometer-half"></i> Set Temperature
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
@@ -2989,6 +3206,57 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- Energy Monitor Panel (PZEM-016) -->
+                <div class="stat-card" id="energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center;">
+                                <i class="fas fa-bolt" style="font-size: 18px; color: #f59e0b;"></i>
+                            </div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Monitor</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">PZEM-016 + CT — AC Energy Usage</div>
+                            </div>
+                        </div>
+                        <div id="energy-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(107, 114, 128, 0.15); color: #6b7280; border: 1px solid rgba(107, 114, 128, 0.3);">
+                            <i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-plug" style="color: #f59e0b;"></i> Voltage</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-voltage">0</span><span style="font-size: 12px; color: var(--text-secondary);"> V</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-wave-square" style="color: #ef4444;"></i> Current</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-current">0</span><span style="font-size: 12px; color: var(--text-secondary);"> A</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-fire" style="color: #f97316;"></i> Power</div>
+                                <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="energy-power">0</span><span style="font-size: 12px; color: var(--text-secondary);"> W</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-battery-half" style="color: #10b981;"></i> Energy</div>
+                                <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="energy-kwh">0</span><span style="font-size: 12px; color: var(--text-secondary);"> kWh</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-signal" style="color: #6366f1;"></i> Frequency</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-freq">0</span><span style="font-size: 12px; color: var(--text-secondary);"> Hz</span></div>
+                            </div>
+                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-tachometer-alt" style="color: #8b5cf6;"></i> Power Factor</div>
+                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-pf">0</span></div>
+                            </div>
+                        </div>
+                        <!-- Estimasi biaya harian -->
+                        <div style="margin-top: 12px; padding: 10px 14px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(217, 119, 6, 0.05)); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
+                            <div style="font-size: 12px; color: var(--text-secondary);"><i class="fas fa-coins" style="color: #f59e0b;"></i> Cost Estimate (Rp 1.444,70/kWh)</div>
+                            <div style="font-size: 14px; font-weight: 700; color: #f59e0b;">Rp <span id="energy-cost">0</span></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Person Detection - Enhanced Card -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
@@ -3008,7 +3276,7 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
                         <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-users"></i> Jumlah Orang
+                                <i class="fas fa-users"></i> Person Count
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
@@ -3018,31 +3286,31 @@ HTML_TEMPLATE = '''
                                 <i class="fas fa-crosshairs"></i> Confidence
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">akurasi deteksi</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
                                 <i class="fas fa-bolt"></i> Auto Control
                             </div>
                             <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
-                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Aktif (10 min timeout)</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
                         </div>
                     </div>
                     <!-- Last Person Detection + Auto-OFF Timer -->
                     <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                         <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
                             <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
-                                <i class="fas fa-clock"></i> Terakhir Deteksi Orang
+                                <i class="fas fa-clock"></i> Last Person Detection
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Belum terdeteksi</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
                         </div>
                         <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
                                 <i class="fas fa-power-off"></i> Auto-OFF AC
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Tidak aktif</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
                         </div>
                     </div>
                 </div>
@@ -3055,14 +3323,14 @@ HTML_TEMPLATE = '''
                         </div>
                         <div>
                             <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm → AC | PSO → Lamp</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm -> AC | PSO -> Lamp</div>
                         </div>
                     </div>
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
                         <!-- GA Section -->
                         <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-dna"></i> GA → AC Control
+                                <i class="fas fa-dna"></i> GA -> AC Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3084,7 +3352,7 @@ HTML_TEMPLATE = '''
                         <!-- PSO Section -->
                         <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-lightbulb"></i> PSO → Lamp Control
+                                <i class="fas fa-lightbulb"></i> PSO -> Lamp Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3112,7 +3380,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-lamp" class="page">
             <div class="header">
                 <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
-                <p>Lighting monitoring & status</p>
+                <p>Lighting monitoring & status — 3 Lamps</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
                         <span class="device-dot offline"></span>
@@ -3123,32 +3391,63 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="stats-grid dashboard-grid">
+                <!-- Lamp 1 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Light Intensity</span>
+                        <span class="stat-title">Lamp 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             <i class="fas fa-sun"></i>
                         </div>
                     </div>
-                    <div class="stat-value"><span id="dash-lux">0</span> lx</div>
+                    <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <span>Brightness: <span id="dash-bright1">0</span>%</span>
                     </div>
                 </div>
 
+                <!-- Lamp 2 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp Brightness</span>
+                        <span class="stat-title">Lamp 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-lightbulb"></i>
+                            <i class="fas fa-sun"></i>
                         </div>
                     </div>
-                    <div class="stat-value"><span id="dash-brightness">0</span>%</div>
+                    <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Real-time</span>
+                        <span>Brightness: <span id="dash-bright2">0</span>%</span>
                     </div>
                 </div>
 
+                <!-- Lamp 3 -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 3 — Lux</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                            <i class="fas fa-sun"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
+                    <div class="stat-change">
+                        <span>Brightness: <span id="dash-bright3">0</span>%</span>
+                    </div>
+                </div>
+
+                <!-- Average -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Average (3 Lamps)</span>
+                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                            <i class="fas fa-chart-bar"></i>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
+                    <div class="stat-change">
+                        <span>Avg Brightness: <span id="dash-bright-avg">0</span>%</span>
+                    </div>
+                </div>
+
+                <!-- Motion Detection -->
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Motion Detection</span>
@@ -3162,9 +3461,10 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- PSO Control -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">PSO → Lamp Control</span>
+                        <span class="stat-title">PSO -> Lamp Control</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             <i class="fas fa-chart-line"></i>
                         </div>
@@ -3231,7 +3531,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Light Intensity (Lux)</div>
+                    <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
@@ -3243,7 +3543,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Brightness Level</div>
+                    <div class="chart-title">Average Brightness Level — 3 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
@@ -3258,7 +3558,7 @@ HTML_TEMPLATE = '''
         <div id="camera" class="page">
             <div class="header">
                 <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
-                <p>Real-time person detection menggunakan YOLOv8n</p>
+                <p>Real-time person detection using YOLOv8n</p>
             </div>
 
             <div class="camera-view">
@@ -3278,7 +3578,7 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-video-slash"></i>
                         <h3>Camera Not Available</h3>
                         <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
-                            Pastikan kamera USB terhubung dengan benar
+                            Make sure USB camera is properly connected
                         </p>
                         <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
                             <i class="fas fa-sync"></i> Retry Connection
@@ -3330,25 +3630,29 @@ HTML_TEMPLATE = '''
         <!-- Energy Usage Page -->
         <div id="energy" class="page">
             <div class="header">
-                <h1>Energy Usage</h1>
-                <p>Pemakaian energi AC dan Lamp dalam kWh</p>
+                <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
+                <p>Real-time & historical energy monitoring from PZEM-016</p>
+                <button class="chart-option-btn" onclick="exportEnergyHistory()" style="margin-top: 8px;">
+                    <i class="fas fa-download"></i> Export Energy Data CSV
+                </button>
             </div>
 
+            <!-- Real-time summary cards -->
             <div class="power-grid">
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Day</div>
                     <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Day</div>
                     <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
                 </div>
 
                 <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Hari</div>
+                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
                     <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
                     <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
                 </div>
@@ -3360,11 +3664,122 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
+            <!-- Historical Power Chart -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title">Energy Trend (kWh/day equivalent)</div>
+                    <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- Historical Voltage Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyVoltageChart" height="80"></canvas>
+            </div>
+
+            <!-- Historical Energy kWh Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyKwhChart" height="80"></canvas>
+            </div>
+
+            <!-- Estimated daily energy (real-time) -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
+            </div>
+
+            <!-- ===== BEFORE vs AFTER Adaptive AC Comparison ===== -->
+            <div style="margin-top: 40px; padding: 24px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
+                        <i class="fas fa-exchange-alt"></i> Before vs After Adaptive AC
+                    </h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
+                </div>
+
+                <!-- Phase Selector -->
+                <div style="display: flex; justify-content: center; gap: 12px; margin-bottom: 20px;">
+                    <button id="btn-phase-before" onclick="setEnergyPhase('before')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px;">
+                        <i class="fas fa-clock"></i> BEFORE (Recording)
+                    </button>
+                    <button id="btn-phase-after" onclick="setEnergyPhase('after')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px; opacity: 0.6;">
+                        <i class="fas fa-robot"></i> AFTER (Recording)
+                    </button>
+                </div>
+                <div id="phase-indicator" style="text-align: center; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 600; margin-bottom: 20px; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
+                    <i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC
+                </div>
+
+                <!-- Savings Summary Cards -->
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px;">
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="compare-avg-before">--</span> W</div>
+                    </div>
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg After</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="compare-avg-after">--</span> W</div>
+                    </div>
+                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.2);">
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Energy Savings</div>
+                        <div style="font-size: 22px; font-weight: 700; color: #6366f1;"><span id="compare-savings">--</span>%</div>
+                    </div>
+                </div>
+
+                <!-- Comparison Chart -->
+                <div class="chart-container" style="border: none; padding: 0;">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyCompareChart" height="100"></canvas>
+                </div>
+
+                <!-- Energy kWh Comparison -->
+                <div class="chart-container" style="border: none; padding: 0; margin-top: 16px;">
+                    <div class="chart-header">
+                        <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyCompareKwhChart" height="100"></canvas>
+                </div>
             </div>
         </div>
 
@@ -3373,7 +3788,7 @@ HTML_TEMPLATE = '''
         <div id="control-ac" class="page">
             <div class="header">
                 <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
-                <p>Kontrol AC menggunakan IRMitsubishiHeavy library</p>
+                <p>AC Control using IRMitsubishiHeavy library</p>
             </div>
 
             <!-- ========== MODE SELECTOR (PROMINENT) ========== -->
@@ -3385,17 +3800,17 @@ HTML_TEMPLATE = '''
                     <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
                         <i class="fas fa-robot" style="font-size: 28px;"></i>
                         <span>ADAPTIVE</span>
-                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI mengatur AC otomatis</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically</span>
                     </button>
                     <button id="btn-mode-manual" onclick="setACMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
                         <i class="fas fa-hand-paper" style="font-size: 28px;"></i>
                         <span>MANUAL</span>
-                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Atur AC sendiri</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control AC manually</span>
                     </button>
                 </div>
                 <!-- Current mode indicator -->
                 <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
-                    <i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)
+                    <i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)
                 </div>
             </div>
 
@@ -3406,8 +3821,8 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-brain" style="color: white; font-size: 22px;"></i>
                     </div>
                     <div>
-                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Mode Adaptive Aktif</div>
-                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization mengontrol suhu & fan speed secara otomatis</div>
+                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Adaptive Mode Active</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed automatically</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
@@ -3425,7 +3840,7 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
-                    <i class="fas fa-lock"></i> Kontrol manual dinonaktifkan saat mode Adaptive aktif. Beralih ke Manual untuk mengatur AC secara manual.
+                    <i class="fas fa-lock"></i> Manual control is disabled in Adaptive mode. Switch to Manual to control AC manually.
                 </div>
             </div>
 
@@ -3434,8 +3849,8 @@ HTML_TEMPLATE = '''
                 <div id="ac-manual-overlay" style="display: block; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); backdrop-filter: blur(3px); border-radius: 12px; z-index: 10; display: flex; align-items: center; justify-content: center; cursor: not-allowed;">
                     <div style="text-align: center; color: white;">
                         <i class="fas fa-lock" style="font-size: 36px; margin-bottom: 10px; opacity: 0.8;"></i>
-                        <div style="font-size: 14px; font-weight: 600;">Mode Adaptive Aktif</div>
-                        <div style="font-size: 12px; opacity: 0.7;">Beralih ke Manual untuk menggunakan kontrol ini</div>
+                        <div style="font-size: 14px; font-weight: 600;">Adaptive Mode Active</div>
+                        <div style="font-size: 12px; opacity: 0.7;">Switch to Manual to use these controls</div>
                     </div>
                 </div>
 
@@ -3538,7 +3953,7 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    <i class="fas fa-info-circle"></i> Menggunakan IRMitsubishiHeavy library — tidak perlu learning manual.
+                    <i class="fas fa-info-circle"></i> Using IRMitsubishiHeavy library — no manual learning needed.
                 </div>
             </div>
         </div>
@@ -3547,7 +3962,7 @@ HTML_TEMPLATE = '''
         <div id="control-lamp" class="page">
             <div class="header">
                 <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
-                <p>Manual lamp control and brightness settings</p>
+                <p>Manual lamp control and brightness settings — 3 Lamps</p>
             </div>
 
             <div class="control-panel">
@@ -3557,13 +3972,28 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label">Brightness: <span id="brightness-display">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider" oninput="updateBrightness(this.value)">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #f59e0b;"></i> Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
-                <button class="btn btn-primary" onclick="applyLampSettings()">
-                    <i class="fas fa-check"></i> Apply Brightness
-                </button>
+                <div class="control-group">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #10b981;"></i> Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
+                </div>
+
+                <div class="control-group">
+                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #6366f1;"></i> Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
+                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
+                </div>
+
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="applyLampSettings()">
+                        <i class="fas fa-check"></i> Apply All
+                    </button>
+                    <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
+                        <i class="fas fa-sync"></i> Sync All to Lamp 1
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -3571,14 +4001,14 @@ HTML_TEMPLATE = '''
         <div id="ml-optimization" class="page">
             <div class="header">
                 <h1><i class="fas fa-brain"></i> Machine Learning Optimization</h1>
-                <p>GA → Adaptive AC | PSO → Adaptive Lamp | Data from InfluxDB</p>
+                <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
             </div>
 
             <!-- ML Summary Cards -->
             <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">GA → AC</span>
+                        <span class="stat-title">GA -> AC</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><i class="fas fa-dna"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #10b981;">0.00</span></div>
@@ -3596,7 +4026,7 @@ HTML_TEMPLATE = '''
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">PSO → Lamp</span>
+                        <span class="stat-title">PSO -> Lamp</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><i class="fas fa-chart-line"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
@@ -3618,8 +4048,8 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-database"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
-                        🌡️ <span id="ml-cur-temp">--</span>°C &nbsp; 💧 <span id="ml-cur-hum">--</span>%<br>
-                        💡 <span id="ml-cur-lux">--</span> lux &nbsp; 👤 <span id="ml-cur-person">--</span>
+                        Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
+                        Lux: <span id="ml-cur-lux">--</span> lux &nbsp; Person: <span id="ml-cur-person">--</span>
                     </div>
                     <div class="stat-change"><span>From InfluxDB</span></div>
                 </div>
@@ -3681,6 +4111,9 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-history" style="color: #a855f7;"></i> Optimization History</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportMLHistory()">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
                         <button class="chart-option-btn" onclick="refreshMLHistory()">
                             <i class="fas fa-sync"></i> Refresh
                         </button>
@@ -3764,6 +4197,9 @@ HTML_TEMPLATE = '''
             <div class="header">
                 <h1>System Logs</h1>
                 <p>Real-time system events and notifications</p>
+                <button class="chart-option-btn" onclick="exportLogs()" style="margin-top: 8px;">
+                    <i class="fas fa-download"></i> Export Logs CSV
+                </button>
             </div>
 
             <div class="log-container" id="log-container">
@@ -3774,14 +4210,14 @@ HTML_TEMPLATE = '''
         <div id="occupancy-feedback" class="page">
             <div class="header">
                 <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
-                <p>Pantau tren okupansi dan kirim penilaian kenyamanan ruangan (1-5)</p>
+                <p>Monitor occupancy trends and submit room comfort ratings (1-5)</p>
             </div>
 
             <div class="occupancy-top">
                 <div class="occupancy-kpi">
-                    <div class="kpi-label">Occupancy Saat Ini</div>
+                    <div class="kpi-label">Current Occupancy</div>
                     <div class="kpi-value" id="occ-live-count">0</div>
-                    <div class="occupancy-mini-note">Orang terdeteksi saat ini</div>
+                    <div class="occupancy-mini-note">Currently detected persons</div>
                     <div class="occupancy-mini-note">Confidence: <span id="occ-live-confidence">0%</span></div>
                 </div>
 
@@ -3801,41 +4237,46 @@ HTML_TEMPLATE = '''
             <div class="feedback-grid">
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-star"></i> Feedback Kenyamanan</div>
+                        <div class="chart-title"><i class="fas fa-star"></i> Comfort Feedback</div>
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
-                        Skala: 1 = Tidak Puas, 5 = Sangat Puas
+                        Scale: 1 = Not Satisfied, 5 = Very Satisfied
                     </div>
                     <div class="rating-row" id="rating-row" style="margin-top: 14px;">
-                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Tidak puas">1</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Kurang puas">2</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Cukup">3</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Puas">4</button>
-                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Sangat puas">5</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Not satisfied">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Less satisfied">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Fair">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Satisfied">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Very satisfied">5</button>
                     </div>
                     <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-secondary);">
-                        <span>Tidak Puas</span>
-                        <span>Sangat Puas</span>
+                        <span>Not Satisfied</span>
+                        <span>Very Satisfied</span>
                     </div>
-                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Masukkan feedback pengguna ruangan..."></textarea>
-                    <input id="google-form-url" class="feedback-input" placeholder="Masukkan URL Google Form Anda" />
+                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Enter room user feedback..."></textarea>
+                    <input id="google-form-url" class="feedback-input" placeholder="Enter your Google Form URL" />
 
                     <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
                         <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
-                            <i class="fas fa-save"></i> Simpan Link Form
+                            <i class="fas fa-save"></i> Save Form Link
                         </button>
                         <button class="btn btn-success" onclick="openGoogleForm()">
-                            <i class="fas fa-external-link-alt"></i> Buka Google Form
+                            <i class="fas fa-external-link-alt"></i> Open Google Form
                         </button>
                         <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
-                            <i class="fas fa-paper-plane"></i> Kirim Feedback
+                            <i class="fas fa-paper-plane"></i> Submit Feedback
                         </button>
                     </div>
                 </div>
 
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-history"></i> Feedback Terbaru</div>
+                        <div class="chart-title"><i class="fas fa-history"></i> Recent Feedback</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportFeedback()">
+                                <i class="fas fa-download"></i> Export CSV
+                            </button>
+                        </div>
                     </div>
                     <div id="feedback-history"></div>
                 </div>
@@ -3846,6 +4287,12 @@ HTML_TEMPLATE = '''
     <!-- Toast Notification -->
     <div id="toast" class="toast">
         <div id="toast-message"></div>
+    </div>
+
+    <!-- Energy Data Bubble -->
+    <div id="energy-bubble" class="energy-bubble">
+        <span class="bubble-dot"></span>
+        <span id="energy-bubble-text">--</span>
     </div>
 
     <!-- Detection Alert -->
@@ -3889,7 +4336,9 @@ HTML_TEMPLATE = '''
             const settings = {
                 acTemp: document.getElementById('ac-temp-slider')?.value || 24,
                 fanSpeed: document.getElementById('fan-speed-slider')?.value || 1,
-                lampBrightness: document.getElementById('brightness-slider')?.value || 0
+                lampBrightness1: document.getElementById('brightness-slider-1')?.value || 0,
+                lampBrightness2: document.getElementById('brightness-slider-2')?.value || 0,
+                lampBrightness3: document.getElementById('brightness-slider-3')?.value || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -3902,7 +4351,6 @@ HTML_TEMPLATE = '''
                     
                     const acTempSlider = document.getElementById('ac-temp-slider');
                     const fanSpeedSlider = document.getElementById('fan-speed-slider');
-                    const brightnessSlider = document.getElementById('brightness-slider');
                     
                     if (acTempSlider) {
                         acTempSlider.value = settings.acTemp || 24;
@@ -3914,9 +4362,12 @@ HTML_TEMPLATE = '''
                         document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
                     }
                     
-                    if (brightnessSlider) {
-                        brightnessSlider.value = settings.lampBrightness || 0;
-                        document.getElementById('brightness-display').textContent = brightnessSlider.value;
+                    for (let i = 1; i <= 3; i++) {
+                        const slider = document.getElementById('brightness-slider-' + i);
+                        if (slider) {
+                            slider.value = settings['lampBrightness' + i] || 0;
+                            document.getElementById('brightness-display-' + i).textContent = slider.value;
+                        }
                     }
                 } catch (e) {
                     console.error('Error loading settings:', e);
@@ -3967,6 +4418,53 @@ HTML_TEMPLATE = '''
             charts.energy = new Chart(document.getElementById('energyChart'), {
                 ...chartConfig,
                 data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            // Historical Energy Charts (PZEM-016 from InfluxDB)
+            charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
+            charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
+            charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
+                ...chartConfig,
+                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+            });
+
+            // Before vs After Comparison Charts
+            charts.energyCompare = new Chart(document.getElementById('energyCompareChart'), {
+                ...chartConfig,
+                options: {
+                    ...chartConfig.options,
+                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
+                },
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                    ]
+                }
+            });
+
+            charts.energyCompareKwh = new Chart(document.getElementById('energyCompareKwhChart'), {
+                ...chartConfig,
+                options: {
+                    ...chartConfig.options,
+                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
+                },
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                    ]
+                }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
@@ -4034,6 +4532,168 @@ HTML_TEMPLATE = '''
             
             updateChartData(chartName, hours);
         }
+
+        // ==================== ENERGY HISTORY (PZEM-016 from InfluxDB) ====================
+        const energyChartMap = {
+            'power': 'energyPower',
+            'voltage': 'energyVoltage',
+            'energy_kwh': 'energyKwh'
+        };
+
+        function loadEnergyHistory(field, period, btnElement) {
+            // Update button active state
+            if (btnElement) {
+                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
+                buttons.forEach(btn => btn.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
+
+            const chartName = energyChartMap[field];
+            if (!chartName || !charts[chartName]) return;
+
+            fetch('/api/energy/history?field=' + field + '&period=' + period)
+                .then(r => r.json())
+                .then(result => {
+                    const data = result.data || [];
+                    const chart = charts[chartName];
+
+                    chart.data.labels = data.map(d => d.time);
+                    chart.data.datasets[0].data = data.map(d => d.value);
+                    chart.update();
+
+                    if (data.length === 0) {
+                        console.log('No energy data for ' + field + ' / ' + period);
+                    }
+                })
+                .catch(e => console.error('Energy history error:', e));
+        }
+
+        function loadAllEnergyCharts() {
+            loadEnergyHistory('power', '1h', null);
+            loadEnergyHistory('voltage', '1h', null);
+            loadEnergyHistory('energy_kwh', '24h', null);
+            loadEnergyCompare('power', '30m', null);
+            loadEnergyCompare('energy_kwh', '30m', null);
+            loadCurrentPhase();
+        }
+
+        // ==================== BEFORE vs AFTER COMPARISON ====================
+        let currentEnergyPhase = 'before';
+
+        function loadCurrentPhase() {
+            fetch('/api/energy/phase')
+                .then(r => r.json())
+                .then(data => {
+                    currentEnergyPhase = data.phase;
+                    updatePhaseUI(data.phase);
+                })
+                .catch(e => console.error('Phase load error:', e));
+        }
+
+        function setEnergyPhase(phase) {
+            fetch('/api/energy/phase', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({phase: phase})
+            })
+            .then(r => r.json())
+            .then(data => {
+                currentEnergyPhase = data.phase;
+                updatePhaseUI(data.phase);
+            })
+            .catch(e => console.error('Phase set error:', e));
+        }
+
+        function updatePhaseUI(phase) {
+            const btnBefore = document.getElementById('btn-phase-before');
+            const btnAfter = document.getElementById('btn-phase-after');
+            const indicator = document.getElementById('phase-indicator');
+
+            if (phase === 'before') {
+                btnBefore.style.border = '3px solid #f59e0b';
+                btnBefore.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                btnBefore.style.color = 'white';
+                btnBefore.style.opacity = '1';
+                btnAfter.style.border = '3px solid var(--border)';
+                btnAfter.style.background = 'var(--bg-card)';
+                btnAfter.style.color = 'var(--text-secondary)';
+                btnAfter.style.opacity = '0.6';
+                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC';
+                indicator.style.background = 'rgba(245, 158, 11, 0.1)';
+                indicator.style.color = '#f59e0b';
+                indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            } else {
+                btnAfter.style.border = '3px solid #10b981';
+                btnAfter.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                btnAfter.style.color = 'white';
+                btnAfter.style.opacity = '1';
+                btnBefore.style.border = '3px solid var(--border)';
+                btnBefore.style.background = 'var(--bg-card)';
+                btnBefore.style.color = 'var(--text-secondary)';
+                btnBefore.style.opacity = '0.6';
+                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>AFTER</strong> adaptive AC';
+                indicator.style.background = 'rgba(16, 185, 129, 0.1)';
+                indicator.style.color = '#10b981';
+                indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+            }
+        }
+
+        function loadEnergyCompare(field, period, btnElement) {
+            if (btnElement) {
+                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
+                buttons.forEach(btn => btn.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
+
+            const chartName = field === 'energy_kwh' ? 'energyCompareKwh' : 'energyCompare';
+            if (!charts[chartName]) return;
+
+            fetch('/api/energy/compare?field=' + field + '&period=' + period)
+                .then(r => r.json())
+                .then(result => {
+                    const beforeData = result.before || [];
+                    const afterData = result.after || [];
+                    const summary = result.summary || {};
+
+                    // Use the longer dataset's time labels
+                    const allTimes = [...new Set([
+                        ...beforeData.map(d => d.time),
+                        ...afterData.map(d => d.time)
+                    ])].sort();
+
+                    const beforeMap = {};
+                    beforeData.forEach(d => beforeMap[d.time] = d.value);
+                    const afterMap = {};
+                    afterData.forEach(d => afterMap[d.time] = d.value);
+
+                    const chart = charts[chartName];
+                    chart.data.labels = allTimes;
+                    chart.data.datasets[0].data = allTimes.map(t => beforeMap[t] !== undefined ? beforeMap[t] : null);
+                    chart.data.datasets[1].data = allTimes.map(t => afterMap[t] !== undefined ? afterMap[t] : null);
+                    chart.options.spanGaps = true;
+                    chart.update();
+
+                    // Update summary cards (only for power comparison)
+                    if (field === 'power') {
+                        document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
+                        document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
+                        const savingsEl = document.getElementById('compare-savings');
+                        savingsEl.textContent = summary.savings_percent || '--';
+                        if (summary.savings_percent > 0) {
+                            savingsEl.style.color = '#10b981';
+                        } else if (summary.savings_percent < 0) {
+                            savingsEl.style.color = '#ef4444';
+                        }
+                    }
+                })
+                .catch(e => console.error('Energy compare error:', e));
+        }
+
+        // Listen for phase changes from server
+        socket.on('energy_phase', function(data) {
+            currentEnergyPhase = data.phase;
+            updatePhaseUI(data.phase);
+        });
 
         // ==================== THEME TOGGLE ====================
         function initTheme() {
@@ -4104,6 +4764,9 @@ HTML_TEMPLATE = '''
             if (pageId === 'occupancy-feedback') {
                 updateChartData('occupancy', chartRanges.occupancy || 1);
                 loadFeedbackHistory();
+            }
+            if (pageId === 'energy') {
+                loadAllEnergyCharts();
             }
         }
 
@@ -4225,6 +4888,94 @@ HTML_TEMPLATE = '''
             showToast('ML data refreshed', 'success');
         }
 
+        // ==================== EXPORT FUNCTIONS ====================
+        function downloadCSV(filename, csvContent) {
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        function exportMLHistory() {
+            if (!mlHistory || mlHistory.length === 0) {
+                showToast('No optimization data to export', 'error');
+                return;
+            }
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
+            mlHistory.forEach(e => {
+                csv += `${e.run},"${e.time}",${e.ga_fitness.toFixed(2)},${e.ga_temp},${e.ga_fan},${e.pso_fitness.toFixed(2)},${e.pso_brightness},${e.combined.toFixed(2)}\n`;
+            });
+            downloadCSV('ml_optimization_history.csv', csv);
+            showToast('ML history exported', 'success');
+        }
+
+        function exportLogs() {
+            const container = document.getElementById('log-container');
+            if (!container || !container.children.length) {
+                showToast('No logs to export', 'error');
+                return;
+            }
+            let csv = 'Time,Level,Message\n';
+            Array.from(container.children).forEach(entry => {
+                const text = entry.textContent || '';
+                const timeMatch = text.match(/\[(.+?)\]/);
+                const time = timeMatch ? timeMatch[1] : '';
+                const msg = text.replace(/\[.+?\]\s*/, '').replace(/"/g, '""');
+                const level = entry.className.replace('log-entry ', '').trim();
+                csv += `"${time}","${level}","${msg}"\n`;
+            });
+            downloadCSV('system_logs.csv', csv);
+            showToast('Logs exported', 'success');
+        }
+
+        function exportFeedback() {
+            fetch('/api/occupancy/feedback/list')
+                .then(r => r.json())
+                .then(data => {
+                    const rows = data.feedback || [];
+                    if (rows.length === 0) {
+                        showToast('No feedback data to export', 'error');
+                        return;
+                    }
+                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
+                    rows.forEach(item => {
+                        const comment = (item.comment || '').replace(/"/g, '""');
+                        csv += `"${item.time}",${item.rating},${item.occupancy_count},"${comment}"\n`;
+                    });
+                    downloadCSV('occupancy_feedback.csv', csv);
+                    showToast('Feedback exported', 'success');
+                })
+                .catch(() => showToast('Failed to fetch feedback data', 'error'));
+        }
+
+        function exportEnergyHistory() {
+            const period = '24h';
+            fetch('/api/energy/history?period=' + period)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.power || data.power.length === 0) {
+                        showToast('No energy data to export', 'error');
+                        return;
+                    }
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
+                    const times = data.power.map(p => p.time);
+                    const powers = data.power || [];
+                    const voltages = data.voltage || [];
+                    const energies = data.energy_kwh || [];
+                    times.forEach((t, i) => {
+                        const pw = powers[i] ? powers[i].value : '';
+                        const vl = voltages[i] ? voltages[i].value : '';
+                        const en = energies[i] ? energies[i].value : '';
+                        csv += `"${t}",${pw},${vl},${en}\n`;
+                    });
+                    downloadCSV('energy_history_' + period + '.csv', csv);
+                    showToast('Energy data exported (' + period + ')', 'success');
+                })
+                .catch(() => showToast('Failed to fetch energy history', 'error'));
+        }
+
         function getMLParams(algo) {
             if (algo === 'ga') {
                 return {
@@ -4332,7 +5083,7 @@ HTML_TEMPLATE = '''
                         img.style.display = 'none';
                         error.style.display = 'flex';
                         error.querySelector('h3').textContent = 'Camera OFF';
-                        error.querySelector('p').textContent = 'Kamera dimatikan. Klik tombol Camera ON untuk mengaktifkan.';
+                        error.querySelector('p').textContent = 'Camera is off. Click Camera ON button to activate.';
                         showToast('Camera OFF', 'info');
                     }
                     checkCameraStatus();
@@ -4420,7 +5171,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 fetch('/api/ac/control', {
@@ -4455,7 +5206,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 const temp = document.getElementById('ac-temp-slider').value;
@@ -4478,21 +5229,32 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== LAMP CONTROLS ====================
-        function updateBrightness(value) {
-            document.getElementById('brightness-display').textContent = value;
+        function updateBrightness(lampNum, value) {
+            document.getElementById('brightness-display-' + lampNum).textContent = value;
+            saveSettings();
+        }
+
+        function syncAllSliders() {
+            const val = document.getElementById('brightness-slider-1').value;
+            document.getElementById('brightness-slider-2').value = val;
+            document.getElementById('brightness-slider-3').value = val;
+            document.getElementById('brightness-display-2').textContent = val;
+            document.getElementById('brightness-display-3').textContent = val;
             saveSettings();
         }
 
         function applyLampSettings() {
-            const brightness = document.getElementById('brightness-slider').value;
+            const b1 = parseInt(document.getElementById('brightness-slider-1').value);
+            const b2 = parseInt(document.getElementById('brightness-slider-2').value);
+            const b3 = parseInt(document.getElementById('brightness-slider-3').value);
             
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness: parseInt(brightness) })
+                body: JSON.stringify({ brightness1: b1, brightness2: b2, brightness3: b3 })
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp brightness set!'))
+            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '% L3=' + b3 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -4527,7 +5289,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(16, 185, 129, 0.1)';
                     indicator.style.color = '#10b981';
                     indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-robot"></i> Mode saat ini: <strong>ADAPTIVE</strong> — AC dikontrol otomatis oleh AI (GA optimization)';
+                    indicator.innerHTML = '<i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)';
                 }
                 // Button styles
                 if (btnAdaptive) {
@@ -4551,7 +5313,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(245, 158, 11, 0.1)';
                     indicator.style.color = '#f59e0b';
                     indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Mode saat ini: <strong>MANUAL</strong> — Atur AC secara manual menggunakan tombol di bawah';
+                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
@@ -4735,7 +5497,7 @@ HTML_TEMPLATE = '''
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
                 if (data.ac.mode === 'ADAPTIVE') {
-                    showToast('Mode Adaptive aktif! Beralih ke Manual untuk kontrol manual.', 'error');
+                    showToast('Adaptive mode is active! Switch to Manual for manual control.', 'error');
                     return;
                 }
                 // Visual feedback
@@ -4799,7 +5561,7 @@ HTML_TEMPLATE = '''
                         const statusElement = document.getElementById('status-' + buttonName);
                         if (buttonElement && statusElement) {
                             buttonElement.classList.add('learned');
-                            statusElement.textContent = 'Learned ✓';
+                            statusElement.textContent = 'Learned [OK]';
                             statusElement.style.color = '#10b981';
                         }
                     });
@@ -4815,7 +5577,7 @@ HTML_TEMPLATE = '''
         }
 
         function resetAllIRCodes() {
-            if (!confirm('⚠️ Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
+            if (!confirm('[WARNING] Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
                 return;
             }
             
@@ -4910,18 +5672,18 @@ HTML_TEMPLATE = '''
                     debugInfo += '═══════════════════════════════════\\n\\n';
                     
                     if (Object.keys(codes).length === 0) {
-                        debugInfo += '⚠️ No IR codes learned yet\\n\\n';
+                        debugInfo += '[WARN] No IR codes learned yet\\n\\n';
                         debugInfo += 'Steps to learn:\\n';
                         debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
                         debugInfo += '2. Click \"Learn\" button\\n';
                         debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
-                        debugInfo += '4. Wait for \"Learned ✓\" status\\n';
+                        debugInfo += '4. Wait for \"Learned [OK]\" status\\n';
                         debugInfo += '5. Click \"Send\" to test\\n';
                     } else {
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += `📡 ${button}:\\n`;
+                            debugInfo += `[IR] ${button}:\\n`;
                             debugInfo += `   Code: ${codePreview}\\n`;
                             debugInfo += `   Length: ${codeStr.length} chars\\n`;
                             
@@ -4937,7 +5699,7 @@ HTML_TEMPLATE = '''
                         debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
                     }
                     
-                    debugInfo += '\\n💡 TROUBLESHOOTING:\\n';
+                    debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
                     debugInfo += '- If AC not responding: Use RAW protocol\\n';
                     debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
                     debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
@@ -5076,7 +5838,7 @@ HTML_TEMPLATE = '''
                 alertBox.classList.remove('show');
             }, 5000);
             
-            console.log('🚨 PERSON DETECTED:', {
+            console.log('[ALERT] PERSON DETECTED:', {
                 count: count,
                 confidence: confidence + '%',
                 time: new Date().toLocaleTimeString()
@@ -5093,9 +5855,9 @@ HTML_TEMPLATE = '''
             updateSoundToggleUI();
             if (detectionSoundEnabled) {
                 playDetectionSound();
-                showToast('🔊 Sound alerts ON — anda akan mendengar suara saat orang terdeteksi', 'success');
+                showToast('Sound alerts ON — you will hear a sound when a person is detected', 'success');
             } else {
-                showToast('🔇 Sound alerts OFF — notifikasi suara dimatikan', 'info');
+                showToast('Sound alerts OFF — sound notifications disabled', 'info');
             }
         }
 
@@ -5110,6 +5872,17 @@ HTML_TEMPLATE = '''
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
 
+        let energyBubbleTimer = null;
+        function showEnergyBubble(power, voltage, current) {
+            const bubble = document.getElementById('energy-bubble');
+            const text = document.getElementById('energy-bubble-text');
+            if (!bubble || !text) return;
+            text.textContent = power.toFixed(1) + ' W | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
+            bubble.classList.add('show');
+            if (energyBubbleTimer) clearTimeout(energyBubbleTimer);
+            energyBubbleTimer = setTimeout(() => { bubble.classList.remove('show'); }, 4000);
+        }
+
         // ==================== OCCUPANCY FEEDBACK ====================
         function selectFeedbackRating(value) {
             selectedFeedbackRating = value;
@@ -5121,11 +5894,11 @@ HTML_TEMPLATE = '''
         function saveGoogleFormUrl() {
             const url = (document.getElementById('google-form-url').value || '').trim();
             if (!url) {
-                showToast('Masukkan URL Google Form terlebih dahulu', 'error');
+                showToast('Please enter Google Form URL first', 'error');
                 return;
             }
             localStorage.setItem('googleFormUrl', url);
-            showToast('URL Google Form tersimpan', 'success');
+            showToast('Google Form URL saved', 'success');
         }
 
         function openGoogleForm() {
@@ -5138,7 +5911,7 @@ HTML_TEMPLATE = '''
             const formUrl = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
 
             if (!selectedFeedbackRating) {
-                showToast('Pilih rating 1-5 terlebih dahulu', 'error');
+                showToast('Please select a rating 1-5 first', 'error');
                 return;
             }
 
@@ -5155,7 +5928,7 @@ HTML_TEMPLATE = '''
             .then(r => r.json())
             .then(result => {
                 if (result.status === 'success') {
-                    showToast('Feedback berhasil dikirim', 'success');
+                    showToast('Feedback submitted successfully', 'success');
                     document.getElementById('feedback-comment').value = '';
                     selectFeedbackRating(0);
                     loadFeedbackHistory();
@@ -5163,7 +5936,7 @@ HTML_TEMPLATE = '''
                         window.open(formUrl, '_blank');
                     }
                 } else {
-                    showToast(result.message || 'Gagal kirim feedback', 'error');
+                    showToast(result.message || 'Failed to submit feedback', 'error');
                 }
             })
             .catch(e => showToast('Error: ' + (e.message || e), 'error'));
@@ -5178,7 +5951,7 @@ HTML_TEMPLATE = '''
 
                     const rows = data.feedback || [];
                     if (rows.length === 0) {
-                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Belum ada feedback.</div>';
+                        container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">No feedback yet.</div>';
                         return;
                     }
 
@@ -5345,8 +6118,14 @@ HTML_TEMPLATE = '''
                         document.getElementById('ac-live-fan').textContent = fanSpeed;
                         document.getElementById('ac-live-mode').textContent = acMode;
                     }
-                    document.getElementById('dash-lux').textContent = data.lamp.lux.toFixed(0);
-                    document.getElementById('dash-brightness').textContent = Math.round(data.lamp.brightness / 255 * 100);
+                    document.getElementById('dash-lux1').textContent = (data.lamp.lux1 || 0).toFixed(0);
+                    document.getElementById('dash-lux2').textContent = (data.lamp.lux2 || 0).toFixed(0);
+                    document.getElementById('dash-lux3').textContent = (data.lamp.lux3 || 0).toFixed(0);
+                    document.getElementById('dash-lux-avg').textContent = (data.lamp.lux_avg || 0).toFixed(1);
+                    document.getElementById('dash-bright1').textContent = Math.round((data.lamp.brightness1 || 0) / 255 * 100);
+                    document.getElementById('dash-bright2').textContent = Math.round((data.lamp.brightness2 || 0) / 255 * 100);
+                    document.getElementById('dash-bright3').textContent = Math.round((data.lamp.brightness3 || 0) / 255 * 100);
+                    document.getElementById('dash-bright-avg').textContent = Math.round((data.lamp.brightness_avg || 0) / 255 * 100);
                     document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
                     
                     const personDetected = data.camera.person_detected;
@@ -5433,19 +6212,29 @@ HTML_TEMPLATE = '''
                     if (actualACState === 'ON') {
                         acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
                     }
-                    let lampPower = (data.lamp.brightness / 255) * 10;
+                    let lampPower = ((data.lamp.brightness1 || 0) + (data.lamp.brightness2 || 0) + (data.lamp.brightness3 || 0)) / 255 * 10;
                     let totalPower = acPower + lampPower;
+
+                    // Use real PZEM data if available, otherwise estimate
+                    let realPower = null;
+                    let realEnergyKwh = null;
+                    if (data.energy && data.energy.connected) {
+                        realPower = parseFloat(data.energy.power || 0);
+                        realEnergyKwh = parseFloat(data.energy.energy || 0);
+                    }
+
                     let acEnergyKwh = (acPower / 1000) * 24;
                     let lampEnergyKwh = (lampPower / 1000) * 24;
-                    let totalEnergyKwh = acEnergyKwh + lampEnergyKwh;
-                    let dailyCost = (totalPower / 1000) * 24 * 1500;
+                    let totalEnergyKwh = realEnergyKwh !== null ? realEnergyKwh : (acEnergyKwh + lampEnergyKwh);
+                    let displayPower = realPower !== null ? realPower : totalPower;
+                    let dailyCost = totalEnergyKwh * 1500;
                     
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
-                    document.getElementById('total-power').textContent = totalPower.toFixed(1);
+                    document.getElementById('total-power').textContent = displayPower.toFixed(1);
                     document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
                     document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
-                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(2);
+                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
                     document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
 
                     if (charts.energy) {
@@ -5460,6 +6249,40 @@ HTML_TEMPLATE = '''
                         charts.energy.update();
                     }
                     
+                    // Energy Monitor (PZEM-016) data
+                    if (data.energy) {
+                        const e = data.energy;
+                        const eVolt = document.getElementById('energy-voltage');
+                        const eCurr = document.getElementById('energy-current');
+                        const ePow = document.getElementById('energy-power');
+                        const eKwh = document.getElementById('energy-kwh');
+                        const eFreq = document.getElementById('energy-freq');
+                        const ePf = document.getElementById('energy-pf');
+                        const eCost = document.getElementById('energy-cost');
+                        const eBadge = document.getElementById('energy-status-badge');
+                        if (eVolt) eVolt.textContent = parseFloat(e.voltage || 0).toFixed(1);
+                        if (eCurr) eCurr.textContent = parseFloat(e.current || 0).toFixed(2);
+                        if (ePow) ePow.textContent = parseFloat(e.power || 0).toFixed(1);
+                        if (eKwh) eKwh.textContent = parseFloat(e.energy || 0).toFixed(3);
+                        if (eFreq) eFreq.textContent = parseFloat(e.frequency || 0).toFixed(1);
+                        if (ePf) ePf.textContent = parseFloat(e.pf || 0).toFixed(2);
+                        if (eCost) {
+                            const cost = parseFloat(e.energy || 0) * 1500;
+                            eCost.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+                        }
+                        if (eBadge) {
+                            if (e.connected) {
+                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
+                                eBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+                                eBadge.style.color = '#10b981';
+                            } else {
+                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
+                                eBadge.style.background = 'rgba(107, 114, 128, 0.15)';
+                                eBadge.style.color = '#6b7280';
+                            }
+                        }
+                    }
+
                     updateModeBadges();
                 });
         }
@@ -5541,19 +6364,69 @@ HTML_TEMPLATE = '''
                 const now = new Date();
                 const timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
                 
+                const luxAvg = data.data.lux_avg || 0;
+                const brightAvg = data.data.brightness_avg || 0;
+                
                 if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
                     charts.lampLux.data.labels.push(timeStr);
-                    charts.lampLux.data.datasets[0].data.push(data.data.lux);
+                    charts.lampLux.data.datasets[0].data.push(luxAvg);
                     charts.lampLux.update();
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
-                    charts.lampBright.data.datasets[0].data.push(Math.round(data.data.brightness / 255 * 100));
+                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
                     charts.lampBright.update();
                 }
             }
             
-            // Real-time optimization (GA→AC / PSO→Lamp) updates
+            if (data.type === 'energy') {
+                const e = data.data;
+                const voltEl = document.getElementById('energy-voltage');
+                const currEl = document.getElementById('energy-current');
+                const powEl = document.getElementById('energy-power');
+                const kwhEl = document.getElementById('energy-kwh');
+                const freqEl = document.getElementById('energy-freq');
+                const pfEl = document.getElementById('energy-pf');
+                const costEl = document.getElementById('energy-cost');
+                const badge = document.getElementById('energy-status-badge');
+                
+                if (voltEl) voltEl.textContent = parseFloat(e.voltage || 0).toFixed(1);
+                if (currEl) currEl.textContent = parseFloat(e.current || 0).toFixed(2);
+                if (powEl) powEl.textContent = parseFloat(e.power || 0).toFixed(1);
+                if (kwhEl) kwhEl.textContent = parseFloat(e.energy || 0).toFixed(3);
+                if (freqEl) freqEl.textContent = parseFloat(e.frequency || 0).toFixed(1);
+                if (pfEl) pfEl.textContent = parseFloat(e.pf || 0).toFixed(2);
+                
+                // Estimasi biaya: tarif PLN R1/1300VA = Rp 1.444,70/kWh
+                if (costEl) {
+                    const cost = parseFloat(e.energy || 0) * 1444.70;
+                    costEl.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+                }
+                
+                if (badge) {
+                    if (e.connected) {
+                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
+                        badge.style.background = 'rgba(16, 185, 129, 0.15)';
+                        badge.style.color = '#10b981';
+                        badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    } else {
+                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
+                        badge.style.background = 'rgba(107, 114, 128, 0.15)';
+                        badge.style.color = '#6b7280';
+                        badge.style.borderColor = 'rgba(107, 114, 128, 0.3)';
+                    }
+                }
+                
+                // Show energy data bubble notification
+                const pwr = parseFloat(e.power || 0);
+                const vlt = parseFloat(e.voltage || 0);
+                const cur = parseFloat(e.current || 0);
+                if (pwr > 0 || vlt > 0) {
+                    showEnergyBubble(pwr, vlt, cur);
+                }
+            }
+
+            // Real-time optimization (GA->AC / PSO->Lamp) updates
             if (data.type === 'system') {
                 const gaFitness = parseFloat(data.data.ga_fitness) || 0;
                 const psoFitness = parseFloat(data.data.pso_fitness) || 0;
@@ -5588,7 +6461,7 @@ HTML_TEMPLATE = '''
                 const psoBrightEl = document.getElementById('pso-brightness');
                 if (psoBrightEl && psoBrightness > 0) psoBrightEl.textContent = psoBrightness;
                 
-                console.log('📊 Optimization Update:', {
+                console.log('[ML] Optimization Update:', {
                     ga: gaFitness.toFixed(2), ac_temp: gaTemp, ac_fan: gaFan,
                     pso: psoFitness.toFixed(2), lamp_brightness: psoBrightness,
                     runs: runs
@@ -5596,11 +6469,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast(`GA→AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO→Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
+                    showToast(`GA->AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO->Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
                 } else if (gaFitness > 0) {
-                    showToast(`GA→AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
+                    showToast(`GA->AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
                 } else if (psoFitness > 0) {
-                    showToast(`PSO→Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
+                    showToast(`PSO->Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -5720,17 +6593,17 @@ HTML_TEMPLATE = '''
                     if (personDetected && personCount > 0) {
                         lastSeenEl.textContent = 'Sekarang';
                         lastSeenEl.style.color = '#10b981';
-                        if (lastSeenLabel) lastSeenLabel.textContent = 'Orang terdeteksi saat ini';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Person currently detected';
                     } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
                         const mins = Math.floor(lastSeenAgo / 60);
                         const secs = lastSeenAgo % 60;
                         lastSeenEl.textContent = mins > 0 ? `${mins}m ${secs}s lalu` : `${secs}s lalu`;
                         lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
-                        if (lastSeenLabel) lastSeenLabel.textContent = 'Sejak terakhir terdeteksi';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Since last detection';
                     } else {
                         lastSeenEl.textContent = '--';
                         lastSeenEl.style.color = '#94a3b8';
-                        if (lastSeenLabel) lastSeenLabel.textContent = 'Belum pernah terdeteksi';
+                        if (lastSeenLabel) lastSeenLabel.textContent = 'Never detected';
                     }
                 }
                 
@@ -5743,7 +6616,7 @@ HTML_TEMPLATE = '''
                     if (autoOffTriggered) {
                         autoOffEl.textContent = 'MATI';
                         autoOffEl.style.color = '#ef4444';
-                        if (autoOffLabel) autoOffLabel.textContent = 'AC sudah auto-OFF';
+                        if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
                         const offMins = Math.floor(autoOffIn / 60);
                         const offSecs = autoOffIn % 60;
@@ -5753,11 +6626,11 @@ HTML_TEMPLATE = '''
                     } else {
                         autoOffEl.textContent = '--';
                         autoOffEl.style.color = '#10b981';
-                        if (autoOffLabel) autoOffLabel.textContent = 'Orang terdeteksi, AC aman';
+                        if (autoOffLabel) autoOffLabel.textContent = 'Person detected, AC safe';
                     }
                 }
                 
-                console.log('📹 Camera Update:', {
+                console.log('[CAM] Camera Update:', {
                     count: personCount,
                     confidence: confidence,
                     detected: personDetected
@@ -5767,19 +6640,19 @@ HTML_TEMPLATE = '''
 
         // ML Optimization status from main.py
         socket.on('ml_status', function(data) {
-            console.log('🤖 ML Status:', data);
+            console.log('[ML] ML Status:', data);
             const status = data.status || '';
             const algo = (data.algorithm || '').toUpperCase();
             
             if (status === 'running') {
-                showToast(`🚀 ${algo} optimization running...`, 'success');
+                showToast(`${algo} optimization running...`, 'success');
                 // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
             } else if (status === 'completed') {
-                showToast(`✅ ${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
+                showToast(`${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
                 // Re-enable run buttons
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
@@ -5788,18 +6661,18 @@ HTML_TEMPLATE = '''
                 // Refresh ML data
                 refreshMLData();
             } else if (status === 'error') {
-                showToast(`❌ ${algo} error: ${data.message || 'Unknown error'}`, 'error');
+                showToast(`${algo} error: ${data.message || 'Unknown error'}`, 'error');
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
                     btn.style.opacity = '1';
                 });
             } else if (status === 'busy') {
-                showToast(`⏳ Optimization already in progress`, 'warning');
+                showToast(`Optimization already in progress`, 'warning');
             }
         });
 
         socket.on('ir_learned', function(data) {
-            console.log('🎉 IR Learned event received:', data);
+            console.log('[OK] IR Learned event received:', data);
             
             let buttonName = data.button;
             let buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
@@ -5813,7 +6686,7 @@ HTML_TEMPLATE = '''
             }
             
             if (data.status === 'error') {
-                showToast('❌ IR Learning failed: ' + (data.message || 'Unknown error'), 'error');
+                showToast('[ERROR] IR learning failed: ' + (data.message || 'Unknown error'), 'error');
                 if (buttonElement) buttonElement.classList.remove('learning');
                 if (statusElement) {
                     statusElement.textContent = 'Failed';
@@ -5829,11 +6702,11 @@ HTML_TEMPLATE = '''
             }
             
             if (statusElement) {
-                statusElement.textContent = 'Learned ✓';
+                statusElement.textContent = 'Learned [OK]';
                 statusElement.style.color = '#10b981';
             }
             
-            let message = '✅ IR Code learned: ' + buttonName;
+            let message = 'IR Code learned: ' + buttonName;
             if (data.is_toggle) {
                 message += ' (Power Toggle)';
             }
@@ -5849,7 +6722,7 @@ HTML_TEMPLATE = '''
             
             // If learning mode and IR topic detected, show notification
             if (currentLearningButton && (data.topic.includes('ir') || data.topic.includes('IR'))) {
-                console.log('⚠️ IR-related MQTT message while in learning mode!');
+                console.log('[WARN] IR-related MQTT message while in learning mode!');
             }
         });
 
@@ -5874,7 +6747,7 @@ HTML_TEMPLATE = '''
         }
 
         window.onload = function() {
-            console.log('🚀 Smart Room Dashboard Loading...');
+            console.log('[INIT] Smart Room Dashboard Loading...');
             initCharts();
             loadSavedPreferences();
             loadSavedSettings();
@@ -5884,6 +6757,7 @@ HTML_TEMPLATE = '''
             updateDeviceStatus();
             updateLogs();
             checkCameraStatus();
+            loadAllEnergyCharts();
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
@@ -5907,7 +6781,7 @@ HTML_TEMPLATE = '''
                 });
             }, 30000);
             
-            console.log('✅ Dashboard Ready!');
+            console.log('[OK] Dashboard Ready!');
         };
     </script>
 </body>
@@ -5916,54 +6790,54 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  🏠 Smart Room Dashboard - YOLOv8n + Auto AC Control")
+    print("  Smart Room Dashboard - YOLOv8n + Auto AC Control")
     print("=" * 60)
     
     # Load saved IR codes from file
-    print("  📡 Loading saved IR codes...")
+    print("  [INIT] Loading saved IR codes...")
     try:
         import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
         if os.path.exists(ir_file):
             with open(ir_file, 'r') as f:
                 mqtt_data['ir_codes'] = json.load(f)
-            print(f"  ✅ Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
+            print(f"  [OK] Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
             # Verify each code's completeness
             for btn_name, code in mqtt_data['ir_codes'].items():
                 if isinstance(code, str) and code.startswith('RAW:'):
                     raw_count = code[4:].count(',') + 1
-                    status = '✅' if raw_count >= 100 else '⚠️ '
+                    status = '[OK]' if raw_count >= 100 else '[WARN]'
                     print(f"    {status} {btn_name}: RAW {raw_count} values, {len(code)} chars")
                 else:
-                    print(f"    📡 {btn_name}: {len(code)} chars")
+                    print(f"    [IR] {btn_name}: {len(code)} chars")
         else:
-            print("  ℹ️  No saved IR codes found")
+            print("  [INFO] No saved IR codes found")
     except Exception as e:
-        print(f"  ⚠️  Error loading IR codes: {e}")
+        print(f"  [WARN] Error loading IR codes: {e}")
     
-    print("  📥 Loading YOLO model (please wait)...")
+    print("  [INIT] Loading YOLO model (please wait)...")
     
     # Load YOLO SYNCHRONOUSLY
     yolo_loaded = load_yolo_model()
     
     if yolo_loaded:
-        print("  ✅ YOLO ready for person detection!")
+        print("  [OK] YOLO ready for person detection!")
     else:
-        print("  ⚠️  YOLO failed to load, running without detection")
+        print("  [WARN] YOLO failed to load, running without detection")
     
     # Start background camera detection thread (runs 24/7 for auto ON/OFF)
-    print("  🎥 Starting background camera detection thread...")
+    print("  [CAM] Starting background camera detection thread...")
     detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
     detection_thread.start()
-    print("  ✅ Detection thread running — auto ON/OFF active")
+    print("  [OK] Detection thread running — auto ON/OFF active")
     
     print("=" * 60)
-    print("  🌐 Dashboard URL: http://172.20.0.65:5000")
-    print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
-    print("  ✨ Features:")
+    print("  [URL] Dashboard URL: http://172.20.0.65:5000")
+    print("  [URL] Video Feed:    http://172.20.0.65:5000/video_feed")
+    print("  Features:")
     print("     - YOLOv8n Person Detection (background thread)")
-    print("     - Auto ON: 3 frames (~2s) person confirmed → AC ON")
-    print("     - Auto OFF: 10 min no person → AC OFF")
+    print("     - Auto ON: 3 frames (~2s) person confirmed -> AC ON")
+    print("     - Auto OFF: 10 min no person -> AC OFF")
     print("     - 4K Camera (fallback 1080p)")
     print("     - Real-time Person Count & Confidence")
     print("=" * 60)
