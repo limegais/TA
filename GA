@@ -41,6 +41,11 @@ class GeneticAlgorithm:
         self.fitness_history = []
         self.generation_stats = []
         self.brute_force_best = None  # For validation
+        
+        # Convergence & stagnation detection
+        self.stagnation_limit = max(5, generations // 4)  # Reset after N gens without improvement
+        self.convergence_threshold = 0.01  # Stop early if fitness change < this for many gens
+        self.converged_at = None  # Generation where convergence detected
     
     def create_individual(self):
         """Create random individual [temp (float), fan_speed (int)]"""
@@ -115,22 +120,34 @@ class GeneticAlgorithm:
             return child1, child2
         return parent1[:], parent2[:]
     
-    def mutate(self, individual, generation, max_generations):
-        """Adaptive mutation: higher rate in early gens, lower in late gens"""
+    def mutate(self, individual, generation, max_generations, boost=False):
+        """Adaptive mutation: higher rate in early gens, lower in late gens.
+           boost=True increases mutation for stagnation recovery."""
         mutated = individual[:]
-        # Adaptive rate: starts at mutation_rate, decays to mutation_rate * 0.3
         progress = generation / max(1, max_generations)
         adaptive_rate = self.mutation_rate * (1.0 - 0.7 * progress)
+        
+        # Stagnation boost: double mutation rate + larger step
+        if boost:
+            adaptive_rate = min(0.9, adaptive_rate * 2.5)
         
         for i in range(len(mutated)):
             if random.random() < adaptive_rate:
                 if i == 0:  # Temperature (continuous)
-                    # Gaussian mutation with adaptive step size
-                    step = random.gauss(0, 2.0 * (1 - progress) + 0.5)
+                    step_size = 2.0 * (1 - progress) + 0.5
+                    if boost:
+                        step_size *= 2.0  # Bigger jumps to escape local optima
+                    step = random.gauss(0, step_size)
                     mutated[i] = round(max(TEMP_MIN, min(TEMP_MAX, mutated[i] + step)), 1)
                 elif i == 1:  # Fan speed (discrete)
                     mutated[i] = random.randint(FAN_MIN, FAN_MAX)
         return mutated
+    
+    def inject_diversity(self, population, count):
+        """Replace worst individuals with fresh random ones to escape stagnation"""
+        for i in range(min(count, len(population))):
+            population[-(i + 1)] = self.create_individual()
+        return population
     
     def brute_force_validate(self):
         """Exhaustive search over all 45 integer combinations to verify GA result"""
@@ -154,7 +171,7 @@ class GeneticAlgorithm:
         """
         if verbose:
             print("\n" + "="*70)
-            print("🧬 GENETIC ALGORITHM - AC OPTIMIZATION (Enhanced)")
+            print("GENETIC ALGORITHM - AC OPTIMIZATION (Enhanced)")
             print("="*70)
             print(f"Population: {self.population_size} | Generations: {self.generations}")
             print(f"Mutation: {self.mutation_rate} (adaptive) | Crossover: {self.crossover_rate} (BLX-α)")
@@ -178,7 +195,10 @@ class GeneticAlgorithm:
         # Initialize population (with seeding)
         population = self.create_population()
         if verbose and self.seed_solutions:
-            print(f"🌱 Seeded {min(len(self.seed_solutions), int(self.population_size * 0.3))} solutions from previous cycle")
+            print(f"Seeded {min(len(self.seed_solutions), int(self.population_size * 0.3))} solutions from previous cycle")
+        
+        stagnation_counter = 0
+        prev_best = 0
         
         for gen in range(self.generations):
             fitness_scores = self.evaluate_population(population)
@@ -204,6 +224,31 @@ class GeneticAlgorithm:
                 'min': round(min_fitness, 2)
             })
             
+            # --- Stagnation detection & diversity injection ---
+            improvement = self.best_fitness - prev_best
+            if improvement < self.convergence_threshold:
+                stagnation_counter += 1
+            else:
+                stagnation_counter = 0
+            prev_best = self.best_fitness
+            
+            boost_mutation = False
+            if stagnation_counter >= self.stagnation_limit:
+                inject_count = max(2, self.population_size // 4)
+                population = self.inject_diversity(population, inject_count)
+                fitness_scores = self.evaluate_population(population)
+                boost_mutation = True
+                stagnation_counter = 0
+                if verbose:
+                    print(f"Gen {gen+1:3d} | STAGNATION RESET: injected {inject_count} new individuals")
+            
+            # --- Early convergence: stop if no improvement for extended period ---
+            if stagnation_counter >= self.stagnation_limit * 2 and gen > self.generations // 2:
+                self.converged_at = gen + 1
+                if verbose:
+                    print(f"Gen {gen+1:3d} | EARLY CONVERGENCE at fitness {self.best_fitness:.2f}")
+                break
+            
             if verbose and (gen + 1) % 5 == 0:
                 sol_temp = int(round(self.best_solution[0]))
                 print(f"Gen {gen+1:3d}/{self.generations} | "
@@ -221,9 +266,9 @@ class GeneticAlgorithm:
             while len(next_population) < self.population_size:
                 p1, p2 = random.sample(selected, 2)
                 child1, child2 = self.crossover_blend(p1, p2)
-                next_population.append(self.mutate(child1, gen, self.generations))
+                next_population.append(self.mutate(child1, gen, self.generations, boost=boost_mutation))
                 if len(next_population) < self.population_size:
-                    next_population.append(self.mutate(child2, gen, self.generations))
+                    next_population.append(self.mutate(child2, gen, self.generations, boost=boost_mutation))
             
             population = next_population[:self.population_size]
         
@@ -235,26 +280,28 @@ class GeneticAlgorithm:
         ga_rounded = [int(round(self.best_solution[0])), self.best_solution[1]]
         if bf_fitness > self.best_fitness:
             if verbose:
-                print(f"\n⚠️  GA result ({ga_rounded[0]}°C, Fan {ga_rounded[1]}, fit={self.best_fitness:.2f})"
+                print(f"\nGA result ({ga_rounded[0]}°C, Fan {ga_rounded[1]}, fit={self.best_fitness:.2f})"
                       f" < Brute-force ({bf_solution[0]}°C, Fan {bf_solution[1]}, fit={bf_fitness:.2f})")
                 print(f"   → Using brute-force optimum instead")
             self.best_solution = [float(bf_solution[0]), bf_solution[1]]
             self.best_fitness = bf_fitness
         else:
             if verbose:
-                print(f"\n✅ GA found optimum! (matches brute-force: {bf_solution[0]}°C, Fan {bf_solution[1]})")
+                print(f"\nGA found optimum! (matches brute-force: {bf_solution[0]}°C, Fan {bf_solution[1]})")
         
         # Round to int for final output
         final_solution = [int(round(self.best_solution[0])), self.best_solution[1]]
         
         if verbose:
             print("\n" + "="*70)
-            print("✅ GA OPTIMIZATION COMPLETED!")
+            print("GA OPTIMIZATION COMPLETED!")
             print("="*70)
             print(f"Best Fitness: {self.best_fitness:.2f}")
             print(f"Best AC Setting:")
             print(f"  Temperature: {final_solution[0]}°C")
             print(f"  Fan Speed:   {final_solution[1]}")
+            if self.converged_at:
+                print(f"Early Convergence: generation {self.converged_at}/{self.generations}")
             print(f"Brute-Force Validation: {bf_solution[0]}°C, Fan {bf_solution[1]} (fit={bf_fitness:.2f})")
             print("="*70 + "\n")
         
@@ -267,12 +314,13 @@ class GeneticAlgorithm:
             'generation_stats': self.generation_stats,
             'best_solution': self.best_solution,
             'best_fitness': self.best_fitness,
-            'brute_force_best': self.brute_force_best
+            'brute_force_best': self.brute_force_best,
+            'converged_at': self.converged_at
         }
 
 # ==================== STANDALONE TEST ====================
 if __name__ == '__main__':
-    print("\n🧬 Testing Enhanced GA - AC Optimization")
+    print("\nTesting Enhanced GA - AC Optimization")
     print("="*70)
     
     ga = GeneticAlgorithm(population_size=15, generations=30)
