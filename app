@@ -637,13 +637,19 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     print("\n" + "="*70)
     print("  [MQTT] FLASK MQTT CONNECTION EVENT")
     print("="*70)
-    rc = reason_code.value if hasattr(reason_code, 'value') else int(reason_code)
+    rc = reason_code
     print(f"Return Code: {rc}")
-    print(f"RC Meaning: {['Success', 'Protocol version', 'Client ID', 'Server unavailable', 'Bad credentials', 'Not authorized'][rc] if rc < 6 else 'Unknown'}")
     print(f"Flags: {flags}")
     print("="*70)
     
-    if rc == 0:
+    # For paho-mqtt v2: reason_code is a ReasonCode object
+    is_success = False
+    if hasattr(reason_code, 'is_failure'):
+        is_success = not reason_code.is_failure
+    else:
+        is_success = (int(reason_code) == 0)
+    
+    if is_success:
         print("[OK] MQTT CONNECTED SUCCESSFULLY!\n")
         
         # Subscribe to all smartroom topics
@@ -664,9 +670,9 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         print("Waiting for messages from ESP32...\n")
         print("="*70 + "\n")
         
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {rc}', 'level': 'success'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {reason_code}', 'level': 'success'})
     else:
-        print(f"[ERROR] MQTT CONNECTION FAILED! RC={rc}")
+        print(f"[ERROR] MQTT CONNECTION FAILED! RC={reason_code}")
         print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
@@ -1080,18 +1086,23 @@ def on_message(client, userdata, msg):
         traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
-def on_disconnect(client, userdata, rc):
+def on_disconnect(client, userdata, flags, reason_code, properties=None):
     print("\n" + "="*70)
     print("  [WARN] FLASK MQTT DISCONNECTION EVENT")
     print("="*70)
-    print(f"Disconnect Reason Code: {rc}")
-    if rc != 0:
+    print(f"Disconnect Reason Code: {reason_code}")
+    is_clean = False
+    if hasattr(reason_code, 'is_failure'):
+        is_clean = not reason_code.is_failure
+    else:
+        is_clean = (int(reason_code) == 0)
+    if not is_clean:
         print("[ERROR] Unexpected disconnection!")
         print("Will attempt to reconnect...")
     else:
         print("[OK] Clean disconnection")
     print("="*70 + "\n")
-    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {rc}', 'level': 'warning'})
+    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
@@ -4332,6 +4343,10 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
+        window.onerror = function(msg, url, line, col, error) {
+            console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
+            return false;
+        };
         const socket = io();
         
         let charts = {};
@@ -4756,11 +4771,17 @@ HTML_TEMPLATE = '''
         }
 
         function showPage(pageId) {
+            console.log('[NAV] showPage called:', pageId);
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             
             const pageEl = document.getElementById(pageId);
-            if (pageEl) pageEl.classList.add('active');
+            if (pageEl) {
+                pageEl.classList.add('active');
+                console.log('[NAV] Page activated:', pageId);
+            } else {
+                console.error('[NAV] Page not found:', pageId);
+            }
             
             // Mark the correct nav-item as active
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -6810,36 +6831,36 @@ HTML_TEMPLATE = '''
 
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
-            initCharts();
-            loadSavedPreferences();
-            loadSavedSettings();
-            updateSoundToggleUI();
-            updateCameraToggleUI();
-            updateDashboard();
-            updateDeviceStatus();
-            updateLogs();
-            checkCameraStatus();
-            loadAllEnergyCharts();
+            try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
+            try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
+            try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
+            try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
+            try { updateCameraToggleUI(); } catch(e) { console.error('[ERROR] updateCameraToggleUI:', e); }
+            try { updateDashboard(); } catch(e) { console.error('[ERROR] updateDashboard:', e); }
+            try { updateDeviceStatus(); } catch(e) { console.error('[ERROR] updateDeviceStatus:', e); }
+            try { updateLogs(); } catch(e) { console.error('[ERROR] updateLogs:', e); }
+            try { checkCameraStatus(); } catch(e) { console.error('[ERROR] checkCameraStatus:', e); }
+            try { loadAllEnergyCharts(); } catch(e) { console.error('[ERROR] loadAllEnergyCharts:', e); }
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
             }
-            loadFeedbackHistory();
+            try { loadFeedbackHistory(); } catch(e) { console.error('[ERROR] loadFeedbackHistory:', e); }
             
             // Initialize AC mode UI on page load
-            updateModeBadges();
+            try { updateModeBadges(); } catch(e) { console.error('[ERROR] updateModeBadges:', e); }
             
             Object.keys(chartRanges).forEach(chartName => {
-                updateChartData(chartName, chartRanges[chartName]);
+                try { updateChartData(chartName, chartRanges[chartName]); } catch(e) { console.error('[ERROR] updateChartData ' + chartName + ':', e); }
             });
             
-            setInterval(updateDashboard, 1000);
-            setInterval(updateDeviceStatus, 5000);
-            setInterval(updateLogs, 5000);
+            setInterval(function() { try { updateDashboard(); } catch(e) {} }, 1000);
+            setInterval(function() { try { updateDeviceStatus(); } catch(e) {} }, 5000);
+            setInterval(function() { try { updateLogs(); } catch(e) {} }, 5000);
             
             setInterval(() => {
                 Object.keys(chartRanges).forEach(chartName => {
-                    updateChartData(chartName, chartRanges[chartName]);
+                    try { updateChartData(chartName, chartRanges[chartName]); } catch(e) {}
                 });
             }, 30000);
             
