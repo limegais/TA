@@ -36,10 +36,11 @@ last_results = {
 }
 
 # Optimized parameters for Smart Room project (Enhanced)
-# Population 15 + generations 30 = 450 evaluations (vs 45 brute-force = 10x redundancy for GA exploration)
+# Population 20 + generations 30 = 600 evaluations (vs 45 brute-force)
+# Stagnation detection + diversity injection for robustness
 # Brute-force validation ensures GA never misses optimum
 ga_params = {
-    'population_size': 15,
+    'population_size': 20,
     'generations': 30,
     'mutation_rate': 0.25,
     'crossover_rate': 0.8,
@@ -63,14 +64,14 @@ optimization_run_count = 0
 # ==================== MQTT HANDLERS ====================
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        print("✅ MQTT Connected!")
+        print("[OK] MQTT Connected!")
         client.subscribe("smartroom/ac/sensors")
         client.subscribe("smartroom/lamp/sensors")
         client.subscribe("smartroom/camera/detection")
         client.subscribe("smartroom/ml/command")
-        print("✅ Subscribed to sensor topics + ML commands")
+        print("[OK] Subscribed to sensor topics + ML commands")
     else:
-        print(f"❌ MQTT Connection failed (RC: {rc})")
+        print(f"[ERROR] MQTT Connection failed (RC: {rc})")
 
 def on_message(client, userdata, msg):
     try:
@@ -95,11 +96,11 @@ def on_message(client, userdata, msg):
         elif 'ml/command' in topic:
             handle_ml_command(payload)
     except Exception as e:
-        print(f"❌ MQTT message error: {e}")
+        print(f"[ERROR] MQTT message error: {e}")
 
 def on_disconnect(client, userdata, rc):
     if rc != 0:
-        print(f"⚠️  MQTT disconnected unexpectedly (RC: {rc}), reconnecting...")
+        print(f"[WARN] MQTT disconnected unexpectedly (RC: {rc}), reconnecting...")
         try:
             mqtt_client.reconnect()
         except Exception:
@@ -114,7 +115,7 @@ def handle_ml_command(payload):
         algo = payload.get('algorithm', 'both')
         params = payload.get('params', {})
         
-        print(f"\n📡 DASHBOARD COMMAND: Run {algo.upper()} optimization")
+        print(f"\n[CMD] DASHBOARD COMMAND: Run {algo.upper()} optimization")
         
         if algo == 'ga' and params:
             ga_params.update({k: v for k, v in params.items() if k in ga_params})
@@ -133,7 +134,7 @@ def handle_ml_command(payload):
 def run_optimization_cycle(algo='both', verbose=True):
     """Run one full optimization cycle: fetch data → GA → PSO → send to dashboard"""
     if not optimization_lock.acquire(blocking=False):
-        print("⚠️  Optimization already running, skipping...")
+        print("[WARN] Optimization already running, skipping...")
         mqtt_client.publish('smartroom/ml/status', json.dumps({
             'status': 'busy', 'message': 'Optimization already in progress'
         }))
@@ -151,7 +152,7 @@ def run_optimization_cycle(algo='both', verbose=True):
         # ===== GA → AC Optimization =====
         if algo in ('ga', 'both'):
             if verbose:
-                print("\n🧬 Running GA → AC Optimization (Enhanced)...")
+                print("\n[GA] Running GA -> AC Optimization (Enhanced)...")
             
             # Seed with previous cycle's best solution for continuity
             seed_solutions = []
@@ -173,12 +174,12 @@ def run_optimization_cycle(algo='both', verbose=True):
             last_results['ga']['fan'] = ga_sol[1]
             last_results['ga']['brute_force'] = ga.brute_force_best  # Validation data
             apply_ga_result(ga_sol, ga_fit)
-            print(f"✅ GA Done: {ga_sol[0]}°C, Fan {ga_sol[1]}, Fitness: {ga_fit:.2f}")
+            print(f"[OK] GA Done: {ga_sol[0]}°C, Fan {ga_sol[1]}, Fitness: {ga_fit:.2f}")
         
         # ===== PSO → Lamp Optimization =====
         if algo in ('pso', 'both'):
             if verbose:
-                print("\n🐦 Running PSO → Lamp Optimization...")
+                print("\n[PSO] Running PSO -> Lamp Optimization...")
             pso = ParticleSwarmOptimization(
                 swarm_size=pso_params['swarm_size'],
                 iterations=pso_params['iterations'],
@@ -191,7 +192,7 @@ def run_optimization_cycle(algo='both', verbose=True):
             last_results['pso']['fitness'] = pso_fit
             last_results['pso']['brightness'] = pso_sol[0]
             apply_pso_result(pso_sol, pso_fit)
-            print(f"✅ PSO Done: {pso_sol[0]}%, Fitness: {pso_fit:.2f}")
+            print(f"[OK] PSO Done: {pso_sol[0]}%, Fitness: {pso_fit:.2f}")
         
         # ===== Send ALL results to Dashboard =====
         send_dashboard_update()
@@ -216,7 +217,7 @@ def run_optimization_cycle(algo='both', verbose=True):
         return True
         
     except Exception as e:
-        print(f"❌ Optimization error: {e}")
+        print(f"[ERROR] Optimization error: {e}")
         import traceback
         traceback.print_exc()
         mqtt_client.publish('smartroom/ml/status', json.dumps({
@@ -230,7 +231,7 @@ def run_optimization_cycle(algo='both', verbose=True):
 def apply_ga_result(solution, fitness):
     """Store GA (AC) optimization result — Flask ADAPTIVE handler will apply"""
     temp, fan = solution
-    print(f"📊 GA Result: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
+    print(f"[GA] Result: {temp}°C, Fan: {fan}, Fitness: {fitness:.2f}")
     # Do NOT publish directly to ac/control here.
     # Flask on_message checks ADAPTIVE mode and applies exactly once.
     # Direct publish here would cause duplicate/conflicting IR commands.
@@ -241,7 +242,7 @@ def apply_ga_result(solution, fitness):
 def apply_pso_result(solution, fitness):
     """Store PSO (Lamp) optimization result — Flask ADAPTIVE handler will apply"""
     brightness = solution[0]
-    print(f"📊 PSO Result: {brightness}%, Fitness: {fitness:.2f}")
+    print(f"[PSO] Result: {brightness}%, Fitness: {fitness:.2f}")
     # Do NOT publish directly to lamp/control here.
     # Flask on_message checks ADAPTIVE mode and applies exactly once.
     last_results['pso']['fitness'] = fitness
@@ -271,31 +272,31 @@ def send_dashboard_update():
     # Via MQTT - single topic to avoid Flask processing same data twice
     # Flask on_message handles 'ml/result' → checks ADAPTIVE → sends ONE ac/control
     result = mqtt_client.publish('smartroom/ml/result', json.dumps(dashboard_data))
-    print(f"   Dashboard MQTT (ml/result): {'✅' if result.rc == 0 else '❌'}")
+    print(f"   Dashboard MQTT (ml/result): {'OK' if result.rc == 0 else 'FAIL'}")
     
     # Via HTTP API (backup)
     try:
         resp = requests.post(f"{FLASK_URL}/api/optimization/update", json=dashboard_data, timeout=5)
-        print(f"   Dashboard HTTP: {'✅' if resp.status_code == 200 else '❌'}")
+        print(f"   Dashboard HTTP: {'OK' if resp.status_code == 200 else 'FAIL'}")
     except Exception:
-        print(f"   Dashboard HTTP: ⚠️  Flask not reachable")
+        print(f"   Dashboard HTTP: [WARN] Flask not reachable")
 
 # ==================== FETCH DATA FROM DB ====================
 def fetch_and_display_data():
     """Fetch data from InfluxDB and display current conditions"""
     print("\n" + "="*70)
-    print("📊 FETCHING SENSOR DATA FROM INFLUXDB")
+    print("FETCHING SENSOR DATA FROM INFLUXDB")
     print("="*70)
     
     db_data = fetch_sensor_data_from_db(time_range_minutes=30)
     conditions = get_current_conditions()
     
-    print(f"\n📋 Current Conditions (source: {conditions.get('data_source', 'unknown')}):")
-    print(f"   🌡️  Temperature : {conditions['temperature']}°C")
-    print(f"   💧 Humidity    : {conditions['humidity']}%")
-    print(f"   💡 Lux (Light) : {conditions['lux']}")
-    print(f"   👤 Person      : {'Yes ✅' if conditions['person_detected'] else 'No ❌'}")
-    print(f"   📊 Data Points : {db_data.get('data_points', 0)}")
+    print(f"\nCurrent Conditions (source: {conditions.get('data_source', 'unknown')}):")
+    print(f"   Temperature : {conditions['temperature']}\u00b0C")
+    print(f"   Humidity    : {conditions['humidity']}%")
+    print(f"   Lux (Light) : {conditions['lux']}")
+    print(f"   Person      : {'Yes' if conditions['person_detected'] else 'No'}")
+    print(f"   Data Points : {db_data.get('data_points', 0)}")
     print("="*70)
     
     return conditions
@@ -303,17 +304,17 @@ def fetch_and_display_data():
 # ==================== MAIN (AUTO MODE) ====================
 def main():
     print("\n" + "="*70)
-    print("  🤖 SMART ROOM IoT - AI OPTIMIZATION SYSTEM")
-    print("  GA → AC Control (Genetic Algorithm)")
-    print("  PSO → Lamp Control (Particle Swarm)")
-    print("  ⚠️  AC dikontrol HANYA oleh GA, bukan combined")
+    print("  SMART ROOM IoT - AI OPTIMIZATION SYSTEM")
+    print("  GA -> AC Control (Genetic Algorithm)")
+    print("  PSO -> Lamp Control (Particle Swarm)")
+    print("  [NOTE] AC dikontrol HANYA oleh GA, bukan combined")
     print("  Mode: FULLY AUTOMATIC (no menu)")
     print(f"  Cycle interval: {AUTO_INTERVAL} seconds")
     print("  Press Ctrl+C to stop")
     print("="*70 + "\n")
     
     # Connect MQTT
-    print("📡 Connecting to MQTT broker...")
+    print("[NET] Connecting to MQTT broker...")
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
     mqtt_client.on_disconnect = on_disconnect
@@ -321,53 +322,53 @@ def main():
     try:
         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         mqtt_client.loop_start()
-        print("✅ MQTT client started")
+        print("[OK] MQTT client started")
     except Exception as e:
-        print(f"⚠️  MQTT error: {e} — continuing in offline mode")
+        print(f"[WARN] MQTT error: {e} -- continuing in offline mode")
     
     # Wait for initial sensor data from ESP32
-    print("\n⏳ Waiting for initial sensor data (5 seconds)...")
+    print("\n[WAIT] Waiting for initial sensor data (5 seconds)...")
     time.sleep(5)
     
     # ===== Run first cycle immediately with verbose output =====
     print("\n" + "="*70)
-    print("  🚀 INITIAL OPTIMIZATION (Cycle #1)")
+    print("  INITIAL OPTIMIZATION (Cycle #1)")
     print("="*70)
     
     success = run_optimization_cycle('both', verbose=True)
     if success:
         print(f"\n{'='*70}")
-        print(f"  ✅ INITIAL OPTIMIZATION COMPLETE")
-        print(f"  🧬 GA → AC:   {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
-        print(f"  🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
-        print(f"  ⚠️  AC setting diambil dari GA saja, PSO hanya untuk lampu")
+        print(f"  [OK] INITIAL OPTIMIZATION COMPLETE")
+        print(f"  GA -> AC:   {last_results['ga']['temp']}\u00b0C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f})")
+        print(f"  PSO -> Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f})")
+        print(f"  [NOTE] AC setting diambil dari GA saja, PSO hanya untuk lampu")
         print(f"{'='*70}")
     else:
-        print("⚠️  Initial optimization had issues, continuing anyway...")
+        print("[WARN] Initial optimization had issues, continuing anyway...")
     
     # ===== Continuous auto-optimization loop =====
     cycle = 1
-    print(f"\n🔄 AUTO MODE ACTIVE — Optimizing every {AUTO_INTERVAL}s (Ctrl+C to stop)\n")
+    print(f"\n[AUTO] AUTO MODE ACTIVE -- Optimizing every {AUTO_INTERVAL}s (Ctrl+C to stop)\n")
     
     while True:
         # Wait for next cycle
-        print(f"⏳ Next optimization in {AUTO_INTERVAL} seconds...")
+        print(f"[WAIT] Next optimization in {AUTO_INTERVAL} seconds...")
         time.sleep(AUTO_INTERVAL)
         
         cycle += 1
         print(f"\n{'='*70}")
-        print(f"  🔄 AUTO CYCLE #{cycle} — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  [AUTO] CYCLE #{cycle} -- {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*70}")
         
         success = run_optimization_cycle('both', verbose=False)
         
         if success:
-            print(f"\n📊 Cycle #{cycle} Results:")
-            print(f"   🧬 GA → AC:    {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f}) ← AC dikontrol ini")
-            print(f"   🐦 PSO → Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f}) ← Lamp dikontrol ini")
-            print(f"   ✅ Results sent to dashboard!")
+            print(f"\nCycle #{cycle} Results:")
+            print(f"   GA -> AC:    {last_results['ga']['temp']}°C, Fan {last_results['ga']['fan']} (fitness: {last_results['ga']['fitness']:.2f}) <- AC dikontrol ini")
+            print(f"   PSO -> Lamp: {last_results['pso']['brightness']}% (fitness: {last_results['pso']['fitness']:.2f}) <- Lamp dikontrol ini")
+            print(f"   [OK] Results sent to dashboard!")
         else:
-            print(f"   ⚠️  Cycle #{cycle} had issues, will retry next cycle")
+            print(f"   [WARN] Cycle #{cycle} had issues, will retry next cycle")
 
 # ==================== ENTRY POINT ====================
 if __name__ == '__main__':
@@ -375,14 +376,14 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         print(f"\n\n{'='*70}")
-        print(f"  👋 Stopping after {optimization_run_count} optimization cycles")
+        print(f"  Stopping after {optimization_run_count} optimization cycles")
         print(f"{'='*70}")
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
-        print("✅ MQTT disconnected. Goodbye!")
+        print("[OK] MQTT disconnected. Goodbye!")
         sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\n[ERROR] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         mqtt_client.loop_stop()
