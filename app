@@ -238,10 +238,10 @@ def load_yolo_model():
         
         # Try local model first, fallback to auto-download
         if os.path.exists(model_path):
-            print(f"🧠 Loading YOLOv8n from {model_path}...")
+            print(f"[YOLO] Loading YOLOv8n from {model_path}...")
             yolo_model = YOLO(model_path)
         else:
-            print("🧠 YOLOv8n not found locally, downloading...")
+            print("[YOLO] YOLOv8n not found locally, downloading...")
             os.makedirs(yolo_dir, exist_ok=True)
             yolo_model = YOLO('yolov8n.pt')
         
@@ -344,7 +344,7 @@ def handle_person_based_control(person_count):
         # Auto ON: person confirmed AND cooldown elapsed
         if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
+                print(f"[ON] Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -374,7 +374,7 @@ def handle_person_based_control(person_count):
             _auto_off_triggered = True  # Always set flag to block adaptive SET
             _auto_off_time = time.time()  # Start cooldown timer
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"🔴 No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
+                print(f"[OFF] No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
@@ -397,7 +397,7 @@ def get_camera():
     if camera is None:
         # Auto-detect camera: try index 0-4
         for idx in range(5):
-            print(f"📷 Trying camera index {idx}...")
+            print(f"[CAM] Trying camera index {idx}...")
             cam = cv2.VideoCapture(idx)
             if cam.isOpened():
                 # Verify it can actually capture a frame
@@ -507,7 +507,7 @@ def camera_detection_loop():
                 mqtt_data['camera']['count'] = person_count
                 mqtt_data['camera']['confidence'] = int(confidence * 100)
                 
-                # ★ Smart auto ON/OFF — only on YOLO frames
+                # * Smart auto ON/OFF -- only on YOLO frames
                 handle_person_based_control(person_count)
                 
                 # Save to InfluxDB every 5 seconds
@@ -579,7 +579,7 @@ def camera_detection_loop():
             if _no_person_start_time is not None:
                 elapsed = time.time() - _no_person_start_time
                 if int(elapsed) % 60 < 1:
-                    print(f"⏱️ No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
+                    print(f"[TIMER] No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
             
             # Encode frame and store for video_feed consumers
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -601,7 +601,7 @@ def camera_detection_loop():
             traceback.print_exc()
             time.sleep(retry_delay)
     
-    print("🛑 Camera detection background thread stopped")
+    print("[STOP] Camera detection background thread stopped")
 
 def generate_frames():
     """Stream latest frames to /video_feed — reads from background thread"""
@@ -635,7 +635,7 @@ mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW I
 
 def on_connect(client, userdata, flags, rc):
     print("\n" + "="*70)
-    print("  🔵 FLASK MQTT CONNECTION EVENT")
+    print("  [MQTT] FLASK MQTT CONNECTION EVENT")
     print("="*70)
     print(f"Return Code: {rc}")
     print(f"RC Meaning: {['Success', 'Protocol version', 'Client ID', 'Server unavailable', 'Bad credentials', 'Not authorized'][rc] if rc < 6 else 'Unknown'}")
@@ -676,7 +676,7 @@ def on_message(client, userdata, msg):
         
         # Debug: Print ALL incoming MQTT messages with timestamp
         print("\n" + "─"*70)
-        print(f"📨 [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
+        print(f"[MSG] [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
         print(f"Topic: {topic}")
         print(f"Payload Length: {len(msg.payload)} bytes")
         print(f"QoS: {msg.qos} | Retain: {msg.retain}")
@@ -712,7 +712,7 @@ def on_message(client, userdata, msg):
             payload = {'raw': payload_text}
         
         # DEBUG: Check which condition will match
-        print(f"\n🔍 Topic Routing Check:")
+        print(f"\n[ROUTE] Topic Routing Check:")
         print(f"   'ac/sensors' in topic: {'ac/sensors' in topic}")
         print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
         print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
@@ -748,7 +748,7 @@ def on_message(client, userdata, msg):
                 'hum3': payload.get('hum3', 0),
             })
             # Save sensor data to InfluxDB
-            print("   💾 Saving to InfluxDB...")
+            print("   [DB] Saving to InfluxDB...")
             save_sensor_data(
                 mqtt_data['ac']['temperature'],
                 mqtt_data['ac']['humidity'],
@@ -801,7 +801,7 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            print(f"   ⚡ Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
+            print(f"   [ENERGY] Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
             # Save to InfluxDB for historical data (30 day retention)
             write_to_influxdb('energy_monitor', {
                 'voltage': float(mqtt_data['energy']['voltage']),
@@ -920,7 +920,7 @@ def on_message(client, userdata, msg):
         
         elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
             print("\n" + "="*70)
-            print("🔴🔴🔴 IR SIGNAL RECEIVED FROM ESP32! 🔴🔴🔴")
+            print("[IR] IR SIGNAL RECEIVED FROM ESP32!")
             print("="*70)
             print(f"Topic received: {topic}")
             print(f"ir_learning_mode: {ir_learning_mode}")
@@ -1015,7 +1015,7 @@ def on_message(client, userdata, msg):
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
-                    print(f"💾 IR codes saved to file: {ir_file}")
+                    print(f"[SAVE] IR codes saved to file: {ir_file}")
                     
                     # Verify file write
                     with open(ir_file, 'r') as f:
@@ -1297,7 +1297,7 @@ def energy_phase_api():
         if new_phase not in ('before', 'after'):
             return jsonify({'error': 'Phase must be before or after'}), 400
         energy_phase = new_phase
-        print(f"⚡ Energy phase changed to: {energy_phase}")
+        print(f"[ENERGY] Energy phase changed to: {energy_phase}")
         socketio.emit('energy_phase', {'phase': energy_phase})
         return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
     return jsonify({'phase': energy_phase})
@@ -1609,7 +1609,7 @@ def learn_ir():
         
         # DEBUG LOGGING - SEE WHAT WE'RE SENDING!
         print("\n" + "="*60)
-        print("🔴 FLASK: PUBLISHING IR LEARN COMMAND")
+        print("[IR] FLASK: PUBLISHING IR LEARN COMMAND")
         print("="*60)
         print(f"Topic    : smartroom/ir/learn")
         print(f"Button   : {button_name}")
@@ -1653,7 +1653,7 @@ def send_ir():
         button_name = data.get('button', '')
         
         print("\n" + "="*70)
-        print("📤 IR SEND REQUEST RECEIVED")
+        print("[IR] IR SEND REQUEST RECEIVED")
         print("="*70)
         print(f"Button requested: {button_name}")
         print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
@@ -3489,6 +3489,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Room Temperature Trend</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
@@ -3501,6 +3502,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Humidity Trend</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
@@ -3513,6 +3515,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">AC Target Temperature</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -3533,6 +3536,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 24)">24h</button>
@@ -3545,6 +3549,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Average Brightness Level — 3 Lamps</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 24)">24h</button>
@@ -3669,6 +3674,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyPower', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
@@ -3684,6 +3690,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyVoltage', 'Voltage (V)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
@@ -3699,6 +3706,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
@@ -3711,6 +3719,9 @@ HTML_TEMPLATE = '''
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energy', 'Energy (kWh/day)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                    </div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
@@ -3758,6 +3769,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompare', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
@@ -3772,6 +3784,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompareKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
@@ -4069,6 +4082,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-dna" style="color: #10b981;"></i> GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             <i class="fas fa-play"></i> Run GA
                         </button>
@@ -4082,6 +4096,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-line" style="color: #f59e0b;"></i> PSO Fitness Convergence (Lamp Optimization)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
                             <i class="fas fa-play"></i> Run PSO
                         </button>
@@ -4095,6 +4110,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-balance-scale" style="color: #6366f1;"></i> GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
                             <i class="fas fa-play"></i> Run Both
                         </button>
@@ -4225,6 +4241,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header" style="margin-bottom: 10px;">
                         <div class="chart-title">Occupancy Trend</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
@@ -4417,23 +4434,23 @@ HTML_TEMPLATE = '''
 
             charts.energy = new Chart(document.getElementById('energyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             // Historical Energy Charts (PZEM-016 from InfluxDB)
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             // Before vs After Comparison Charts
@@ -4446,8 +4463,8 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
                     ]
                 }
             });
@@ -4461,15 +4478,15 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
                     ]
                 }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             // ML Optimization Charts
@@ -4974,6 +4991,43 @@ HTML_TEMPLATE = '''
                     showToast('Energy data exported (' + period + ')', 'success');
                 })
                 .catch(() => showToast('Failed to fetch energy history', 'error'));
+        }
+
+        // Generic chart data export (single dataset charts)
+        function exportChartData(chartName, valueLabel) {
+            const chart = charts[chartName];
+            if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
+                showToast('No data to export for ' + chartName, 'error');
+                return;
+            }
+            let csv = 'Time,' + valueLabel + '\n';
+            chart.data.labels.forEach((label, i) => {
+                const val = chart.data.datasets[0].data[i];
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
+            });
+            downloadCSV(chartName + '_data.csv', csv);
+            showToast(chartName + ' data exported', 'success');
+        }
+
+        // Export for multi-dataset comparison charts (Before/After, GA vs PSO)
+        function exportCompareChart(chartName, valueLabel) {
+            const chart = charts[chartName];
+            if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
+                showToast('No data to export for ' + chartName, 'error');
+                return;
+            }
+            const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
+            let csv = 'Time,' + dsNames.join(',') + '\n';
+            chart.data.labels.forEach((label, i) => {
+                let row = '"' + label + '"';
+                chart.data.datasets.forEach(ds => {
+                    const val = ds.data[i];
+                    row += ',' + (val !== null && val !== undefined ? val : '');
+                });
+                csv += row + '\n';
+            });
+            downloadCSV(chartName + '_compare.csv', csv);
+            showToast(chartName + ' comparison exported', 'success');
         }
 
         function getMLParams(algo) {
