@@ -4937,9 +4937,9 @@ HTML_TEMPLATE = '''
             let csv = 'Time,Level,Message\n';
             Array.from(container.children).forEach(entry => {
                 const text = entry.textContent || '';
-                const timeMatch = text.match(/\[(.+?)\]/);
+                const timeMatch = text.match(/\\[(.+?)\\]/);
                 const time = timeMatch ? timeMatch[1] : '';
-                const msg = text.replace(/\[.+?\]\s*/, '').replace(/"/g, '""');
+                const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
                 csv += `"${time}","${level}","${msg}"\n`;
             });
