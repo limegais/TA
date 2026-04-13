@@ -630,13 +630,14 @@ def release_camera():
         mqtt_data['camera']['status'] = 'inactive'
 
 # ==================== MQTT ====================
-mqtt_client = mqtt.Client()
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW IR codes
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, reason_code, properties=None):
     print("\n" + "="*70)
     print("  [MQTT] FLASK MQTT CONNECTION EVENT")
     print("="*70)
+    rc = reason_code.value if hasattr(reason_code, 'value') else int(reason_code)
     print(f"Return Code: {rc}")
     print(f"RC Meaning: {['Success', 'Protocol version', 'Client ID', 'Server unavailable', 'Bad credentials', 'Not authorized'][rc] if rc < 6 else 'Unknown'}")
     print(f"Flags: {flags}")
