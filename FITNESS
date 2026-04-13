@@ -168,14 +168,14 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
         current_data['person_detected'] = result_data['person_detected']
         current_data['data_source'] = 'influxdb'
         
-        print(f"✅ InfluxDB: {result_data['data_points']} data points fetched ({time_range_minutes}m range)")
+        print(f"[OK] InfluxDB: {result_data['data_points']} data points fetched ({time_range_minutes}m range)")
         print(f"   Temp: {result_data['temperature']}°C | Humidity: {result_data['humidity']}%")
         print(f"   Lux: {result_data['lux']} | Person: {result_data['person_detected']}")
         
         return result_data
         
     except Exception as e:
-        print(f"⚠️  InfluxDB query failed: {e}")
+        print(f"[WARN] InfluxDB query failed: {e}")
         print(f"   Using last known sensor data instead")
         current_data['data_source'] = 'mqtt_fallback'
         return {
