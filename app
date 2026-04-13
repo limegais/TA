@@ -4347,10 +4347,18 @@ HTML_TEMPLATE = '''
             console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
             return false;
         };
-        const socket = io();
+
+        var socket = null;
+        try {
+            socket = io();
+            console.log('[OK] Socket.IO connected');
+        } catch(e) {
+            console.warn('[WARN] Socket.IO not available:', e.message);
+            socket = { on: function(){}, emit: function(){} };
+        }
         
-        let charts = {};
-        let chartRanges = {
+        var charts = {};
+        var chartRanges = {
             temp: 1,
             hum: 1,
             acTemp: 1,
@@ -4359,10 +4367,10 @@ HTML_TEMPLATE = '''
             occupancy: 1
         };
 
-        let selectedFeedbackRating = 0;
-        const DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
+        var selectedFeedbackRating = 0;
+        var DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
 
-        let learnedCodes = {};
+        var learnedCodes = {};
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
@@ -4567,7 +4575,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== ENERGY HISTORY (PZEM-016 from InfluxDB) ====================
-        const energyChartMap = {
+        var energyChartMap = {
             'power': 'energyPower',
             'voltage': 'energyVoltage',
             'energy_kwh': 'energyKwh'
@@ -4611,7 +4619,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== BEFORE vs AFTER COMPARISON ====================
-        let currentEnergyPhase = 'before';
+        var currentEnergyPhase = 'before';
 
         function loadCurrentPhase() {
             fetch('/api/energy/phase')
@@ -4802,23 +4810,23 @@ HTML_TEMPLATE = '''
             }
 
             if (pageId === 'camera') {
-                checkCameraStatus();
+                try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
-                refreshMLData();
+                try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
             }
             if (pageId === 'occupancy-feedback') {
-                updateChartData('occupancy', chartRanges.occupancy || 1);
-                loadFeedbackHistory();
+                try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
+                try { loadFeedbackHistory(); } catch(e) {}
             }
             if (pageId === 'energy') {
-                loadAllEnergyCharts();
+                try { loadAllEnergyCharts(); } catch(e) { console.error('[NAV] energy init error:', e); }
             }
         }
 
         // ==================== ML OPTIMIZATION ====================
-        let mlHistory = [];
-        let mlRunCount = 0;
+        var mlHistory = [];
+        var mlRunCount = 0;
 
         function refreshMLData() {
             fetch('/api/ml/status')
@@ -5147,7 +5155,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== CAMERA ====================
-        let cameraEnabled = true;
+        var cameraEnabled = true;
 
         function toggleCamera() {
             fetch('/api/camera/toggle', { method: 'POST' })
@@ -5271,7 +5279,7 @@ HTML_TEMPLATE = '''
             });
         }
 
-        let selectedACMode = 'COOL';
+        var selectedACMode = 'COOL';
 
         function selectACSetMode(mode, btn) {
             selectedACMode = mode;
@@ -5470,8 +5478,8 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== IR REMOTE ====================
-        let currentLearningButton = null;
-        let learningCheckInterval = null;
+        var currentLearningButton = null;
+        var learningCheckInterval = null;
         
         function learnIRCode(buttonName, deviceName = 'AC') {
             // Clear any previous learning interval
@@ -5832,9 +5840,9 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== DETECTION ALERT ====================
-        let lastDetectionTime = 0;
-        const DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
-        let detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
+        var lastDetectionTime = 0;
+        var DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
+        var detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
 
         // Initialize sound toggle button visual on load
         function updateSoundToggleUI() {
@@ -5955,7 +5963,7 @@ HTML_TEMPLATE = '''
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
 
-        let energyBubbleTimer = null;
+        var energyBubbleTimer = null;
         function showEnergyBubble(power, voltage, current) {
             const bubble = document.getElementById('energy-bubble');
             const text = document.getElementById('energy-bubble-text');
@@ -6408,7 +6416,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== ALERT SYSTEM ====================
-        let alertQueue = [];
+        var alertQueue = [];
         socket.on('alert', function(alert) {
             showAlertBanner(alert);
         });
@@ -6866,6 +6874,65 @@ HTML_TEMPLATE = '''
             
             console.log('[OK] Dashboard Ready!');
         };
+    </script>
+
+    <!-- Failsafe Navigation - independent script block -->
+    <script>
+        (function() {
+            if (typeof window.showPage === 'function') {
+                console.log('[OK] showPage already defined');
+                return;
+            }
+            console.warn('[FAILSAFE] Main script failed - activating failsafe navigation');
+            window.showPage = function(pageId) {
+                var pages = document.querySelectorAll('.page');
+                var navs = document.querySelectorAll('.nav-item');
+                for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
+                for (var i = 0; i < navs.length; i++) navs[i].classList.remove('active');
+                var el = document.getElementById(pageId);
+                if (el) el.classList.add('active');
+                for (var i = 0; i < navs.length; i++) {
+                    var oc = navs[i].getAttribute('onclick');
+                    if (oc && oc.indexOf(pageId) !== -1) navs[i].classList.add('active');
+                }
+                localStorage.setItem('currentPage', pageId);
+            };
+            window.toggleSidebar = function() {
+                var sb = document.getElementById('sidebar');
+                var ov = document.getElementById('sidebar-overlay');
+                if (sb) sb.classList.toggle('open');
+                if (ov) ov.classList.toggle('active');
+            };
+            window.toggleTheme = function() {
+                var cur = document.documentElement.getAttribute('data-theme');
+                var nw = cur === 'dark' ? 'light' : 'dark';
+                document.documentElement.setAttribute('data-theme', nw);
+                localStorage.setItem('theme', nw);
+            };
+            // Start basic data polling
+            function basicUpdate() {
+                try {
+                    var x = new XMLHttpRequest();
+                    x.open('GET', '/api/data');
+                    x.onload = function() {
+                        if (x.status === 200) {
+                            var d = JSON.parse(x.responseText);
+                            var t = document.getElementById('room-temp');
+                            var h = document.getElementById('room-hum');
+                            if (t && d.ac) t.textContent = (d.ac.temperature || 0) + String.fromCharCode(176) + 'C';
+                            if (h && d.ac) h.textContent = (d.ac.humidity || 0) + '%';
+                        }
+                    };
+                    x.send();
+                } catch(e) {}
+            }
+            setInterval(basicUpdate, 2000);
+            // Restore saved page
+            var saved = localStorage.getItem('currentPage');
+            if (saved && document.getElementById(saved)) {
+                window.showPage(saved);
+            }
+        })();
     </script>
 </body>
 </html>
