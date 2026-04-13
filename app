@@ -98,6 +98,16 @@ ir_learning_mode = False
 ir_learning_button = ""
 ir_learning_device = ""  # Track device name
 
+# MQTT connection status tracking
+mqtt_status = {
+    'connected': False,
+    'last_connect_time': None,
+    'last_message_time': None,
+    'message_count': 0,
+    'error': None,
+    'broker': 'localhost:1883'
+}
+
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
@@ -634,15 +644,11 @@ mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW IR codes
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
+    global mqtt_status
     print("\n" + "="*70)
     print("  [MQTT] FLASK MQTT CONNECTION EVENT")
     print("="*70)
-    rc = reason_code
-    print(f"Return Code: {rc}")
-    print(f"Flags: {flags}")
-    print("="*70)
     
-    # For paho-mqtt v2: reason_code is a ReasonCode object
     is_success = False
     if hasattr(reason_code, 'is_failure'):
         is_success = not reason_code.is_failure
@@ -650,33 +656,29 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         is_success = (int(reason_code) == 0)
     
     if is_success:
-        print("[OK] MQTT CONNECTED SUCCESSFULLY!\n")
+        mqtt_status['connected'] = True
+        mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
+        mqtt_status['error'] = None
+        print("[OK] MQTT CONNECTED SUCCESSFULLY!")
         
-        # Subscribe to all smartroom topics
-        result1, mid1 = client.subscribe("smartroom/#")
-        print(f"[SUB] Subscribe smartroom/# - Result: {result1} (MID: {mid1})")
-        
-        # Also subscribe to alternative IR topics
-        result2, mid2 = client.subscribe("ir/#")
-        print(f"[SUB] Subscribe ir/# - Result: {result2} (MID: {mid2})")
-        
-        result3, mid3 = client.subscribe("IR/#")
-        print(f"[SUB] Subscribe IR/# - Result: {result3} (MID: {mid3})")
-        
-        result4, mid4 = client.subscribe("+/ir/#")
-        print(f"[SUB] Subscribe +/ir/# - Result: {result4} (MID: {mid4})")
-        
-        print("\n[OK] All subscriptions sent!")
-        print("Waiting for messages from ESP32...\n")
+        client.subscribe("smartroom/#")
+        client.subscribe("ir/#")
+        client.subscribe("IR/#")
+        client.subscribe("+/ir/#")
+        print("[OK] Subscribed to: smartroom/#, ir/#, IR/#, +/ir/#")
         print("="*70 + "\n")
         
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {reason_code}', 'level': 'success'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected!', 'level': 'success'})
     else:
+        mqtt_status['connected'] = False
+        mqtt_status['error'] = f'Connection failed: {reason_code}'
         print(f"[ERROR] MQTT CONNECTION FAILED! RC={reason_code}")
         print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
-    global ir_learning_mode, ir_learning_button, ir_learning_device
+    global ir_learning_mode, ir_learning_button, ir_learning_device, mqtt_status
+    mqtt_status['last_message_time'] = datetime.now().strftime('%H:%M:%S')
+    mqtt_status['message_count'] = mqtt_status.get('message_count', 0) + 1
     
     try:
         topic = msg.topic
@@ -1087,53 +1089,48 @@ def on_message(client, userdata, msg):
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
-    print("\n" + "="*70)
-    print("  [WARN] FLASK MQTT DISCONNECTION EVENT")
-    print("="*70)
-    print(f"Disconnect Reason Code: {reason_code}")
-    is_clean = False
-    if hasattr(reason_code, 'is_failure'):
-        is_clean = not reason_code.is_failure
-    else:
-        is_clean = (int(reason_code) == 0)
-    if not is_clean:
-        print("[ERROR] Unexpected disconnection!")
-        print("Will attempt to reconnect...")
-    else:
-        print("[OK] Clean disconnection")
-    print("="*70 + "\n")
+    global mqtt_status
+    mqtt_status['connected'] = False
+    print(f"[WARN] MQTT Disconnected (RC: {reason_code})")
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 mqtt_client.on_disconnect = on_disconnect
 
-print("\n" + "="*70)
-print("  [INIT] INITIALIZING FLASK MQTT CLIENT")
-print("="*70)
-print(f"Broker: {MQTT_BROKER}:{MQTT_PORT}")
-print(f"Attempting connection...")
-print("="*70 + "\n")
+# Enable auto-reconnect with 5 second delay
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-try:
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    mqtt_client.loop_start()
-    
-    # Wait a bit for connection to establish
-    import time
-    time.sleep(2)
-    
-    if mqtt_client.is_connected():
-        print("[OK] MQTT Client connected and running!")
-        print("[OK] Loop thread started\n")
-    else:
-        print("[WARN] MQTT Client started but not yet connected")
-        print("Waiting for on_connect callback...\n")
-        
-except Exception as e:
-    print(f"[ERROR] MQTT Connection Error: {e}")
-    import traceback
-    traceback.print_exc()
+print(f"[INIT] MQTT Client connecting to {MQTT_BROKER}:{MQTT_PORT}...")
+
+def start_mqtt():
+    """Start MQTT connection in background thread with retry"""
+    global mqtt_status
+    mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
+    retries = 0
+    while retries < 5:
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+            print(f"[OK] MQTT loop started (attempt {retries + 1})")
+            time.sleep(2)
+            if mqtt_client.is_connected():
+                print("[OK] MQTT Connected!")
+            else:
+                print("[WARN] MQTT loop started, waiting for connection...")
+            return
+        except Exception as e:
+            retries += 1
+            mqtt_status['error'] = str(e)
+            print(f"[WARN] MQTT connect attempt {retries}/5 failed: {e}")
+            if retries < 5:
+                time.sleep(3)
+    print("[ERROR] MQTT: All connection attempts failed. Dashboard will run without MQTT.")
+    print("[ERROR] Make sure mosquitto/MQTT broker is running: sudo systemctl start mosquitto")
+
+# Start MQTT in a background thread so it doesn't block app startup
+mqtt_thread = threading.Thread(target=start_mqtt, daemon=True)
+mqtt_thread.start()
 
 # ==================== INFLUXDB ====================
 def get_influx_data(measurement, field, hours=1):
@@ -1260,6 +1257,26 @@ def toggle_camera():
 @app.route('/api/data')
 def get_data():
     return jsonify(mqtt_data)
+
+@app.route('/api/mqtt/status')
+def get_mqtt_status():
+    return jsonify({
+        'connected': mqtt_client.is_connected(),
+        'broker': f'{MQTT_BROKER}:{MQTT_PORT}',
+        'last_connect': mqtt_status.get('last_connect_time'),
+        'last_message': mqtt_status.get('last_message_time'),
+        'message_count': mqtt_status.get('message_count', 0),
+        'error': mqtt_status.get('error'),
+        'subscriptions': ['smartroom/#', 'ir/#', 'IR/#', '+/ir/#']
+    })
+
+@app.route('/api/mqtt/reconnect', methods=['POST'])
+def mqtt_reconnect():
+    try:
+        mqtt_client.reconnect()
+        return jsonify({'status': 'success', 'message': 'Reconnect initiated'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/occupancy/feedback', methods=['POST'])
 def occupancy_feedback_submit():
@@ -3072,6 +3089,11 @@ HTML_TEMPLATE = '''
                 <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
                 <p>Air Conditioning monitoring & status</p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
+                    <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
+                        <span class="device-dot offline" id="mqtt-dot"></span>
+                        <span>MQTT</span>
+                        <span class="device-time" id="mqtt-status-text">Checking...</span>
+                    </div>
                     <div class="device-status-item" id="ds-esp32-ac">
                         <span class="device-dot offline"></span>
                         <span>ESP32-AC</span>
@@ -6394,7 +6416,43 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== DEVICE STATUS ====================
+        function checkMqttStatus() {
+            fetch('/api/mqtt/status')
+                .then(r => r.json())
+                .then(data => {
+                    var dot = document.getElementById('mqtt-dot');
+                    var txt = document.getElementById('mqtt-status-text');
+                    if (dot && txt) {
+                        if (data.connected) {
+                            dot.className = 'device-dot online';
+                            txt.textContent = 'Connected' + (data.message_count > 0 ? ' (' + data.message_count + ' msgs)' : '');
+                        } else {
+                            dot.className = 'device-dot offline';
+                            txt.textContent = data.error ? data.error.substring(0, 30) : 'Disconnected';
+                        }
+                    }
+                    // Show details if clicked
+                    if (event && event.type === 'click') {
+                        var info = 'MQTT Broker: ' + data.broker + '\\n';
+                        info += 'Connected: ' + data.connected + '\\n';
+                        info += 'Messages received: ' + data.message_count + '\\n';
+                        info += 'Last connect: ' + (data.last_connect || 'Never') + '\\n';
+                        info += 'Last message: ' + (data.last_message || 'Never') + '\\n';
+                        if (data.error) info += 'Error: ' + data.error + '\\n';
+                        info += '\\nSubscriptions: ' + data.subscriptions.join(', ');
+                        alert(info);
+                    }
+                })
+                .catch(function() {
+                    var dot = document.getElementById('mqtt-dot');
+                    var txt = document.getElementById('mqtt-status-text');
+                    if (dot) dot.className = 'device-dot offline';
+                    if (txt) txt.textContent = 'API Error';
+                });
+        }
+
         function updateDeviceStatus() {
+            checkMqttStatus();
             fetch('/api/device/status')
                 .then(r => r.json())
                 .then(data => {
