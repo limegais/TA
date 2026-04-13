@@ -27,7 +27,7 @@ FLASK_URL = "http://localhost:5000"
 # Auto optimization interval (seconds between cycles)
 AUTO_INTERVAL = 600
 
-mqtt_client = mqtt.Client()
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 # Store last optimization results for dashboard
 last_results = {
@@ -62,8 +62,9 @@ optimization_lock = threading.Lock()
 optimization_run_count = 0
 
 # ==================== MQTT HANDLERS ====================
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    is_success = not reason_code.is_failure if hasattr(reason_code, 'is_failure') else (int(reason_code) == 0)
+    if is_success:
         print("[OK] MQTT Connected!")
         client.subscribe("smartroom/ac/sensors")
         client.subscribe("smartroom/lamp/sensors")
@@ -71,7 +72,7 @@ def on_connect(client, userdata, flags, rc):
         client.subscribe("smartroom/ml/command")
         print("[OK] Subscribed to sensor topics + ML commands")
     else:
-        print(f"[ERROR] MQTT Connection failed (RC: {rc})")
+        print(f"[ERROR] MQTT Connection failed (RC: {reason_code})")
 
 def on_message(client, userdata, msg):
     try:
