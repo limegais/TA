@@ -108,6 +108,9 @@ mqtt_status = {
     'broker': 'localhost:1883'
 }
 
+# Runtime energy history fallback (used when Influx query returns no points)
+energy_runtime_history = deque(maxlen=5000)
+
 # Debug counter for /api/data response snapshots
 api_data_debug_counter = 0
 
@@ -824,6 +827,22 @@ def on_message(client, userdata, msg):
                 'frequency': float(mqtt_data['energy']['frequency']),
                 'power_factor': float(mqtt_data['energy']['pf'])
             }, tags={'device': 'pzem016', 'phase': energy_phase})
+
+            # Keep runtime ring-buffer so charts still work even if Influx has no data yet.
+            try:
+                energy_runtime_history.append({
+                    'ts': datetime.now(),
+                    'phase': energy_phase,
+                    'voltage': float(mqtt_data['energy']['voltage']),
+                    'current': float(mqtt_data['energy']['current']),
+                    'power': float(mqtt_data['energy']['power']),
+                    'energy_kwh': float(mqtt_data['energy']['energy']),
+                    'frequency': float(mqtt_data['energy']['frequency']),
+                    'power_factor': float(mqtt_data['energy']['pf'])
+                })
+            except Exception:
+                pass
+
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
             # Track device status
             device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
@@ -1477,6 +1496,28 @@ def energy_compare():
                         'value': round(float(record.get_value()), 2)
                     })
             results[phase] = data_points
+
+        # Fallback to runtime buffer if Influx doesn't have comparison data yet.
+        if not results['before'] and not results['after']:
+            lookback = {
+                '30m': timedelta(minutes=30),
+                '24h': timedelta(hours=24),
+                '7d': timedelta(days=7),
+                '30d': timedelta(days=30),
+            }[period]
+            cutoff = datetime.now() - lookback
+            runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+            if runtime:
+                step = max(1, len(runtime) // 120)
+                sampled = runtime[::step]
+                for phase in ['before', 'after']:
+                    results[phase] = [
+                        {
+                            'time': r['ts'].strftime(time_format),
+                            'value': round(float(r.get(field, 0)), 2)
+                        }
+                        for r in sampled if r.get('phase') == phase
+                    ]
         
         # Calculate averages for summary
         before_vals = [d['value'] for d in results['before']] if results['before'] else []
@@ -1506,7 +1547,7 @@ def energy_compare():
 def energy_history():
     """Get PZEM energy history from InfluxDB — supports 1h to 30 days"""
     period = request.args.get('period', '24h')  # 1h, 6h, 24h, 7d, 30d
-    field = request.args.get('field', 'power')  # voltage, current, power, energy_kwh, frequency, power_factor
+    field = request.args.get('field')  # voltage, current, power, energy_kwh, frequency, power_factor
     
     # Map period to InfluxDB range and aggregation window
     period_map = {
@@ -1521,7 +1562,7 @@ def energy_history():
         return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
     
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
-    if field not in allowed_fields:
+    if field and field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
     
     p = period_map[period]
@@ -1533,31 +1574,87 @@ def energy_history():
         # Use different time format based on period
         time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
         
-        query = f'''
-        from(bucket: "{INFLUX_BUCKET}")
-          |> range(start: {p['range']})
-          |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
-          |> filter(fn: (r) => r["_field"] == "{field}")
-          |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
-          |> yield(name: "mean")
-        '''
-        
-        result = query_api.query(query=query)
-        
-        data_points = []
-        for table in result:
-            for record in table.records:
-                data_points.append({
-                    'time': record.get_time().strftime(time_format),
-                    'value': round(float(record.get_value()), 2)
-                })
-        
+        def query_field_points(field_name):
+            query = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {p['range']})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["_field"] == "{field_name}")
+              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> yield(name: "mean")
+            '''
+            result = query_api.query(query=query)
+            points = []
+            for table in result:
+                for record in table.records:
+                    points.append({
+                        'time': record.get_time().strftime(time_format),
+                        'value': round(float(record.get_value()), 2)
+                    })
+            return points
+
+        # Support both modes:
+        # 1) /api/energy/history?field=power&period=1h -> {data:[...]}
+        # 2) /api/energy/history?period=24h -> {power:[...], voltage:[...], energy_kwh:[...]}
+        if field:
+            data_points = query_field_points(field)
+            if not data_points:
+                now = datetime.now()
+                lookback = {
+                    '1h': timedelta(hours=1),
+                    '6h': timedelta(hours=6),
+                    '24h': timedelta(hours=24),
+                    '7d': timedelta(days=7),
+                    '30d': timedelta(days=30),
+                }[period]
+                cutoff = now - lookback
+                runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+                if runtime:
+                    step = max(1, len(runtime) // 120)
+                    data_points = [
+                        {'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)}
+                        for r in runtime[::step]
+                    ]
+
+            client.close()
+            return jsonify({'period': period, 'field': field, 'data': data_points})
+
+        power_points = query_field_points('power')
+        voltage_points = query_field_points('voltage')
+        kwh_points = query_field_points('energy_kwh')
+
+        if not power_points and not voltage_points and not kwh_points:
+            now = datetime.now()
+            lookback = {
+                '1h': timedelta(hours=1),
+                '6h': timedelta(hours=6),
+                '24h': timedelta(hours=24),
+                '7d': timedelta(days=7),
+                '30d': timedelta(days=30),
+            }[period]
+            cutoff = now - lookback
+            runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+            if runtime:
+                step = max(1, len(runtime) // 120)
+                sampled = runtime[::step]
+                power_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sampled]
+                voltage_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sampled]
+                kwh_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
+
         client.close()
-        return jsonify({'period': period, 'field': field, 'data': data_points})
+        return jsonify({
+            'period': period,
+            'power': power_points,
+            'voltage': voltage_points,
+            'energy_kwh': kwh_points
+        })
         
     except Exception as e:
         print(f"[ERROR] Energy history query error: {e}")
-        return jsonify({'error': str(e), 'data': []}), 500
+        # Keep response shape compatible with frontend callers.
+        if field:
+            return jsonify({'error': str(e), 'period': period, 'field': field, 'data': []}), 500
+        return jsonify({'error': str(e), 'period': period, 'power': [], 'voltage': [], 'energy_kwh': []}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
