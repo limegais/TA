@@ -4621,6 +4621,88 @@ HTML_TEMPLATE = '''
 
         var learnedCodes = {};
 
+        function formatChartValue(v, unit) {
+            const n = parseFloat(v || 0);
+            if (!Number.isFinite(n)) return '--';
+            return (unit ? n.toFixed(2) + ' ' + unit : n.toFixed(2));
+        }
+
+        function styleLineChart(chart, unit, showLegend) {
+            if (!chart) return;
+            chart.options = chart.options || {};
+            chart.options.responsive = true;
+            chart.options.maintainAspectRatio = true;
+            chart.options.interaction = { mode: 'index', intersect: false };
+            chart.options.plugins = chart.options.plugins || {};
+            chart.options.plugins.legend = {
+                display: !!showLegend,
+                labels: {
+                    color: '#94a3b8',
+                    usePointStyle: true,
+                    pointStyle: 'circle',
+                    padding: 14,
+                    font: { size: 12, weight: '600' }
+                }
+            };
+            chart.options.plugins.tooltip = {
+                enabled: true,
+                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                titleColor: '#f8fafc',
+                bodyColor: '#e2e8f0',
+                borderColor: 'rgba(148,163,184,0.35)',
+                borderWidth: 1,
+                displayColors: true,
+                callbacks: {
+                    label: function(ctx) {
+                        const label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                        return label + ': ' + formatChartValue(ctx.parsed.y, unit);
+                    }
+                }
+            };
+            chart.options.scales = chart.options.scales || {};
+            chart.options.scales.x = chart.options.scales.x || {};
+            chart.options.scales.y = chart.options.scales.y || {};
+            chart.options.scales.x.grid = { color: 'rgba(148,163,184,0.12)' };
+            chart.options.scales.x.ticks = { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 };
+            chart.options.scales.y.grid = { color: 'rgba(148,163,184,0.14)' };
+            chart.options.scales.y.ticks = {
+                color: '#94a3b8',
+                callback: function(value) {
+                    return unit ? (Number(value).toFixed(1) + ' ' + unit) : Number(value).toFixed(1);
+                }
+            };
+
+            if (chart.data && Array.isArray(chart.data.datasets)) {
+                chart.data.datasets.forEach(function(ds) {
+                    ds.borderWidth = 2.5;
+                    ds.tension = 0.35;
+                    ds.pointRadius = 3.8;
+                    ds.pointHoverRadius = 6.5;
+                    ds.pointBorderWidth = 1.6;
+                    ds.pointBorderColor = '#ffffff';
+                });
+            }
+        }
+
+        function applyChartGradients() {
+            const setGradient = function(chart, datasetIndex, top, bottom) {
+                if (!chart || !chart.ctx || !chart.chartArea || !chart.data || !chart.data.datasets || !chart.data.datasets[datasetIndex]) return;
+                const g = chart.ctx.createLinearGradient(0, chart.chartArea.top, 0, chart.chartArea.bottom);
+                g.addColorStop(0, top);
+                g.addColorStop(1, bottom);
+                chart.data.datasets[datasetIndex].backgroundColor = g;
+            };
+
+            setGradient(charts.energyPower, 0, 'rgba(239,68,68,0.34)', 'rgba(239,68,68,0.03)');
+            setGradient(charts.energyVoltage, 0, 'rgba(59,130,246,0.34)', 'rgba(59,130,246,0.03)');
+            setGradient(charts.energyKwh, 0, 'rgba(16,185,129,0.34)', 'rgba(16,185,129,0.03)');
+            setGradient(charts.energy, 0, 'rgba(168,85,247,0.34)', 'rgba(168,85,247,0.03)');
+            setGradient(charts.energyCompare, 0, 'rgba(245,158,11,0.26)', 'rgba(245,158,11,0.02)');
+            setGradient(charts.energyCompare, 1, 'rgba(16,185,129,0.26)', 'rgba(16,185,129,0.02)');
+            setGradient(charts.energyCompareKwh, 0, 'rgba(245,158,11,0.26)', 'rgba(245,158,11,0.02)');
+            setGradient(charts.energyCompareKwh, 1, 'rgba(16,185,129,0.26)', 'rgba(16,185,129,0.02)');
+        }
+
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
             const settings = {
@@ -4787,6 +4869,41 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
+
+            // Make energy charts visually richer and more informative.
+            styleLineChart(charts.energyPower, 'W', false);
+            styleLineChart(charts.energyVoltage, 'V', false);
+            styleLineChart(charts.energyKwh, 'kWh', false);
+            styleLineChart(charts.energy, 'kWh/day', false);
+            styleLineChart(charts.energyCompare, 'W', true);
+            styleLineChart(charts.energyCompareKwh, 'kWh', true);
+
+            // Keep comparison lines visually distinct.
+            if (charts.energyCompare && charts.energyCompare.data && charts.energyCompare.data.datasets) {
+                charts.energyCompare.data.datasets[0].borderDash = [6, 4];
+                charts.energyCompare.data.datasets[1].borderDash = [];
+            }
+            if (charts.energyCompareKwh && charts.energyCompareKwh.data && charts.energyCompareKwh.data.datasets) {
+                charts.energyCompareKwh.data.datasets[0].borderDash = [6, 4];
+                charts.energyCompareKwh.data.datasets[1].borderDash = [];
+            }
+
+            // Apply gradients after chart area is computed.
+            setTimeout(function() {
+                try {
+                    applyChartGradients();
+                    [
+                        charts.energyPower,
+                        charts.energyVoltage,
+                        charts.energyKwh,
+                        charts.energy,
+                        charts.energyCompare,
+                        charts.energyCompareKwh
+                    ].forEach(function(c) { if (c) c.update('none'); });
+                } catch (e) {
+                    console.error('[CHART] gradient apply error:', e);
+                }
+            }, 60);
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -4996,6 +5113,7 @@ HTML_TEMPLATE = '''
                         chart.data.labels = data.map(d => d.time);
                         const values = data.map(d => parseFloat(d.value || 0));
                         chart.data.datasets[0].data = values;
+                        try { applyChartGradients(); } catch(e) {}
                         chart.update();
                         updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
                     } else {
@@ -5225,6 +5343,7 @@ HTML_TEMPLATE = '''
                 // Chart.js often needs a resize pass when canvas was initialized in a hidden page.
                 setTimeout(function() {
                     try {
+                        applyChartGradients();
                         Object.keys(charts).forEach(function(k) {
                             if (charts[k] && typeof charts[k].resize === 'function') {
                                 charts[k].resize();
