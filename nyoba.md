@@ -7202,15 +7202,54 @@ HTML_TEMPLATE = '''
                     x.onload = function() {
                         if (x.status === 200) {
                             var d = JSON.parse(x.responseText);
+                            var ac = d && d.ac ? d.ac : {};
+                            var energy = d && d.energy ? d.energy : {};
+                            var n = function(v, fallback) {
+                                var num = parseFloat(v);
+                                return isNaN(num) ? (fallback || 0) : num;
+                            };
+                            var setText = function(id, val) {
+                                var el = document.getElementById(id);
+                                if (el) el.textContent = val;
+                            };
+
+                            // Dashboard AC cards
+                            setText('dash-temp', n(ac.temperature, 0).toFixed(1));
+                            setText('dash-hum', n(ac.humidity, 0).toFixed(1));
+                            setText('dash-temp1', n(ac.temp1, 0).toFixed(1));
+                            setText('dash-temp2', n(ac.temp2, 0).toFixed(1));
+                            setText('dash-temp3', n(ac.temp3, 0).toFixed(1));
+                            setText('dash-hum1', n(ac.hum1, 0).toFixed(1));
+                            setText('dash-hum2', n(ac.hum2, 0).toFixed(1));
+                            setText('dash-hum3', n(ac.hum3, 0).toFixed(1));
+                            setText('dash-heat-index', n(ac.heat_index, 0).toFixed(1));
+                            setText('dash-ac-state', ac.ac_state || 'OFF');
+                            setText('dash-ac-temp', Math.round(n(ac.ac_temp, 24)));
+                            setText('dash-ac-fan', Math.round(n(ac.fan_speed, 1)));
+                            setText('dash-ac-mode', ac.ac_fan_mode || 'COOL');
+                            setText('dash-rssi', Math.round(n(ac.rssi, 0)));
+                            setText('dash-ac-room-temp', n(ac.temperature, 0).toFixed(1));
+                            setText('dash-ac-room-hum', n(ac.humidity, 0).toFixed(1));
+
+                            // Energy cards
+                            setText('energy-voltage', n(energy.voltage, 0).toFixed(1));
+                            setText('energy-current', n(energy.current, 0).toFixed(2));
+                            setText('energy-power', n(energy.power, 0).toFixed(1));
+                            setText('energy-kwh', n(energy.energy, 0).toFixed(3));
+                            setText('energy-freq', n(energy.frequency, 0).toFixed(1));
+                            setText('energy-pf', n(energy.pf, 0).toFixed(2));
+
+                            // Legacy fallback ids (if any old card still exists)
                             var t = document.getElementById('room-temp');
                             var h = document.getElementById('room-hum');
-                            if (t && d.ac) t.textContent = (d.ac.temperature || 0) + String.fromCharCode(176) + 'C';
-                            if (h && d.ac) h.textContent = (d.ac.humidity || 0) + '%';
+                            if (t) t.textContent = n(ac.temperature, 0).toFixed(1) + String.fromCharCode(176) + 'C';
+                            if (h) h.textContent = n(ac.humidity, 0).toFixed(1) + '%';
                         }
                     };
                     x.send();
                 } catch(e) {}
             }
+            basicUpdate();
             setInterval(basicUpdate, 2000);
             // Restore saved page
             var saved = localStorage.getItem('currentPage');
