@@ -2185,6 +2185,7 @@ HTML_TEMPLATE = '''
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -4669,7 +4670,7 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
-    <script>
+    <script type="text/babel" data-presets="env">
         window.onerror = function(msg, url, line, col, error) {
             console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
             return false;
