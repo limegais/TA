@@ -5500,7 +5500,7 @@ HTML_TEMPLATE = '''
             const chart = charts[chartName];
             if (!chart) return;
 
-            chart.data.labels = history.map((_, i) => algo === 'GA' ? `Gen ${i+1}` : `Iter ${i+1}`);
+            chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
             chart.data.datasets[0].data = history;
             chart.update();
         }
@@ -5553,16 +5553,16 @@ HTML_TEMPLATE = '''
 
             tbody.innerHTML = mlHistory.map(e => {
                 const getBadge = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
-                return `<tr>
-                    <td>${e.run}</td>
-                    <td>${e.time}</td>
-                    <td><span class="ml-badge ${getBadge(e.ga_fitness)}">${e.ga_fitness.toFixed(2)}</span></td>
-                    <td>${e.ga_temp}\u00b0C</td>
-                    <td>${e.ga_fan}</td>
-                    <td><span class="ml-badge ${getBadge(e.pso_fitness)}">${e.pso_fitness.toFixed(2)}</span></td>
-                    <td>${e.pso_brightness}%</td>
-                    <td><span class="ml-badge ${getBadge(e.combined)}">${e.combined.toFixed(2)}</span></td>
-                </tr>`;
+                return '<tr>' +
+                    '<td>' + e.run + '</td>' +
+                    '<td>' + e.time + '</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
+                    '<td>' + e.ga_temp + '\u00b0C</td>' +
+                    '<td>' + e.ga_fan + '</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
+                    '<td>' + e.pso_brightness + '%</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
+                '</tr>';
             }).join('');
         }
 
@@ -5588,7 +5588,7 @@ HTML_TEMPLATE = '''
             }
             let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
             mlHistory.forEach(e => {
-                csv += `${e.run},"${e.time}",${e.ga_fitness.toFixed(2)},${e.ga_temp},${e.ga_fan},${e.pso_fitness.toFixed(2)},${e.pso_brightness},${e.combined.toFixed(2)}\n`;
+                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
@@ -5607,7 +5607,7 @@ HTML_TEMPLATE = '''
                 const time = timeMatch ? timeMatch[1] : '';
                 const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
-                csv += `"${time}","${level}","${msg}"\n`;
+                csv += '"' + time + '","' + level + '","' + msg + '"\n';
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
@@ -5625,7 +5625,7 @@ HTML_TEMPLATE = '''
                     let csv = 'Time,Rating,Occupancy Count,Comment\n';
                     rows.forEach(item => {
                         const comment = (item.comment || '').replace(/"/g, '""');
-                        csv += `"${item.time}",${item.rating},${item.occupancy_count},"${comment}"\n`;
+                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\n';
                     });
                     downloadCSV('occupancy_feedback.csv', csv);
                     showToast('Feedback exported', 'success');
@@ -5651,7 +5651,7 @@ HTML_TEMPLATE = '''
                         const pw = powers[i] ? powers[i].value : '';
                         const vl = voltages[i] ? voltages[i].value : '';
                         const en = energies[i] ? energies[i].value : '';
-                        csv += `"${t}",${pw},${vl},${en}\n`;
+                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\n';
                     });
                     downloadCSV('energy_history_' + period + '.csv', csv);
                     showToast('Energy data exported (' + period + ')', 'success');
@@ -6291,7 +6291,7 @@ HTML_TEMPLATE = '''
                     });
                     
                     if (codeCount > 0) {
-                        showToast(`IR codes loaded: ${codeCount} button(s)`, 'success');
+                        showToast('IR codes loaded: ' + codeCount + ' button(s)', 'success');
                     }
                 })
                 .catch(e => {
@@ -6350,7 +6350,7 @@ HTML_TEMPLATE = '''
                         return;
                     }
                     
-                    showToast(`${count} IR codes saved to server`, 'success');
+                    showToast(count + ' IR codes saved to server', 'success');
                     console.log('IR Codes saved:', codes);
                 })
                 .catch(e => showToast('Save error: ' + e, 'error'));
@@ -6380,7 +6380,7 @@ HTML_TEMPLATE = '''
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                     
-                    showToast(`Exported ${count} IR codes`, 'success');
+                    showToast('Exported ' + count + ' IR codes', 'success');
                 })
                 .catch(e => showToast('Export error: ' + e, 'error'));
         }
@@ -6407,20 +6407,20 @@ HTML_TEMPLATE = '''
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += `[IR] ${button}:\\n`;
-                            debugInfo += `   Code: ${codePreview}\\n`;
-                            debugInfo += `   Length: ${codeStr.length} chars\\n`;
+                            debugInfo += '[IR] ' + button + ':\\n';
+                            debugInfo += '   Code: ' + codePreview + '\\n';
+                            debugInfo += '   Length: ' + codeStr.length + ' chars\\n';
                             
                             // Parse protocol
                             if (codeStr.includes(':')) {
                                 const protocol = codeStr.split(':')[0];
-                                debugInfo += `   Protocol: ${protocol}\\n`;
+                                debugInfo += '   Protocol: ' + protocol + '\\n';
                             }
                             debugInfo += '\\n';
                         });
                         
                         debugInfo += '═══════════════════════════════════\\n';
-                        debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
+                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\\n';
                     }
                     
                     debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
@@ -6451,7 +6451,7 @@ HTML_TEMPLATE = '''
                         return;
                     }
                     
-                    showToast(`Testing ${buttons.length} codes...`, 'info');
+                    showToast('Testing ' + buttons.length + ' codes...', 'info');
                     
                     let index = 0;
                     const testInterval = setInterval(() => {
@@ -6462,9 +6462,9 @@ HTML_TEMPLATE = '''
                         }
                         
                         const button = buttons[index];
-                        console.log(`Testing ${button}...`);
+                        console.log('Testing ' + button + '...');
                         sendIRCode(button);
-                        showToast(`Testing: ${button}`, 'info');
+                        showToast('Testing: ' + button, 'info');
                         
                         index++;
                     }, 2000); // 2 second delay between tests
@@ -6681,16 +6681,14 @@ HTML_TEMPLATE = '''
 
                     container.innerHTML = rows.map(item => {
                         const safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        return `
-                            <div class="feedback-history-item">
-                                <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
-                                    <strong>Rating: ${item.rating}/5</strong>
-                                    <span style="font-size:12px; color: var(--text-secondary);">${item.time}</span>
-                                </div>
-                                <div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ${item.occupancy_count} person(s)</div>
-                                <div style="margin-top:6px; font-size:13px;">${safeComment || '-'}</div>
-                            </div>
-                        `;
+                        return '<div class="feedback-history-item">' +
+                            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                                '<strong>Rating: ' + item.rating + '/5</strong>' +
+                                '<span style="font-size:12px; color: var(--text-secondary);">' + item.time + '</span>' +
+                            '</div>' +
+                            '<div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ' + item.occupancy_count + ' person(s)</div>' +
+                            '<div style="margin-top:6px; font-size:13px;">' + (safeComment || '-') + '</div>' +
+                        '</div>';
                     }).join('');
                 })
                 .catch(() => {});
@@ -7320,11 +7318,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast(`GA->AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO->Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: ' + psoBrightness + '% (' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
-                    showToast(`GA->AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast(`PSO->Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
+                    showToast('PSO->Lamp: ' + psoBrightness + '% (Fitness: ' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -7424,7 +7422,7 @@ HTML_TEMPLATE = '''
                 if (overlayBadge) {
                     if (personDetected && personCount > 0) {
                         overlayBadge.className = 'person-badge detected';
-                        overlayBadge.innerHTML = `<i class="fas fa-user-check"></i> ${personCount} Person(s) - ${confidence}%`;
+                        overlayBadge.innerHTML = '<i class="fas fa-user-check"></i> ' + personCount + ' Person(s) - ' + confidence + '%';
                     } else {
                         overlayBadge.className = 'person-badge not-detected';
                         overlayBadge.innerHTML = '<i class="fas fa-user-slash"></i> No Person';
@@ -7448,7 +7446,7 @@ HTML_TEMPLATE = '''
                     } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
                         const mins = Math.floor(lastSeenAgo / 60);
                         const secs = lastSeenAgo % 60;
-                        lastSeenEl.textContent = mins > 0 ? `${mins}m ${secs}s lalu` : `${secs}s lalu`;
+                        lastSeenEl.textContent = mins > 0 ? (mins + 'm ' + secs + 's lalu') : (secs + 's lalu');
                         lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
                         if (lastSeenLabel) lastSeenLabel.textContent = 'Since last detection';
                     } else {
@@ -7471,7 +7469,7 @@ HTML_TEMPLATE = '''
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
                         const offMins = Math.floor(autoOffIn / 60);
                         const offSecs = autoOffIn % 60;
-                        autoOffEl.textContent = `${offMins}m ${offSecs}s`;
+                        autoOffEl.textContent = offMins + 'm ' + offSecs + 's';
                         autoOffEl.style.color = autoOffIn < 120 ? '#ef4444' : '#f59e0b';
                         if (autoOffLabel) autoOffLabel.textContent = 'Countdown auto-OFF AC';
                     } else {
@@ -7496,14 +7494,14 @@ HTML_TEMPLATE = '''
             const algo = (data.algorithm || '').toUpperCase();
             
             if (status === 'running') {
-                showToast(`${algo} optimization running...`, 'success');
+                showToast(algo + ' optimization running...', 'success');
                 // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
             } else if (status === 'completed') {
-                showToast(`${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
+                showToast(algo + ' optimization completed! GA: ' + (data.ga_fitness || 0).toFixed(2) + ', PSO: ' + (data.pso_fitness || 0).toFixed(2), 'success');
                 // Re-enable run buttons
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
@@ -7512,13 +7510,13 @@ HTML_TEMPLATE = '''
                 // Refresh ML data
                 refreshMLData();
             } else if (status === 'error') {
-                showToast(`${algo} error: ${data.message || 'Unknown error'}`, 'error');
+                showToast(algo + ' error: ' + (data.message || 'Unknown error'), 'error');
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
                     btn.style.opacity = '1';
                 });
             } else if (status === 'busy') {
-                showToast(`Optimization already in progress`, 'warning');
+                showToast('Optimization already in progress', 'warning');
             }
         });
 
@@ -7589,8 +7587,12 @@ HTML_TEMPLATE = '''
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
                 
                 document.getElementById(savedPage).classList.add('active');
-                const navItem = document.querySelector('[onclick="showPage(\\''+savedPage+'\\')"]');
-                if (navItem) navItem.classList.add('active');
+                document.querySelectorAll('.nav-item').forEach(function(item) {
+                    const oc = item.getAttribute('onclick') || '';
+                    if (oc.indexOf("showPage('" + savedPage + "')") !== -1) {
+                        item.classList.add('active');
+                    }
+                });
             }
             
             const savedRanges = localStorage.getItem('chartRanges');
