@@ -4860,6 +4860,85 @@ HTML_TEMPLATE = '''
             'energy_kwh': 'energyKwh'
         };
 
+        var energyCanvasMap = {
+            'power': 'energyPowerChart',
+            'voltage': 'energyVoltageChart',
+            'energy_kwh': 'energyKwhChart'
+        };
+
+        var energyColorMap = {
+            'power': '#ef4444',
+            'voltage': '#3b82f6',
+            'energy_kwh': '#10b981'
+        };
+
+        function drawEnergyFallback(field, points) {
+            const canvasId = energyCanvasMap[field];
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const width = Math.max(320, Math.floor(rect.width || canvas.width || 640));
+            const height = Math.max(160, Math.floor(rect.height || canvas.height || 220));
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+            ctx.lineWidth = 1;
+            for (let i = 1; i <= 4; i++) {
+                const y = (height / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            if (!points || points.length === 0) {
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '13px sans-serif';
+                ctx.fillText('Waiting energy data...', 16, Math.floor(height / 2));
+                return;
+            }
+
+            const values = points.map(p => parseFloat(p.value || 0)).filter(v => Number.isFinite(v));
+            if (values.length === 0) return;
+
+            let minV = Math.min(...values);
+            let maxV = Math.max(...values);
+            if (minV === maxV) {
+                minV -= 1;
+                maxV += 1;
+            }
+
+            const padX = 26;
+            const padY = 18;
+            const plotW = width - padX * 2;
+            const plotH = height - padY * 2;
+
+            ctx.strokeStyle = energyColorMap[field] || '#a855f7';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            values.forEach((v, i) => {
+                const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
+                const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            const last = values[values.length - 1];
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Latest: ' + last.toFixed(2), 12, 14);
+        }
+
         function loadEnergyHistory(field, period, btnElement) {
             // Update button active state
             if (btnElement) {
@@ -4869,7 +4948,7 @@ HTML_TEMPLATE = '''
             }
 
             const chartName = energyChartMap[field];
-            if (!chartName || !charts[chartName]) return;
+            if (!chartName) return;
 
             fetch('/api/energy/history?field=' + field + '&period=' + period)
                 .then(r => r.json())
@@ -4877,9 +4956,13 @@ HTML_TEMPLATE = '''
                     const data = result.data || [];
                     const chart = charts[chartName];
 
-                    chart.data.labels = data.map(d => d.time);
-                    chart.data.datasets[0].data = data.map(d => d.value);
-                    chart.update();
+                    if (chart && chart.data && chart.data.datasets && chart.data.datasets[0]) {
+                        chart.data.labels = data.map(d => d.time);
+                        chart.data.datasets[0].data = data.map(d => d.value);
+                        chart.update();
+                    } else {
+                        drawEnergyFallback(field, data);
+                    }
 
                     if (data.length === 0) {
                         console.log('No energy data for ' + field + ' / ' + period);
@@ -7314,6 +7397,15 @@ HTML_TEMPLATE = '''
                     try { updateChartData(chartName, chartRanges[chartName]); } catch(e) {}
                 });
             }, 30000);
+
+            setInterval(function() {
+                try {
+                    var energyPage = document.getElementById('energy');
+                    if (energyPage && energyPage.classList.contains('active')) {
+                        loadAllEnergyCharts();
+                    }
+                } catch(e) {}
+            }, 8000);
             
             console.log('[OK] Dashboard Ready!');
         };
