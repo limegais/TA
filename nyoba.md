@@ -7499,8 +7499,117 @@ HTML_TEMPLATE = '''
                     x.send();
                 } catch(e) {}
             }
+
+            function drawLineOnCanvas(canvasId, points, color, label) {
+                try {
+                    var canvas = document.getElementById(canvasId);
+                    if (!canvas) return;
+                    var rect = canvas.getBoundingClientRect();
+                    var w = Math.max(320, Math.floor(rect.width || canvas.width || 640));
+                    var h = Math.max(150, Math.floor(rect.height || canvas.height || 220));
+                    canvas.width = w;
+                    canvas.height = h;
+                    var ctx = canvas.getContext('2d');
+                    if (!ctx) return;
+
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.fillStyle = 'rgba(15, 23, 42, 0.04)';
+                    ctx.fillRect(0, 0, w, h);
+
+                    // Grid
+                    ctx.strokeStyle = 'rgba(148,163,184,0.25)';
+                    ctx.lineWidth = 1;
+                    for (var i = 1; i <= 4; i++) {
+                        var gy = (h / 5) * i;
+                        ctx.beginPath();
+                        ctx.moveTo(0, gy);
+                        ctx.lineTo(w, gy);
+                        ctx.stroke();
+                    }
+
+                    if (!points || points.length === 0) {
+                        ctx.fillStyle = '#94a3b8';
+                        ctx.font = '13px sans-serif';
+                        ctx.fillText('Waiting ' + label + ' data...', 14, Math.floor(h / 2));
+                        return;
+                    }
+
+                    var vals = [];
+                    for (var j = 0; j < points.length; j++) {
+                        var v = parseFloat(points[j].value);
+                        if (!isNaN(v)) vals.push(v);
+                    }
+                    if (vals.length === 0) return;
+
+                    var minV = Math.min.apply(null, vals);
+                    var maxV = Math.max.apply(null, vals);
+                    if (minV === maxV) {
+                        minV = minV - 1;
+                        maxV = maxV + 1;
+                    }
+
+                    var padX = 26;
+                    var padY = 20;
+                    var plotW = w - (padX * 2);
+                    var plotH = h - (padY * 2);
+
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    for (var k = 0; k < vals.length; k++) {
+                        var x = padX + (k / Math.max(1, vals.length - 1)) * plotW;
+                        var y = padY + (1 - ((vals[k] - minV) / (maxV - minV))) * plotH;
+                        if (k === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+
+                    var latest = vals[vals.length - 1];
+                    ctx.fillStyle = '#334155';
+                    ctx.font = '12px sans-serif';
+                    ctx.fillText(label + ': ' + latest.toFixed(2), 12, 15);
+                } catch (e) {}
+            }
+
+            function fetchEnergySeries(field, period, cb) {
+                try {
+                    var x = new XMLHttpRequest();
+                    x.open('GET', '/api/energy/history?field=' + encodeURIComponent(field) + '&period=' + encodeURIComponent(period));
+                    x.onload = function() {
+                        if (x.status === 200) {
+                            try {
+                                var res = JSON.parse(x.responseText);
+                                cb((res && res.data) ? res.data : []);
+                            } catch (e) {
+                                cb([]);
+                            }
+                        } else {
+                            cb([]);
+                        }
+                    };
+                    x.onerror = function() { cb([]); };
+                    x.send();
+                } catch (e) {
+                    cb([]);
+                }
+            }
+
+            function loadEnergyChartsFailsafe() {
+                fetchEnergySeries('power', '1h', function(points) {
+                    drawLineOnCanvas('energyPowerChart', points, '#ef4444', 'Power (W)');
+                });
+                fetchEnergySeries('voltage', '1h', function(points) {
+                    drawLineOnCanvas('energyVoltageChart', points, '#3b82f6', 'Voltage (V)');
+                });
+                fetchEnergySeries('energy_kwh', '24h', function(points) {
+                    drawLineOnCanvas('energyKwhChart', points, '#10b981', 'Energy (kWh)');
+                });
+            }
+
             basicUpdate();
             setInterval(basicUpdate, 2000);
+            loadEnergyChartsFailsafe();
+            setInterval(loadEnergyChartsFailsafe, 8000);
             // Restore saved page
             var saved = localStorage.getItem('currentPage');
             if (saved && document.getElementById(saved)) {
