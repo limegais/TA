@@ -3132,8 +3132,6 @@ HTML_TEMPLATE = '''
             .feedback-grid { grid-template-columns: 1fr; }
             .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
-            .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
-            .sidebar-overlay.active { display: block; }
         }
 
         @media (min-width: 769px) and (max-width: 1200px) {
@@ -3166,6 +3164,23 @@ HTML_TEMPLATE = '''
             font-size: 20px;
             cursor: pointer;
             box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+        }
+
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1999;
+            pointer-events: none;
+        }
+
+        .sidebar-overlay.active {
+            display: block;
+            pointer-events: auto;
         }
 
         /* Device Status Indicators */
@@ -7584,6 +7599,25 @@ HTML_TEMPLATE = '''
 
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
+            try {
+                var ovInit = document.getElementById('sidebar-overlay');
+                if (ovInit) {
+                    ovInit.classList.remove('active');
+                    ovInit.style.display = 'none';
+                    ovInit.style.pointerEvents = 'none';
+                }
+            } catch(e) {}
+            try {
+                // Safety net: hidden fixed overlays must not consume clicks.
+                var blockers = document.querySelectorAll('body *');
+                blockers.forEach(function(el) {
+                    if (!el || !el.style) return;
+                    var cs = window.getComputedStyle(el);
+                    if (cs.position === 'fixed' && cs.display === 'none') {
+                        el.style.pointerEvents = 'none';
+                    }
+                });
+            } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
             try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
@@ -7656,6 +7690,15 @@ HTML_TEMPLATE = '''
     <!-- Failsafe Navigation - independent script block -->
     <script>
         (function() {
+            try {
+                var ovBoot = document.getElementById('sidebar-overlay');
+                if (ovBoot) {
+                    ovBoot.classList.remove('active');
+                    ovBoot.style.display = 'none';
+                    ovBoot.style.pointerEvents = 'none';
+                }
+            } catch (e) {}
+
             if (typeof window.showPage === 'function') {
                 console.log('[OK] showPage already defined');
                 return;
