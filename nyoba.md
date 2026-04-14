@@ -65,9 +65,9 @@ yolo_lock = threading.Lock()
 # Smart Person-Based Auto ON/OFF
 _person_consecutive_frames = 0
 _no_person_start_time = None
-PERSON_CONFIRM_FRAMES = 3        # 3 frames with person → auto ON (~2 seconds)
+PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person → auto OFF
+NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person -> auto OFF
 AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
@@ -98,11 +98,24 @@ ir_learning_mode = False
 ir_learning_button = ""
 ir_learning_device = ""  # Track device name
 
+# MQTT connection status tracking
+mqtt_status = {
+    'connected': False,
+    'last_connect_time': None,
+    'last_message_time': None,
+    'message_count': 0,
+    'error': None,
+    'broker': 'localhost:1883'
+}
+
+# Debug counter for /api/data response snapshots
+api_data_debug_counter = 0
+
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
     try:
-        print(f"🔄 Attempting to write to InfluxDB: {measurement}")
+        print(f"[DB] Attempting to write to InfluxDB: {measurement}")
         print(f"   URL: {INFLUX_URL}, ORG: {INFLUX_ORG}, BUCKET: {INFLUX_BUCKET}")
         
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
@@ -130,10 +143,10 @@ def write_to_influxdb(measurement, fields, tags=None):
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
         write_api.close()
         client.close()
-        print(f"✅ Successfully written to InfluxDB: {measurement}")
+        print(f"[OK] Successfully written to InfluxDB: {measurement}")
         return True
     except Exception as e:
-        print(f"❌ InfluxDB Write Error ({measurement}): {str(e)}")
+        print(f"[ERROR] InfluxDB Write Error ({measurement}): {str(e)}")
         import traceback
         traceback.print_exc()
         return False
@@ -151,9 +164,9 @@ def save_sensor_data(temperature, humidity, heat_index):
             tags={"device": "esp32_ac", "location": "room"}
         )
         if result:
-            print(f"✅ Sensor data saved: {temperature}°C, {humidity}%")
+            print(f"[OK] Sensor data saved: {temperature}°C, {humidity}%")
     except Exception as e:
-        print(f"❌ Error saving sensor data: {e}")
+        print(f"[ERROR] Error saving sensor data: {e}")
         import traceback
         traceback.print_exc()
 
@@ -172,9 +185,9 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, moti
             tags={"device": "esp32_lamp", "location": "room"}
         )
         if result:
-            print(f"✅ Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
+            print(f"[OK] Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
     except Exception as e:
-        print(f"❌ Error saving lamp data: {e}")
+        print(f"[ERROR] Error saving lamp data: {e}")
         import traceback
         traceback.print_exc()
 
@@ -191,9 +204,9 @@ def save_person_detection(person_count, confidence):
             tags={"device": "camera_yolo", "model": "yolov8n"}
         )
         if person_count > 0:
-            print(f"✅ Detection saved: {person_count} person(s), {confidence:.2f} confidence")
+            print(f"[OK] Detection saved: {person_count} person(s), {confidence:.2f} confidence")
     except Exception as e:
-        print(f"❌ Error saving detection data: {e}")
+        print(f"[ERROR] Error saving detection data: {e}")
 
 def save_ir_command(device, command, signal_length):
     """Save IR remote command to InfluxDB"""
@@ -207,9 +220,9 @@ def save_ir_command(device, command, signal_length):
             },
             tags={"device": str(device), "type": "ir_code"}
         )
-        print(f"✅ IR command saved: {device} - {command}")
+        print(f"[OK] IR command saved: {device} - {command}")
     except Exception as e:
-        print(f"❌ Error saving IR command: {e}")
+        print(f"[ERROR] Error saving IR command: {e}")
 
 def save_ac_control(ac_temp, fan_speed, ac_state):
     """Save AC control settings to InfluxDB"""
@@ -223,9 +236,9 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
             },
             tags={"device": "esp32_ac", "type": "control"}
         )
-        print(f"✅ AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
+        print(f"[OK] AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
     except Exception as e:
-        print(f"❌ Error saving AC control: {e}")
+        print(f"[ERROR] Error saving AC control: {e}")
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -238,10 +251,10 @@ def load_yolo_model():
         
         # Try local model first, fallback to auto-download
         if os.path.exists(model_path):
-            print(f"🧠 Loading YOLOv8n from {model_path}...")
+            print(f"[YOLO] Loading YOLOv8n from {model_path}...")
             yolo_model = YOLO(model_path)
         else:
-            print("🧠 YOLOv8n not found locally, downloading...")
+            print("[YOLO] YOLOv8n not found locally, downloading...")
             os.makedirs(yolo_dir, exist_ok=True)
             yolo_model = YOLO('yolov8n.pt')
         
@@ -249,13 +262,13 @@ def load_yolo_model():
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
         yolo_model.predict(dummy, verbose=False)
         
-        print("✅ YOLOv8n model loaded successfully!")
+        print("[OK] YOLOv8n model loaded successfully!")
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                            'msg': 'YOLOv8n loaded successfully', 'level': 'success'})
         return True
         
     except Exception as e:
-        print(f"❌ YOLO loading error: {str(e)}")
+        print(f"[ERROR] YOLO loading error: {str(e)}")
         import traceback
         traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
@@ -297,7 +310,7 @@ def detect_persons(frame):
             return frame, person_count, max_confidence, boxes_list
             
     except Exception as e:
-        print(f"❌ YOLO detection error: {str(e)}")
+        print(f"[ERROR] YOLO detection error: {str(e)}")
         import traceback
         traceback.print_exc()
         return frame, 0, 0.0, []
@@ -320,8 +333,8 @@ def handle_person_based_control(person_count):
         return
     
     # How many consecutive frames needed to confirm person?
-    # After auto-OFF → require 15 frames (~10s) to prevent false positives from turning AC on
-    # Normal mode → require 3 frames (~2s)
+    # After auto-OFF -> require 15 frames (~10s) to prevent false positives from turning AC on
+    # Normal mode -> require 3 frames (~2s)
     in_cooldown = _auto_off_time > 0 and (time.time() - _auto_off_time) < AUTO_OFF_COOLDOWN
     required_frames = PERSON_RECONFIRM_FRAMES if _auto_off_triggered else PERSON_CONFIRM_FRAMES
     
@@ -335,16 +348,16 @@ def handle_person_based_control(person_count):
             _no_person_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
             _auto_off_time = 0.0  # Clear cooldown
-            print(f"✅ Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+            print(f"[OK] Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
             if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
-                print(f"⏳ Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
+                print(f"[WAIT] Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
         
         # Auto ON: person confirmed AND cooldown elapsed
         if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"🟢 Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) → Auto turning ON AC")
+                print(f"[ON] Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -359,7 +372,7 @@ def handle_person_based_control(person_count):
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"❌ Auto ON error: {e}")
+                    print(f"[ERROR] Auto ON error: {e}")
             _person_consecutive_frames = required_frames  # Cap to avoid overflow
     else:
         _person_consecutive_frames = 0
@@ -374,7 +387,7 @@ def handle_person_based_control(person_count):
             _auto_off_triggered = True  # Always set flag to block adaptive SET
             _auto_off_time = time.time()  # Start cooldown timer
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"🔴 No person for {int(elapsed)}s → Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
+                print(f"[OFF] No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
@@ -389,7 +402,7 @@ def handle_person_based_control(person_count):
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"❌ Auto OFF error: {e}")
+                    print(f"[ERROR] Auto OFF error: {e}")
 
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
@@ -397,14 +410,14 @@ def get_camera():
     if camera is None:
         # Auto-detect camera: try index 0-4
         for idx in range(5):
-            print(f"📷 Trying camera index {idx}...")
+            print(f"[CAM] Trying camera index {idx}...")
             cam = cv2.VideoCapture(idx)
             if cam.isOpened():
                 # Verify it can actually capture a frame
                 ret, test_frame = cam.read()
                 if ret and test_frame is not None:
                     camera = cam
-                    print(f"✅ Camera found at index {idx}")
+                    print(f"[OK] Camera found at index {idx}")
                     break
                 else:
                     cam.release()
@@ -438,7 +451,7 @@ def get_camera():
             actual_fps = int(camera.get(cv2.CAP_PROP_FPS))
             
             mqtt_data['camera']['status'] = 'active'
-            print(f"✅ Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
+            print(f"[OK] Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
             log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                                'msg': f'Camera: {actual_w}x{actual_h} @ {actual_fps}fps', 
                                'level': 'success'})
@@ -463,7 +476,7 @@ def camera_detection_loop():
     fps_counter = 0
     fps_timer = time.time()
     
-    print("🎥 Camera detection background thread started (runs 24/7)")
+    print("[CAM] Camera detection background thread started (runs 24/7)")
     last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
     CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
@@ -486,7 +499,7 @@ def camera_detection_loop():
                             camera.release()
                             camera = None
                         mqtt_data['camera']['status'] = 'reconnecting'
-                        print("⚠️ Camera read failed, will retry...")
+                        print("[WARN] Camera read failed, will retry...")
             
             # If no frame captured, wait and retry (lock is released)
             if frame is None:
@@ -507,7 +520,7 @@ def camera_detection_loop():
                 mqtt_data['camera']['count'] = person_count
                 mqtt_data['camera']['confidence'] = int(confidence * 100)
                 
-                # ★ Smart auto ON/OFF — only on YOLO frames
+                # * Smart auto ON/OFF -- only on YOLO frames
                 handle_person_based_control(person_count)
                 
                 # Save to InfluxDB every 5 seconds
@@ -579,7 +592,7 @@ def camera_detection_loop():
             if _no_person_start_time is not None:
                 elapsed = time.time() - _no_person_start_time
                 if int(elapsed) % 60 < 1:
-                    print(f"⏱️ No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
+                    print(f"[TIMER] No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
             
             # Encode frame and store for video_feed consumers
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -596,12 +609,12 @@ def camera_detection_loop():
                 fps_timer = time.time()
             
         except Exception as e:
-            print(f"❌ Detection loop error: {e}")
+            print(f"[ERROR] Detection loop error: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(retry_delay)
     
-    print("🛑 Camera detection background thread stopped")
+    print("[STOP] Camera detection background thread stopped")
 
 def generate_frames():
     """Stream latest frames to /video_feed — reads from background thread"""
@@ -630,53 +643,52 @@ def release_camera():
         mqtt_data['camera']['status'] = 'inactive'
 
 # ==================== MQTT ====================
-mqtt_client = mqtt.Client()
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW IR codes
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    global mqtt_status
     print("\n" + "="*70)
-    print("  🔵 FLASK MQTT CONNECTION EVENT")
-    print("="*70)
-    print(f"Return Code: {rc}")
-    print(f"RC Meaning: {['Success', 'Protocol version', 'Client ID', 'Server unavailable', 'Bad credentials', 'Not authorized'][rc] if rc < 6 else 'Unknown'}")
-    print(f"Flags: {flags}")
+    print("  [MQTT] FLASK MQTT CONNECTION EVENT")
     print("="*70)
     
-    if rc == 0:
-        print("✅ MQTT CONNECTED SUCCESSFULLY!\n")
+    is_success = False
+    if hasattr(reason_code, 'is_failure'):
+        is_success = not reason_code.is_failure
+    else:
+        is_success = (int(reason_code) == 0)
+    
+    if is_success:
+        mqtt_status['connected'] = True
+        mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
+        mqtt_status['error'] = None
+        print("[OK] MQTT CONNECTED SUCCESSFULLY!")
         
-        # Subscribe to all smartroom topics
-        result1, mid1 = client.subscribe("smartroom/#")
-        print(f"📡 Subscribe smartroom/# - Result: {result1} (MID: {mid1})")
-        
-        # Also subscribe to alternative IR topics
-        result2, mid2 = client.subscribe("ir/#")
-        print(f"📡 Subscribe ir/# - Result: {result2} (MID: {mid2})")
-        
-        result3, mid3 = client.subscribe("IR/#")
-        print(f"📡 Subscribe IR/# - Result: {result3} (MID: {mid3})")
-        
-        result4, mid4 = client.subscribe("+/ir/#")
-        print(f"📡 Subscribe +/ir/# - Result: {result4} (MID: {mid4})")
-        
-        print("\n✅ All subscriptions sent!")
-        print("Waiting for messages from ESP32...\n")
+        client.subscribe("smartroom/#")
+        client.subscribe("ir/#")
+        client.subscribe("IR/#")
+        client.subscribe("+/ir/#")
+        print("[OK] Subscribed to: smartroom/#, ir/#, IR/#, +/ir/#")
         print("="*70 + "\n")
         
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected! RC: {rc}', 'level': 'success'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected!', 'level': 'success'})
     else:
-        print(f"❌ MQTT CONNECTION FAILED! RC={rc}")
+        mqtt_status['connected'] = False
+        mqtt_status['error'] = f'Connection failed: {reason_code}'
+        print(f"[ERROR] MQTT CONNECTION FAILED! RC={reason_code}")
         print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
-    global ir_learning_mode, ir_learning_button, ir_learning_device
+    global ir_learning_mode, ir_learning_button, ir_learning_device, mqtt_status
+    mqtt_status['last_message_time'] = datetime.now().strftime('%H:%M:%S')
+    mqtt_status['message_count'] = mqtt_status.get('message_count', 0) + 1
     
     try:
         topic = msg.topic
         
         # Debug: Print ALL incoming MQTT messages with timestamp
         print("\n" + "─"*70)
-        print(f"📨 [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
+        print(f"[MSG] [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
         print(f"Topic: {topic}")
         print(f"Payload Length: {len(msg.payload)} bytes")
         print(f"QoS: {msg.qos} | Retain: {msg.retain}")
@@ -705,14 +717,15 @@ def on_message(client, userdata, msg):
                 print(f"   Code preview: {code_val[:80]}..." if code_len > 80 else f"   Code: {code_val}")
             else:
                 print(f"   Data (JSON): {payload}")
-        except:
+        except Exception as json_err:
+            print(f"[JSON ERROR] Failed to parse JSON: {json_err} - Payload: {full_payload_str}")
             # If not JSON, treat as plain text
             payload_text = msg.payload.decode()
             print(f"   Data (Text): {payload_text[:200]}..." if len(payload_text) > 200 else f"   Data (Text): {payload_text}")
             payload = {'raw': payload_text}
         
         # DEBUG: Check which condition will match
-        print(f"\n🔍 Topic Routing Check:")
+        print(f"\n[ROUTE] Topic Routing Check:")
         print(f"   'ac/sensors' in topic: {'ac/sensors' in topic}")
         print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
         print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
@@ -724,7 +737,7 @@ def on_message(client, userdata, msg):
         print(f"   'IR/learned' in topic.lower(): {'IR/learned' in topic.lower()}")
         
         if 'ac/sensors' in topic:
-            print("🌡️  Processing AC Sensor Data:")
+            print("[SENSOR] Processing AC Sensor Data:")
             print(f"   Temperature: {payload.get('temperature', 0)}°C")
             print(f"   Humidity: {payload.get('humidity', 0)}%")
             print(f"   Heat Index: {payload.get('heat_index', 0)}°C")
@@ -748,7 +761,7 @@ def on_message(client, userdata, msg):
                 'hum3': payload.get('hum3', 0),
             })
             # Save sensor data to InfluxDB
-            print("   💾 Saving to InfluxDB...")
+            print("   [DB] Saving to InfluxDB...")
             save_sensor_data(
                 mqtt_data['ac']['temperature'],
                 mqtt_data['ac']['humidity'],
@@ -760,9 +773,9 @@ def on_message(client, userdata, msg):
                 mqtt_data['ac']['fan_speed'],
                 mqtt_data['ac']['ac_state']
             )
-            print("   ✅ AC data updated in memory & InfluxDB")
+            print("   [OK] AC data updated in memory & InfluxDB")
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
-            print("   📡 Sent to frontend via WebSocket")
+            print("   [WS] Sent to frontend via WebSocket")
             # Track device status & check alerts
             device_last_seen['esp32_ac']['last_seen'] = datetime.now()
             device_last_seen['esp32_ac']['status'] = 'online'
@@ -801,7 +814,7 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            print(f"   ⚡ Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
+            print(f"   [ENERGY] Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
             # Save to InfluxDB for historical data (30 day retention)
             write_to_influxdb('energy_monitor', {
                 'voltage': float(mqtt_data['energy']['voltage']),
@@ -827,7 +840,7 @@ def on_message(client, userdata, msg):
             device_last_seen['camera']['status'] = 'online'
             
         elif 'dashboard/state' in topic or 'optimization/stats' in topic or 'ml/result' in topic:
-            # Update from optimization algorithm (GA→AC / PSO→Lamp)
+            # Update from optimization algorithm (GA->AC / PSO->Lamp)
             ga_sol = payload.get('ga_solution', {})
             pso_sol = payload.get('pso_solution', {})
             mqtt_data['system'].update({
@@ -840,7 +853,7 @@ def on_message(client, userdata, msg):
                 'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                 'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
             })
-            print(f"📊 Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
+            print(f"[ML] Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
             # Write optimization history to InfluxDB
             write_to_influxdb('optimization_result', {
@@ -863,11 +876,11 @@ def on_message(client, userdata, msg):
                         _last_adaptive_ac_apply = now
                         ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                        print(f"🤖 ADAPTIVE → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                        print(f"[ADAPTIVE] -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     else:
-                        print(f"🤖 ADAPTIVE → AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
+                        print(f"[ADAPTIVE] -> AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                print(f"🤖 ADAPTIVE → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+                print(f"[ADAPTIVE] -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
@@ -877,13 +890,13 @@ def on_message(client, userdata, msg):
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
                         client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
-                        print(f"🤖 ADAPTIVE → Applied to All Lamps: {opt_brightness}%")
+                        print(f"[ADAPTIVE] -> Applied to All Lamps: {opt_brightness}%")
                     else:
-                        print(f"🤖 ADAPTIVE → Lamp apply debounced")
+                        print(f"[ADAPTIVE] -> Lamp apply debounced")
         
         elif 'ml/status' in topic:
             # ML optimization status from main.py (running/completed/error/busy)
-            print(f"🤖 ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
+            print(f"[ML] ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
             socketio.emit('ml_status', payload)
             log_messages.append({
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -907,7 +920,7 @@ def on_message(client, userdata, msg):
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
-                    print(f"📊 ML Completed → Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
+                    print(f"[ML] ML Completed -> Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
                     socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
         elif 'ac/mode' in topic:
@@ -920,7 +933,7 @@ def on_message(client, userdata, msg):
         
         elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
             print("\n" + "="*70)
-            print("🔴🔴🔴 IR SIGNAL RECEIVED FROM ESP32! 🔴🔴🔴")
+            print("[IR] IR SIGNAL RECEIVED FROM ESP32!")
             print("="*70)
             print(f"Topic received: {topic}")
             print(f"ir_learning_mode: {ir_learning_mode}")
@@ -965,19 +978,19 @@ def on_message(client, userdata, msg):
             print(f"   Parsed - Button: {button_name}, Device: {device}")
             print(f"   Code length: {len(ir_code)} chars")
             if raw_value_count > 0:
-                print(f"   ✅ RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
+                print(f"   [OK] RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
                 if raw_value_count < 100:
-                    print(f"   ⚠️  WARNING: Only {raw_value_count} values! Signal mungkin tidak lengkap!")
-                    print(f"   ⚠️  Mitsubishi SRK AC butuh ~200+ values (2 frame)")
+                    print(f"   [WARN] Only {raw_value_count} values! Signal mungkin tidak lengkap!")
+                    print(f"   [WARN] Mitsubishi SRK AC butuh ~200+ values (2 frame)")
             
             # CHECK: Is Flask in learning mode?
             if not ir_learning_mode:
-                print(f"⚠️  Flask NOT in learning mode — ignoring signal")
+                print(f"[WARN] Flask NOT in learning mode — ignoring signal")
                 print(f"   (Signal has {len(ir_code)} chars, {raw_value_count} RAW values)")
                 print(f"   To capture: click Learn button on dashboard first")
                 print("="*70)
             elif button_name and ir_code and len(ir_code) > 0:
-                print(f"✅ Flask IS in learning mode — SAVING signal!")
+                print(f"[OK] Flask IS in learning mode — SAVING signal!")
                 
                 # Check if this is a power toggle (same code for ON/OFF)
                 is_power_toggle = False
@@ -993,18 +1006,18 @@ def on_message(client, userdata, msg):
                         is_power_toggle = True
                         button_name = f"{device}_power_toggle"
                         mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
-                        print(f"⚠️ Power toggle detected for {device}: Same code for ON/OFF")
+                        print(f"[WARN] Power toggle detected for {device}: Same code for ON/OFF")
                 
                 # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
-                print(f"✅ IR code saved to memory: {button_name}")
+                print(f"[OK] IR code saved to memory: {button_name}")
                 
                 # Verify code integrity
                 if ir_code.startswith('RAW:'):
                     raw_cnt = ir_code[4:].count(',') + 1
-                    print(f"   ✅ Verified RAW signal: {raw_cnt} values stored for {button_name}")
+                    print(f"   [OK] Verified RAW signal: {raw_cnt} values stored for {button_name}")
                 else:
-                    print(f"   ✅ Non-RAW code stored: {len(ir_code)} chars")
+                    print(f"   [OK] Non-RAW code stored: {len(ir_code)} chars")
                 
                 # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
@@ -1015,7 +1028,7 @@ def on_message(client, userdata, msg):
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
-                    print(f"💾 IR codes saved to file: {ir_file}")
+                    print(f"[SAVE] IR codes saved to file: {ir_file}")
                     
                     # Verify file write
                     with open(ir_file, 'r') as f:
@@ -1023,13 +1036,13 @@ def on_message(client, userdata, msg):
                     if button_name in verify:
                         saved_code = verify[button_name]
                         if saved_code == ir_code:
-                            print(f"   ✅ File verified: {button_name} saved correctly ({len(saved_code)} chars)")
+                            print(f"   [OK] File verified: {button_name} saved correctly ({len(saved_code)} chars)")
                         else:
-                            print(f"   ⚠️  File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
+                            print(f"   [WARN] File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
                     else:
-                        print(f"   ⚠️  Button {button_name} NOT found in saved file!")
+                        print(f"   [WARN] Button {button_name} NOT found in saved file!")
                 except Exception as e:
-                    print(f"❌ Error saving IR codes to file: {e}")
+                    print(f"[ERROR] Error saving IR codes to file: {e}")
                 
                 log_messages.append({
                     'time': datetime.now().strftime('%H:%M:%S'),
@@ -1038,7 +1051,7 @@ def on_message(client, userdata, msg):
                 })
                 
                 # Emit to frontend
-                print("\n📡 Emitting 'ir_learned' event to frontend via WebSocket...")
+                print("\n[WS] Emitting 'ir_learned' event to frontend via WebSocket...")
                 print(f"   Event data: button={button_name}, device={device}, is_toggle={is_power_toggle}")
                 
                 socketio.emit('ir_learned', {
@@ -1049,17 +1062,17 @@ def on_message(client, userdata, msg):
                     'status': 'success'
                 })
                 
-                print("✅ WebSocket event emitted successfully!")
+                print("[OK] WebSocket event emitted successfully!")
                 print("   Frontend should update NOW!")
                 print("="*70)
                 
-                print(f"✅ IR learning completed for: {button_name}")
+                print(f"[OK] IR learning completed for: {button_name}")
                 
                 ir_learning_mode = False
                 ir_learning_button = ""
                 ir_learning_device = ""
             else:
-                print(f"❌ IR learning failed: Missing button name or code")
+                print(f"[ERROR] IR learning failed: Missing button name or code")
                 socketio.emit('ir_learned', {
                     'status': 'error',
                     'message': 'Invalid IR data received'
@@ -1067,61 +1080,61 @@ def on_message(client, userdata, msg):
         
         else:
             # No handler matched this topic
-            print(f"⚠️  UNHANDLED TOPIC: {topic}")
+            print(f"[WARN] UNHANDLED TOPIC: {topic}")
             print(f"   No matching handler found for this topic!")
             print(f"   Available handlers: ac/sensors, lamp/sensors, camera/detection, ir/learned, etc.")
             
         print("─"*70 + "\n")
         
     except Exception as e:
-        print(f"❌ MQTT Message Handler Error: {str(e)}")
+        print(f"[ERROR] MQTT Message Handler Error: {str(e)}")
         import traceback
         traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
-def on_disconnect(client, userdata, rc):
-    print("\n" + "="*70)
-    print("  ⚠️  FLASK MQTT DISCONNECTION EVENT")
-    print("="*70)
-    print(f"Disconnect Reason Code: {rc}")
-    if rc != 0:
-        print("❌ Unexpected disconnection!")
-        print("Will attempt to reconnect...")
-    else:
-        print("✅ Clean disconnection")
-    print("="*70 + "\n")
-    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {rc}', 'level': 'warning'})
+def on_disconnect(client, userdata, flags, reason_code, properties=None):
+    global mqtt_status
+    mqtt_status['connected'] = False
+    print(f"[WARN] MQTT Disconnected (RC: {reason_code})")
+    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 mqtt_client.on_disconnect = on_disconnect
 
-print("\n" + "="*70)
-print("  🚀 INITIALIZING FLASK MQTT CLIENT")
-print("="*70)
-print(f"Broker: {MQTT_BROKER}:{MQTT_PORT}")
-print(f"Attempting connection...")
-print("="*70 + "\n")
+# Enable auto-reconnect with 5 second delay
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-try:
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    mqtt_client.loop_start()
-    
-    # Wait a bit for connection to establish
-    import time
-    time.sleep(2)
-    
-    if mqtt_client.is_connected():
-        print("✅ MQTT Client connected and running!")
-        print("📡 Loop thread started\n")
-    else:
-        print("⚠️  MQTT Client started but not yet connected")
-        print("Waiting for on_connect callback...\n")
-        
-except Exception as e:
-    print(f"❌ MQTT Connection Error: {e}")
-    import traceback
-    traceback.print_exc()
+print(f"[INIT] MQTT Client connecting to {MQTT_BROKER}:{MQTT_PORT}...")
+
+def start_mqtt():
+    """Start MQTT connection in background thread with retry"""
+    global mqtt_status
+    mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
+    retries = 0
+    while retries < 5:
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+            print(f"[OK] MQTT loop started (attempt {retries + 1})")
+            time.sleep(2)
+            if mqtt_client.is_connected():
+                print("[OK] MQTT Connected!")
+            else:
+                print("[WARN] MQTT loop started, waiting for connection...")
+            return
+        except Exception as e:
+            retries += 1
+            mqtt_status['error'] = str(e)
+            print(f"[WARN] MQTT connect attempt {retries}/5 failed: {e}")
+            if retries < 5:
+                time.sleep(3)
+    print("[ERROR] MQTT: All connection attempts failed. Dashboard will run without MQTT.")
+    print("[ERROR] Make sure mosquitto/MQTT broker is running: sudo systemctl start mosquitto")
+
+# Start MQTT in a background thread so it doesn't block app startup
+mqtt_thread = threading.Thread(target=start_mqtt, daemon=True)
+mqtt_thread.start()
 
 # ==================== INFLUXDB ====================
 def get_influx_data(measurement, field, hours=1):
@@ -1247,7 +1260,122 @@ def toggle_camera():
 
 @app.route('/api/data')
 def get_data():
-    return jsonify(mqtt_data)
+    global api_data_debug_counter
+    api_data_debug_counter += 1
+    if api_data_debug_counter % 5 == 0:
+        try:
+            print(f"[API DATA] ac.temp={mqtt_data.get('ac', {}).get('temperature', 0)} hum={mqtt_data.get('ac', {}).get('humidity', 0)} energy.power={mqtt_data.get('energy', {}).get('power', 0)}")
+        except Exception:
+            pass
+
+    response = jsonify(mqtt_data)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+@app.route('/api/mqtt/status')
+def get_mqtt_status():
+    return jsonify({
+        'connected': mqtt_client.is_connected(),
+        'broker': f'{MQTT_BROKER}:{MQTT_PORT}',
+        'last_connect': mqtt_status.get('last_connect_time'),
+        'last_message': mqtt_status.get('last_message_time'),
+        'message_count': mqtt_status.get('message_count', 0),
+        'error': mqtt_status.get('error'),
+        'subscriptions': ['smartroom/#', 'ir/#', 'IR/#', '+/ir/#']
+    })
+
+@app.route('/api/mqtt/reconnect', methods=['POST'])
+def mqtt_reconnect():
+    try:
+        mqtt_client.reconnect()
+        return jsonify({'status': 'success', 'message': 'Reconnect initiated'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/mqtt/config', methods=['POST'])
+def mqtt_config():
+    """Change MQTT broker IP at runtime and reconnect"""
+    global MQTT_BROKER, MQTT_PORT
+    data = request.json or {}
+    new_broker = data.get('broker', '').strip()
+    new_port = int(data.get('port', 1883))
+    if not new_broker:
+        return jsonify({'status': 'error', 'message': 'Broker IP tidak boleh kosong'}), 400
+    old_broker = MQTT_BROKER
+    MQTT_BROKER = new_broker
+    MQTT_PORT = new_port
+    mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
+    try:
+        mqtt_client.disconnect()
+    except Exception:
+        pass
+    import threading
+    def reconnect_thread():
+        import time
+        time.sleep(1)
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+            print(f"[CONFIG] MQTT reconnected to {MQTT_BROKER}:{MQTT_PORT}")
+        except Exception as e:
+            mqtt_status['error'] = str(e)
+            print(f"[ERROR] MQTT connect to {MQTT_BROKER}:{MQTT_PORT} failed: {e}")
+    threading.Thread(target=reconnect_thread, daemon=True).start()
+    print(f"[CONFIG] MQTT broker changed: {old_broker} -> {MQTT_BROKER}:{MQTT_PORT}")
+    return jsonify({'status': 'ok', 'message': f'Mencoba connect ke {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
+
+@app.route('/api/simulate', methods=['POST'])
+def simulate_data():
+    """Inject dummy sensor data directly into mqtt_data (bypasses MQTT) for frontend testing"""
+    import random
+    mqtt_data['ac'].update({
+        'temperature': round(27.5 + random.uniform(-2, 2), 1),
+        'humidity': round(65.0 + random.uniform(-5, 5), 1),
+        'heat_index': round(29.5 + random.uniform(-2, 2), 1),
+        'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2,
+        'temp1': round(27.0 + random.uniform(-1, 1), 1),
+        'temp2': round(27.3 + random.uniform(-1, 1), 1),
+        'temp3': round(27.8 + random.uniform(-1, 1), 1),
+        'hum1': round(64.0 + random.uniform(-3, 3), 1),
+        'hum2': round(65.0 + random.uniform(-3, 3), 1),
+        'hum3': round(66.0 + random.uniform(-3, 3), 1),
+        'rssi': -55, 'uptime': 3600
+    })
+    mqtt_data['lamp'].update({
+        'lux1': round(350 + random.uniform(-50, 50)),
+        'lux2': round(380 + random.uniform(-50, 50)),
+        'lux3': round(340 + random.uniform(-50, 50)),
+        'lux_avg': round(357 + random.uniform(-30, 30)),
+        'brightness1': 80, 'brightness2': 75, 'brightness3': 70, 'brightness_avg': 75,
+        'motion': True, 'rssi': -60, 'uptime': 3600
+    })
+    mqtt_data['energy'].update({
+        'voltage': round(220.0 + random.uniform(-5, 5), 1),
+        'current': round(1.5 + random.uniform(-0.2, 0.2), 2),
+        'power': round(330.0 + random.uniform(-10, 10), 1),
+        'energy': round(1.25 + random.uniform(0, 0.1), 3),
+        'frequency': 50.0, 'pf': 0.95, 'connected': True, 'ac_state': 'ON'
+    })
+    socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+    socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+    print(f"[SIMULATE] Dummy data injected into mqtt_data successfully")
+    return jsonify({'status': 'ok', 'message': 'Dummy data injected', 'ac_temp': mqtt_data['ac']['temperature'], 'lamp_lux': mqtt_data['lamp']['lux1']})
+
+@app.route('/api/mqtt/selftest', methods=['POST'])
+def mqtt_selftest():
+    """Publish a test message to MQTT broker to verify broker connection works"""
+    if not mqtt_client.is_connected():
+        return jsonify({'status': 'error', 'message': f'MQTT client not connected to {MQTT_BROKER}:{MQTT_PORT}. Is Mosquitto running?'}), 503
+    try:
+        test_payload = json.dumps({'temperature': 28.5, 'humidity': 65.0, 'heat_index': 30.0, 'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2, 'rssi': -55, 'uptime': 100, 'temp1': 28.0, 'temp2': 28.5, 'temp3': 29.0, 'hum1': 64.0, 'hum2': 65.0, 'hum3': 66.0})
+        result = mqtt_client.publish('smartroom/ac/sensors', test_payload, qos=1)
+        result.wait_for_publish(timeout=3)
+        print(f"[SELFTEST] Published test AC message to smartroom/ac/sensors")
+        return jsonify({'status': 'ok', 'message': 'Test message published to smartroom/ac/sensors. Check if data appears in dashboard.'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/occupancy/feedback', methods=['POST'])
 def occupancy_feedback_submit():
@@ -1297,7 +1425,7 @@ def energy_phase_api():
         if new_phase not in ('before', 'after'):
             return jsonify({'error': 'Phase must be before or after'}), 400
         energy_phase = new_phase
-        print(f"⚡ Energy phase changed to: {energy_phase}")
+        print(f"[ENERGY] Energy phase changed to: {energy_phase}")
         socketio.emit('energy_phase', {'phase': energy_phase})
         return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
     return jsonify({'phase': energy_phase})
@@ -1371,7 +1499,7 @@ def energy_compare():
         })
         
     except Exception as e:
-        print(f"❌ Energy compare error: {e}")
+        print(f"[ERROR] Energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
 @app.route('/api/energy/history')
@@ -1428,7 +1556,7 @@ def energy_history():
         return jsonify({'period': period, 'field': field, 'data': data_points})
         
     except Exception as e:
-        print(f"❌ Energy history query error: {e}")
+        print(f"[ERROR] Energy history query error: {e}")
         return jsonify({'error': str(e), 'data': []}), 500
 
 @app.route('/api/ml/status')
@@ -1522,7 +1650,7 @@ def set_lamp_mode():
 
 @app.route('/api/optimization/update', methods=['POST'])
 def update_optimization():
-    """Receive optimization data from main.py — GA→AC / PSO→Lamp"""
+    """Receive optimization data from main.py — GA->AC / PSO->Lamp"""
     try:
         data = request.json
         ga_sol = data.get('ga_solution', {})
@@ -1543,7 +1671,7 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        print(f"📊 Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
+        print(f"[ML] Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
         
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
         # Skip if camera auto-OFF is active (no person detected)
@@ -1557,12 +1685,12 @@ def update_optimization():
                     _last_adaptive_ac_apply = now
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    print(f"🤖 ADAPTIVE (HTTP) → Applied to AC: {opt_temp}°C Fan:{opt_fan}")
+                    print(f"[ADAPTIVE] (HTTP) -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
                 else:
-                    print(f"🤖 ADAPTIVE (HTTP) → AC apply debounced (MQTT already handled it)")
+                    print(f"[ADAPTIVE] (HTTP) -> AC apply debounced (MQTT already handled it)")
         elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            print(f"🤖 ADAPTIVE (HTTP) → BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+            print(f"[ADAPTIVE] (HTTP) -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
@@ -1574,14 +1702,14 @@ def update_optimization():
                     _last_adaptive_lamp_apply = now
                     lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    print(f"🤖 ADAPTIVE (HTTP) → Applied to Lamp: {opt_brightness}%")
+                    print(f"[ADAPTIVE] (HTTP) -> Applied to Lamp: {opt_brightness}%")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
                 else:
-                    print(f"🤖 ADAPTIVE (HTTP) → Lamp apply debounced")
+                    print(f"[ADAPTIVE] (HTTP) -> Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
-        print(f"❌ Optimization update error: {e}")
+        print(f"[ERROR] Optimization update error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/learn', methods=['POST'])
@@ -1609,7 +1737,7 @@ def learn_ir():
         
         # DEBUG LOGGING - SEE WHAT WE'RE SENDING!
         print("\n" + "="*60)
-        print("🔴 FLASK: PUBLISHING IR LEARN COMMAND")
+        print("[IR] FLASK: PUBLISHING IR LEARN COMMAND")
         print("="*60)
         print(f"Topic    : smartroom/ir/learn")
         print(f"Button   : {button_name}")
@@ -1624,9 +1752,9 @@ def learn_ir():
         
         print(f"Publish Result: {result.rc}")
         if result.rc == 0:
-            print("✅ MQTT PUBLISH SUCCESS!")
+            print("[OK] MQTT PUBLISH SUCCESS!")
         else:
-            print(f"❌ MQTT PUBLISH FAILED! RC={result.rc}")
+            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
         print("="*60 + "\n")
         
         log_messages.append({
@@ -1641,7 +1769,7 @@ def learn_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"❌ EXCEPTION in learn_ir(): {e}")
+        print(f"[ERROR] EXCEPTION in learn_ir(): {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1653,13 +1781,13 @@ def send_ir():
         button_name = data.get('button', '')
         
         print("\n" + "="*70)
-        print("📤 IR SEND REQUEST RECEIVED")
+        print("[IR] IR SEND REQUEST RECEIVED")
         print("="*70)
         print(f"Button requested: {button_name}")
         print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
         
         if button_name not in mqtt_data['ir_codes']:
-            print(f"❌ ERROR: Button '{button_name}' not found in learned codes!")
+            print(f"[ERROR] Button '{button_name}' not found in learned codes!")
             print("="*70 + "\n")
             return jsonify({'status': 'error', 'message': 'IR code not learned yet'}), 400
         
@@ -1671,12 +1799,12 @@ def send_ir():
             raw_part = ir_code[4:]
             raw_value_count = raw_part.count(',') + 1 if raw_part else 0
         
-        print(f"✅ IR code found!")
+        print(f"[OK] IR code found!")
         print(f"Code length: {len(ir_code)} chars")
         if raw_value_count > 0:
             print(f"RAW values: {raw_value_count} values")
             if raw_value_count < 100:
-                print(f"⚠️  WARNING: Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
+                print(f"[WARN] Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
         print(f"Code preview: {ir_code[:100]}..." if len(ir_code) > 100 else f"Code: {ir_code}")
         
         # Handle toggle buttons (power ON/OFF with same code)
@@ -1687,7 +1815,7 @@ def send_ir():
             new_state = 'ON' if current_state == 'OFF' else 'OFF'
             mqtt_data['ir_states'][button_name] = new_state
             action_suffix = f' ({new_state})'
-            print(f"🔄 Toggle button: {current_state} → {new_state}")
+            print(f"[IR] Toggle button: {current_state} -> {new_state}")
         
         # MQTT Payload - send COMPLETE code, no truncation!
         mqtt_payload = {
@@ -1703,7 +1831,7 @@ def send_ir():
         if verify_code.startswith('RAW:'):
             verify_raw_count = verify_code[4:].count(',') + 1
         
-        print(f"\n📡 Publishing to MQTT...")
+        print(f"\n[PUB] Publishing to MQTT...")
         print(f"Topic: smartroom/ir/send")
         print(f"Payload size: {len(mqtt_payload_str)} bytes")
         if verify_raw_count > 0:
@@ -1714,10 +1842,10 @@ def send_ir():
         
         print(f"Publish Result: {result.rc}")
         if result.rc == 0:
-            print("✅ MQTT PUBLISH SUCCESS!")
+            print("[OK] MQTT PUBLISH SUCCESS!")
             print("ESP32 should transmit IR signal NOW!")
         else:
-            print(f"❌ MQTT PUBLISH FAILED! RC={result.rc}")
+            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
         print("="*70 + "\n")
         
         log_messages.append({
@@ -1733,7 +1861,7 @@ def send_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"❌ EXCEPTION in send_ir(): {e}")
+        print(f"[ERROR] EXCEPTION in send_ir(): {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1765,7 +1893,7 @@ def delete_ir_code():
                 with open(ir_file, 'w') as f:
                     json.dump(mqtt_data['ir_codes'], f, indent=2)
             except Exception as e:
-                print(f"❌ Error updating IR codes file: {e}")
+                print(f"[ERROR] Error updating IR codes file: {e}")
             
             return jsonify({'status': 'success', 'message': f'IR code {button_name} deleted'})
         else:
@@ -1809,7 +1937,7 @@ def manual_save_ir():
             with open(ir_file, 'w') as f:
                 json.dump(mqtt_data['ir_codes'], f, indent=2)
         except Exception as e:
-            print(f"❌ Error saving to file: {e}")
+            print(f"[ERROR] Error saving to file: {e}")
         
         # Notify frontend
         socketio.emit('ir_learned', {
@@ -1884,7 +2012,7 @@ def check_alert_rules():
     else:
         rule['triggered'] = False
     
-    # No person timeout → suggest turning off AC
+    # No person timeout -> suggest turning off AC
     rule = alert_rules['no_person_timeout']
     if rule['enabled']:
         if person:
@@ -2592,7 +2720,42 @@ HTML_TEMPLATE = '''
 
         .toast.show { display: block; }
 
-        .power-grid {
+        /* Energy data bubble notification */
+        .energy-bubble {
+            position: fixed;
+            top: 80px;
+            right: 30px;
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95));
+            color: #fff;
+            padding: 10px 18px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 9998;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(-10px) scale(0.9);
+            transition: opacity 0.3s, transform 0.3s;
+            box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .energy-bubble.show {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+        .energy-bubble .bubble-dot {
+            width: 8px;
+            height: 8px;
+            background: #fff;
+            border-radius: 50%;
+            animation: bubblePulse 1s infinite;
+        }
+        @keyframes bubblePulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
@@ -3023,8 +3186,13 @@ HTML_TEMPLATE = '''
         <div id="dashboard-ac" class="page active">
             <div class="header">
                 <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status</p>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;"><i class="fas fa-stethoscope"></i> Diagnostik</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
+                    <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
+                        <span class="device-dot offline" id="mqtt-dot"></span>
+                        <span>MQTT</span>
+                        <span class="device-time" id="mqtt-status-text">Checking...</span>
+                    </div>
                     <div class="device-status-item" id="ds-esp32-ac">
                         <span class="device-dot offline"></span>
                         <span>ESP32-AC</span>
@@ -3035,6 +3203,30 @@ HTML_TEMPLATE = '''
                         <span>Camera</span>
                         <span class="device-time" id="ds-cam-time">Never</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- DIAGNOSTIC PANEL -->
+            <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #f59e0b; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <i class="fas fa-stethoscope" style="color: #f59e0b; font-size: 18px;"></i>
+                    <strong style="color: #f59e0b;">Diagnostic Mode</strong>
+                    <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
+                </div>
+                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
+                        <i class="fas fa-vial"></i> Test Frontend (Inject Data Dummy)
+                    </button>
+                    <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-satellite-dish"></i> Test MQTT Broker (Self-Test)
+                    </button>
+                    <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #8b5cf6; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-sync"></i> Reconnect MQTT
+                    </button>
+                    <button onclick="checkMqttStatus(true)" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #6b7280; border: none; color: white; border-radius: 8px;">
+                        <i class="fas fa-info-circle"></i> MQTT Status Detail
+                    </button>
                 </div>
             </div>
 
@@ -3288,14 +3480,14 @@ HTML_TEMPLATE = '''
                         </div>
                         <div>
                             <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm → AC | PSO → Lamp</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm -> AC | PSO -> Lamp</div>
                         </div>
                     </div>
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
                         <!-- GA Section -->
                         <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-dna"></i> GA → AC Control
+                                <i class="fas fa-dna"></i> GA -> AC Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3317,7 +3509,7 @@ HTML_TEMPLATE = '''
                         <!-- PSO Section -->
                         <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-lightbulb"></i> PSO → Lamp Control
+                                <i class="fas fa-lightbulb"></i> PSO -> Lamp Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3429,7 +3621,7 @@ HTML_TEMPLATE = '''
                 <!-- PSO Control -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">PSO → Lamp Control</span>
+                        <span class="stat-title">PSO -> Lamp Control</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             <i class="fas fa-chart-line"></i>
                         </div>
@@ -3454,6 +3646,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Room Temperature Trend</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
@@ -3466,6 +3659,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Humidity Trend</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
@@ -3478,6 +3672,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">AC Target Temperature</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -3498,6 +3693,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 24)">24h</button>
@@ -3510,6 +3706,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">Average Brightness Level — 3 Lamps</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 24)">24h</button>
@@ -3597,6 +3794,9 @@ HTML_TEMPLATE = '''
             <div class="header">
                 <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
                 <p>Real-time & historical energy monitoring from PZEM-016</p>
+                <button class="chart-option-btn" onclick="exportEnergyHistory()" style="margin-top: 8px;">
+                    <i class="fas fa-download"></i> Export Energy Data CSV
+                </button>
             </div>
 
             <!-- Real-time summary cards -->
@@ -3631,6 +3831,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyPower', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
@@ -3646,6 +3847,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyVoltage', 'Voltage (V)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
@@ -3661,6 +3863,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energyKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
@@ -3673,6 +3876,9 @@ HTML_TEMPLATE = '''
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('energy', 'Energy (kWh/day)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                    </div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
@@ -3720,6 +3926,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompare', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
@@ -3734,6 +3941,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompareKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
@@ -3963,14 +4171,14 @@ HTML_TEMPLATE = '''
         <div id="ml-optimization" class="page">
             <div class="header">
                 <h1><i class="fas fa-brain"></i> Machine Learning Optimization</h1>
-                <p>GA → Adaptive AC | PSO → Adaptive Lamp | Data from InfluxDB</p>
+                <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
             </div>
 
             <!-- ML Summary Cards -->
             <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">GA → AC</span>
+                        <span class="stat-title">GA -> AC</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><i class="fas fa-dna"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #10b981;">0.00</span></div>
@@ -3988,7 +4196,7 @@ HTML_TEMPLATE = '''
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">PSO → Lamp</span>
+                        <span class="stat-title">PSO -> Lamp</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><i class="fas fa-chart-line"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
@@ -4010,8 +4218,8 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-database"></i></div>
                     </div>
                     <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
-                        🌡️ <span id="ml-cur-temp">--</span>°C &nbsp; 💧 <span id="ml-cur-hum">--</span>%<br>
-                        💡 <span id="ml-cur-lux">--</span> lux &nbsp; 👤 <span id="ml-cur-person">--</span>
+                        Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
+                        Lux: <span id="ml-cur-lux">--</span> lux &nbsp; Person: <span id="ml-cur-person">--</span>
                     </div>
                     <div class="stat-change"><span>From InfluxDB</span></div>
                 </div>
@@ -4031,6 +4239,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-dna" style="color: #10b981;"></i> GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             <i class="fas fa-play"></i> Run GA
                         </button>
@@ -4044,6 +4253,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-line" style="color: #f59e0b;"></i> PSO Fitness Convergence (Lamp Optimization)</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
                             <i class="fas fa-play"></i> Run PSO
                         </button>
@@ -4057,6 +4267,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-balance-scale" style="color: #6366f1;"></i> GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
                             <i class="fas fa-play"></i> Run Both
                         </button>
@@ -4073,6 +4284,9 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-history" style="color: #a855f7;"></i> Optimization History</div>
                     <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportMLHistory()">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
                         <button class="chart-option-btn" onclick="refreshMLHistory()">
                             <i class="fas fa-sync"></i> Refresh
                         </button>
@@ -4156,6 +4370,9 @@ HTML_TEMPLATE = '''
             <div class="header">
                 <h1>System Logs</h1>
                 <p>Real-time system events and notifications</p>
+                <button class="chart-option-btn" onclick="exportLogs()" style="margin-top: 8px;">
+                    <i class="fas fa-download"></i> Export Logs CSV
+                </button>
             </div>
 
             <div class="log-container" id="log-container">
@@ -4181,6 +4398,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-header" style="margin-bottom: 10px;">
                         <div class="chart-title">Occupancy Trend</div>
                         <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
@@ -4228,6 +4446,11 @@ HTML_TEMPLATE = '''
                 <div class="chart-container">
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-history"></i> Recent Feedback</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportFeedback()">
+                                <i class="fas fa-download"></i> Export CSV
+                            </button>
+                        </div>
                     </div>
                     <div id="feedback-history"></div>
                 </div>
@@ -4238,6 +4461,12 @@ HTML_TEMPLATE = '''
     <!-- Toast Notification -->
     <div id="toast" class="toast">
         <div id="toast-message"></div>
+    </div>
+
+    <!-- Energy Data Bubble -->
+    <div id="energy-bubble" class="energy-bubble">
+        <span class="bubble-dot"></span>
+        <span id="energy-bubble-text">--</span>
     </div>
 
     <!-- Detection Alert -->
@@ -4259,10 +4488,22 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
-        const socket = io();
+        window.onerror = function(msg, url, line, col, error) {
+            console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
+            return false;
+        };
+
+        var socket = null;
+        try {
+            socket = io();
+            console.log('[OK] Socket.IO connected');
+        } catch(e) {
+            console.warn('[WARN] Socket.IO not available:', e.message);
+            socket = { on: function(){}, emit: function(){} };
+        }
         
-        let charts = {};
-        let chartRanges = {
+        var charts = {};
+        var chartRanges = {
             temp: 1,
             hum: 1,
             acTemp: 1,
@@ -4271,10 +4512,10 @@ HTML_TEMPLATE = '''
             occupancy: 1
         };
 
-        let selectedFeedbackRating = 0;
-        const DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
+        var selectedFeedbackRating = 0;
+        var DEFAULT_GOOGLE_FORM_URL = 'https://docs.google.com/forms/';
 
-        let learnedCodes = {};
+        var learnedCodes = {};
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
@@ -4362,23 +4603,23 @@ HTML_TEMPLATE = '''
 
             charts.energy = new Chart(document.getElementById('energyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             // Historical Energy Charts (PZEM-016 from InfluxDB)
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             // Before vs After Comparison Charts
@@ -4391,8 +4632,8 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
                     ]
                 }
             });
@@ -4406,15 +4647,15 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 1 }
+                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
+                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
                     ]
                 }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
                 ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             // ML Optimization Charts
@@ -4479,7 +4720,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== ENERGY HISTORY (PZEM-016 from InfluxDB) ====================
-        const energyChartMap = {
+        var energyChartMap = {
             'power': 'energyPower',
             'voltage': 'energyVoltage',
             'energy_kwh': 'energyKwh'
@@ -4523,7 +4764,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== BEFORE vs AFTER COMPARISON ====================
-        let currentEnergyPhase = 'before';
+        var currentEnergyPhase = 'before';
 
         function loadCurrentPhase() {
             fetch('/api/energy/phase')
@@ -4683,11 +4924,24 @@ HTML_TEMPLATE = '''
         }
 
         function showPage(pageId) {
+            console.log('[NAV] showPage called:', pageId);
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             
-            document.getElementById(pageId).classList.add('active');
-            event.target.closest('.nav-item').classList.add('active');
+            const pageEl = document.getElementById(pageId);
+            if (pageEl) {
+                pageEl.classList.add('active');
+                console.log('[NAV] Page activated:', pageId);
+            } else {
+                console.error('[NAV] Page not found:', pageId);
+            }
+            
+            // Mark the correct nav-item as active
+            document.querySelectorAll('.nav-item').forEach(item => {
+                if (item.getAttribute('onclick') && item.getAttribute('onclick').includes("'" + pageId + "'")) {
+                    item.classList.add('active');
+                }
+            });
             
             localStorage.setItem('currentPage', pageId);
 
@@ -4701,23 +4955,23 @@ HTML_TEMPLATE = '''
             }
 
             if (pageId === 'camera') {
-                checkCameraStatus();
+                try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
-                refreshMLData();
+                try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
             }
             if (pageId === 'occupancy-feedback') {
-                updateChartData('occupancy', chartRanges.occupancy || 1);
-                loadFeedbackHistory();
+                try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
+                try { loadFeedbackHistory(); } catch(e) {}
             }
             if (pageId === 'energy') {
-                loadAllEnergyCharts();
+                try { loadAllEnergyCharts(); } catch(e) { console.error('[NAV] energy init error:', e); }
             }
         }
 
         // ==================== ML OPTIMIZATION ====================
-        let mlHistory = [];
-        let mlRunCount = 0;
+        var mlHistory = [];
+        var mlRunCount = 0;
 
         function refreshMLData() {
             fetch('/api/ml/status')
@@ -4833,6 +5087,131 @@ HTML_TEMPLATE = '''
             showToast('ML data refreshed', 'success');
         }
 
+        // ==================== EXPORT FUNCTIONS ====================
+        function downloadCSV(filename, csvContent) {
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        function exportMLHistory() {
+            if (!mlHistory || mlHistory.length === 0) {
+                showToast('No optimization data to export', 'error');
+                return;
+            }
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
+            mlHistory.forEach(e => {
+                csv += `${e.run},"${e.time}",${e.ga_fitness.toFixed(2)},${e.ga_temp},${e.ga_fan},${e.pso_fitness.toFixed(2)},${e.pso_brightness},${e.combined.toFixed(2)}\n`;
+            });
+            downloadCSV('ml_optimization_history.csv', csv);
+            showToast('ML history exported', 'success');
+        }
+
+        function exportLogs() {
+            const container = document.getElementById('log-container');
+            if (!container || !container.children.length) {
+                showToast('No logs to export', 'error');
+                return;
+            }
+            let csv = 'Time,Level,Message\n';
+            Array.from(container.children).forEach(entry => {
+                const text = entry.textContent || '';
+                const timeMatch = text.match(/\\[(.+?)\\]/);
+                const time = timeMatch ? timeMatch[1] : '';
+                const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
+                const level = entry.className.replace('log-entry ', '').trim();
+                csv += `"${time}","${level}","${msg}"\n`;
+            });
+            downloadCSV('system_logs.csv', csv);
+            showToast('Logs exported', 'success');
+        }
+
+        function exportFeedback() {
+            fetch('/api/occupancy/feedback/list')
+                .then(r => r.json())
+                .then(data => {
+                    const rows = data.feedback || [];
+                    if (rows.length === 0) {
+                        showToast('No feedback data to export', 'error');
+                        return;
+                    }
+                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
+                    rows.forEach(item => {
+                        const comment = (item.comment || '').replace(/"/g, '""');
+                        csv += `"${item.time}",${item.rating},${item.occupancy_count},"${comment}"\n`;
+                    });
+                    downloadCSV('occupancy_feedback.csv', csv);
+                    showToast('Feedback exported', 'success');
+                })
+                .catch(() => showToast('Failed to fetch feedback data', 'error'));
+        }
+
+        function exportEnergyHistory() {
+            const period = '24h';
+            fetch('/api/energy/history?period=' + period)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.power || data.power.length === 0) {
+                        showToast('No energy data to export', 'error');
+                        return;
+                    }
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
+                    const times = data.power.map(p => p.time);
+                    const powers = data.power || [];
+                    const voltages = data.voltage || [];
+                    const energies = data.energy_kwh || [];
+                    times.forEach((t, i) => {
+                        const pw = powers[i] ? powers[i].value : '';
+                        const vl = voltages[i] ? voltages[i].value : '';
+                        const en = energies[i] ? energies[i].value : '';
+                        csv += `"${t}",${pw},${vl},${en}\n`;
+                    });
+                    downloadCSV('energy_history_' + period + '.csv', csv);
+                    showToast('Energy data exported (' + period + ')', 'success');
+                })
+                .catch(() => showToast('Failed to fetch energy history', 'error'));
+        }
+
+        // Generic chart data export (single dataset charts)
+        function exportChartData(chartName, valueLabel) {
+            const chart = charts[chartName];
+            if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
+                showToast('No data to export for ' + chartName, 'error');
+                return;
+            }
+            let csv = 'Time,' + valueLabel + '\n';
+            chart.data.labels.forEach((label, i) => {
+                const val = chart.data.datasets[0].data[i];
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
+            });
+            downloadCSV(chartName + '_data.csv', csv);
+            showToast(chartName + ' data exported', 'success');
+        }
+
+        // Export for multi-dataset comparison charts (Before/After, GA vs PSO)
+        function exportCompareChart(chartName, valueLabel) {
+            const chart = charts[chartName];
+            if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
+                showToast('No data to export for ' + chartName, 'error');
+                return;
+            }
+            const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
+            let csv = 'Time,' + dsNames.join(',') + '\n';
+            chart.data.labels.forEach((label, i) => {
+                let row = '"' + label + '"';
+                chart.data.datasets.forEach(ds => {
+                    const val = ds.data[i];
+                    row += ',' + (val !== null && val !== undefined ? val : '');
+                });
+                csv += row + '\n';
+            });
+            downloadCSV(chartName + '_compare.csv', csv);
+            showToast(chartName + ' comparison exported', 'success');
+        }
+
         function getMLParams(algo) {
             if (algo === 'ga') {
                 return {
@@ -4921,7 +5300,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== CAMERA ====================
-        let cameraEnabled = true;
+        var cameraEnabled = true;
 
         function toggleCamera() {
             fetch('/api/camera/toggle', { method: 'POST' })
@@ -5045,7 +5424,7 @@ HTML_TEMPLATE = '''
             });
         }
 
-        let selectedACMode = 'COOL';
+        var selectedACMode = 'COOL';
 
         function selectACSetMode(mode, btn) {
             selectedACMode = mode;
@@ -5244,8 +5623,8 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== IR REMOTE ====================
-        let currentLearningButton = null;
-        let learningCheckInterval = null;
+        var currentLearningButton = null;
+        var learningCheckInterval = null;
         
         function learnIRCode(buttonName, deviceName = 'AC') {
             // Clear any previous learning interval
@@ -5418,7 +5797,7 @@ HTML_TEMPLATE = '''
                         const statusElement = document.getElementById('status-' + buttonName);
                         if (buttonElement && statusElement) {
                             buttonElement.classList.add('learned');
-                            statusElement.textContent = 'Learned ✓';
+                            statusElement.textContent = 'Learned [OK]';
                             statusElement.style.color = '#10b981';
                         }
                     });
@@ -5434,7 +5813,7 @@ HTML_TEMPLATE = '''
         }
 
         function resetAllIRCodes() {
-            if (!confirm('⚠️ Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
+            if (!confirm('[WARNING] Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
                 return;
             }
             
@@ -5529,18 +5908,18 @@ HTML_TEMPLATE = '''
                     debugInfo += '═══════════════════════════════════\\n\\n';
                     
                     if (Object.keys(codes).length === 0) {
-                        debugInfo += '⚠️ No IR codes learned yet\\n\\n';
+                        debugInfo += '[WARN] No IR codes learned yet\\n\\n';
                         debugInfo += 'Steps to learn:\\n';
                         debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
                         debugInfo += '2. Click \"Learn\" button\\n';
                         debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
-                        debugInfo += '4. Wait for \"Learned ✓\" status\\n';
+                        debugInfo += '4. Wait for \"Learned [OK]\" status\\n';
                         debugInfo += '5. Click \"Send\" to test\\n';
                     } else {
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += `📡 ${button}:\\n`;
+                            debugInfo += `[IR] ${button}:\\n`;
                             debugInfo += `   Code: ${codePreview}\\n`;
                             debugInfo += `   Length: ${codeStr.length} chars\\n`;
                             
@@ -5556,7 +5935,7 @@ HTML_TEMPLATE = '''
                         debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
                     }
                     
-                    debugInfo += '\\n💡 TROUBLESHOOTING:\\n';
+                    debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
                     debugInfo += '- If AC not responding: Use RAW protocol\\n';
                     debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
                     debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
@@ -5606,9 +5985,9 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== DETECTION ALERT ====================
-        let lastDetectionTime = 0;
-        const DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
-        let detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
+        var lastDetectionTime = 0;
+        var DETECTION_COOLDOWN = 60000; // 60 seconds (1 minute) between alerts
+        var detectionSoundEnabled = localStorage.getItem('detectionSound') !== 'false';
 
         // Initialize sound toggle button visual on load
         function updateSoundToggleUI() {
@@ -5695,7 +6074,7 @@ HTML_TEMPLATE = '''
                 alertBox.classList.remove('show');
             }, 5000);
             
-            console.log('🚨 PERSON DETECTED:', {
+            console.log('[ALERT] PERSON DETECTED:', {
                 count: count,
                 confidence: confidence + '%',
                 time: new Date().toLocaleTimeString()
@@ -5712,9 +6091,9 @@ HTML_TEMPLATE = '''
             updateSoundToggleUI();
             if (detectionSoundEnabled) {
                 playDetectionSound();
-                showToast('🔊 Sound alerts ON — you will hear a sound when a person is detected', 'success');
+                showToast('Sound alerts ON — you will hear a sound when a person is detected', 'success');
             } else {
-                showToast('🔇 Sound alerts OFF — sound notifications disabled', 'info');
+                showToast('Sound alerts OFF — sound notifications disabled', 'info');
             }
         }
 
@@ -5727,6 +6106,17 @@ HTML_TEMPLATE = '''
             toastMessage.innerHTML = '<i class="fas fa-' + icon + '-circle"></i> ' + message;
             toast.classList.add('show');
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
+        }
+
+        var energyBubbleTimer = null;
+        function showEnergyBubble(power, voltage, current) {
+            const bubble = document.getElementById('energy-bubble');
+            const text = document.getElementById('energy-bubble-text');
+            if (!bubble || !text) return;
+            text.textContent = power.toFixed(1) + ' W | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
+            bubble.classList.add('show');
+            if (energyBubbleTimer) clearTimeout(energyBubbleTimer);
+            energyBubbleTimer = setTimeout(() => { bubble.classList.remove('show'); }, 4000);
         }
 
         // ==================== OCCUPANCY FEEDBACK ====================
@@ -5820,37 +6210,52 @@ HTML_TEMPLATE = '''
 
         // ==================== DATA UPDATES ====================
         function updateDashboard() {
-            fetch('/api/data')
+            fetch('/api/data', { cache: 'no-store' })
                 .then(r => r.json())
-                .then(data => {
-                    const temperature = data.ac.temperature;
-                    document.getElementById('dash-temp').textContent = temperature.toFixed(1);
-                    document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
+                .then(data => { try {
+                    data = data || {};
+                    const ac = data.ac || {};
+                    const lamp = data.lamp || {};
+                    const camera = data.camera || {};
+                    const system = data.system || {};
+                    const energy = data.energy || {};
+                    const num = (v, d = 0) => {
+                        const n = parseFloat(v);
+                        return Number.isFinite(n) ? n : d;
+                    };
+                    const setText = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el) el.textContent = val;
+                    };
+
+                    const temperature = num(ac.temperature);
+                    setText('dash-temp', temperature.toFixed(1));
+                    setText('dash-hum', num(ac.humidity).toFixed(1));
                     // Individual sensor readings
                     const t1El = document.getElementById('dash-temp1');
                     const t2El = document.getElementById('dash-temp2');
                     const t3El = document.getElementById('dash-temp3');
-                    if (t1El) t1El.textContent = (data.ac.temp1 || 0).toFixed(1);
-                    if (t2El) t2El.textContent = (data.ac.temp2 || 0).toFixed(1);
-                    if (t3El) t3El.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    if (t1El) t1El.textContent = num(ac.temp1).toFixed(1);
+                    if (t2El) t2El.textContent = num(ac.temp2).toFixed(1);
+                    if (t3El) t3El.textContent = num(ac.temp3).toFixed(1);
                     // Individual humidity readings
                     const h1El = document.getElementById('dash-hum1');
                     const h2El = document.getElementById('dash-hum2');
                     const h3El = document.getElementById('dash-hum3');
-                    if (h1El) h1El.textContent = (data.ac.hum1 || 0).toFixed(1);
-                    if (h2El) h2El.textContent = (data.ac.hum2 || 0).toFixed(1);
-                    if (h3El) h3El.textContent = (data.ac.hum3 || 0).toFixed(1);
+                    if (h1El) h1El.textContent = num(ac.hum1).toFixed(1);
+                    if (h2El) h2El.textContent = num(ac.hum2).toFixed(1);
+                    if (h3El) h3El.textContent = num(ac.hum3).toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
-                    if (hiEl) hiEl.textContent = (data.ac.heat_index || 0).toFixed(1);
+                    if (hiEl) hiEl.textContent = num(ac.heat_index).toFixed(1);
                     
                     // ESP32 Signal & Uptime
                     const rssiEl = document.getElementById('dash-rssi');
-                    if (rssiEl) rssiEl.textContent = data.ac.rssi || 0;
+                    if (rssiEl) rssiEl.textContent = ac.rssi || 0;
                     const uptEl = document.getElementById('dash-uptime');
                     if (uptEl) {
-                        const secs = data.ac.uptime || 0;
+                        const secs = num(ac.uptime);
                         const h = Math.floor(secs / 3600);
                         const m = Math.floor((secs % 3600) / 60);
                         uptEl.textContent = h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (secs % 60) + 's';
@@ -5858,15 +6263,16 @@ HTML_TEMPLATE = '''
                     
                     // AC State - use REAL state from ESP32, not temperature guessing
                     const acStateEl = document.getElementById('dash-ac-state');
-                    let acState = data.ac.ac_state || 'OFF';
+                    let acState = ac.ac_state || 'OFF';
                     
-                    if (acState === 'ON') {
-                        acStateEl.style.color = '#10b981'; // Green
-                    } else {
-                        acStateEl.style.color = '#ef4444'; // Red
+                    if (acStateEl) {
+                        if (acState === 'ON') {
+                            acStateEl.style.color = '#10b981'; // Green
+                        } else {
+                            acStateEl.style.color = '#ef4444'; // Red
+                        }
+                        acStateEl.textContent = acState;
                     }
-                    
-                    acStateEl.textContent = acState;
                     
                     // AC panel power dot
                     const panelDot = document.getElementById('ac-panel-dot');
@@ -5876,12 +6282,12 @@ HTML_TEMPLATE = '''
                     }
                     
                     // Set Temperature
-                    const acTemp = data.ac.ac_temp || 24;
-                    document.getElementById('dash-ac-temp').textContent = acTemp;
+                    const acTemp = num(ac.ac_temp, 24);
+                    setText('dash-ac-temp', acTemp);
                     
                     // Fan Speed with label
-                    const fanSpeed = data.ac.fan_speed || 1;
-                    document.getElementById('dash-ac-fan').textContent = fanSpeed;
+                    const fanSpeed = num(ac.fan_speed, 1);
+                    setText('dash-ac-fan', fanSpeed);
                     const fanLabel = document.getElementById('dash-ac-fan-label');
                     if (fanLabel) {
                         const fanNames = {1: 'Low', 2: 'Medium', 3: 'High'};
@@ -5889,8 +6295,8 @@ HTML_TEMPLATE = '''
                     }
                     
                     // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color — uses ac_fan_mode from ESP32
-                    const acMode = data.ac.ac_fan_mode || 'COOL';
-                    document.getElementById('dash-ac-mode').textContent = acMode;
+                    const acMode = ac.ac_fan_mode || 'COOL';
+                    setText('dash-ac-mode', acMode);
                     const modeIconEl = document.getElementById('dash-ac-mode-icon');
                     const modeTextEl = document.getElementById('dash-ac-mode');
                     const modeIcons = {
@@ -5908,7 +6314,7 @@ HTML_TEMPLATE = '''
                     if (modeTextEl) modeTextEl.style.color = modeInfo.color;
                     
                     // Operating Mode (ADAPTIVE / MANUAL)
-                    const ctrlMode = data.ac.mode || 'ADAPTIVE';
+                    const ctrlMode = ac.mode || 'ADAPTIVE';
                     const ctrlIcon = document.getElementById('dash-ac-ctrl-icon');
                     const ctrlText = document.getElementById('dash-ac-ctrl-mode');
                     if (ctrlIcon && ctrlText) {
@@ -5945,14 +6351,14 @@ HTML_TEMPLATE = '''
                     const roomTemp = document.getElementById('dash-ac-room-temp');
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
-                    if (roomHum) roomHum.textContent = data.ac.humidity.toFixed(1);
+                    if (roomHum) roomHum.textContent = num(ac.humidity).toFixed(1);
                     // Individual sensors in AC panel footer
                     const acT1 = document.getElementById('dash-ac-temp1');
                     const acT2 = document.getElementById('dash-ac-temp2');
                     const acT3 = document.getElementById('dash-ac-temp3');
-                    if (acT1) acT1.textContent = (data.ac.temp1 || 0).toFixed(1);
-                    if (acT2) acT2.textContent = (data.ac.temp2 || 0).toFixed(1);
-                    if (acT3) acT3.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    if (acT1) acT1.textContent = num(ac.temp1).toFixed(1);
+                    if (acT2) acT2.textContent = num(ac.temp2).toFixed(1);
+                    if (acT3) acT3.textContent = num(ac.temp3).toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -5960,23 +6366,23 @@ HTML_TEMPLATE = '''
                     if (liveDot && liveState) {
                         liveState.textContent = acState;
                         liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
-                        document.getElementById('ac-live-temp').textContent = acTemp;
-                        document.getElementById('ac-live-fan').textContent = fanSpeed;
-                        document.getElementById('ac-live-mode').textContent = acMode;
+                        setText('ac-live-temp', acTemp);
+                        setText('ac-live-fan', fanSpeed);
+                        setText('ac-live-mode', acMode);
                     }
-                    document.getElementById('dash-lux1').textContent = (data.lamp.lux1 || 0).toFixed(0);
-                    document.getElementById('dash-lux2').textContent = (data.lamp.lux2 || 0).toFixed(0);
-                    document.getElementById('dash-lux3').textContent = (data.lamp.lux3 || 0).toFixed(0);
-                    document.getElementById('dash-lux-avg').textContent = (data.lamp.lux_avg || 0).toFixed(1);
-                    document.getElementById('dash-bright1').textContent = Math.round((data.lamp.brightness1 || 0) / 255 * 100);
-                    document.getElementById('dash-bright2').textContent = Math.round((data.lamp.brightness2 || 0) / 255 * 100);
-                    document.getElementById('dash-bright3').textContent = Math.round((data.lamp.brightness3 || 0) / 255 * 100);
-                    document.getElementById('dash-bright-avg').textContent = Math.round((data.lamp.brightness_avg || 0) / 255 * 100);
-                    document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
+                    setText('dash-lux1', num(lamp.lux1).toFixed(0));
+                    setText('dash-lux2', num(lamp.lux2).toFixed(0));
+                    setText('dash-lux3', num(lamp.lux3).toFixed(0));
+                    setText('dash-lux-avg', num(lamp.lux_avg).toFixed(1));
+                    setText('dash-bright1', Math.round(num(lamp.brightness1) / 255 * 100));
+                    setText('dash-bright2', Math.round(num(lamp.brightness2) / 255 * 100));
+                    setText('dash-bright3', Math.round(num(lamp.brightness3) / 255 * 100));
+                    setText('dash-bright-avg', Math.round(num(lamp.brightness_avg) / 255 * 100));
+                    setText('dash-motion', lamp.motion ? 'MOTION DETECTED' : 'NO MOTION');
                     
-                    const personDetected = data.camera.person_detected;
-                    const personCount = data.camera.count || 0;
-                    const confidence = data.camera.confidence || 0;
+                    const personDetected = !!camera.person_detected;
+                    const personCount = num(camera.count);
+                    const confidence = num(camera.confidence);
                     
                     const camPersonEl = document.getElementById('cam-person');
                     if (camPersonEl) {
@@ -6023,8 +6429,8 @@ HTML_TEMPLATE = '''
                     }
                     
                     // Update GA/PSO Fitness (from optimization algorithm)
-                    const gaFitness = parseFloat(data.system.ga_fitness) || 0;
-                    const psoFitness = parseFloat(data.system.pso_fitness) || 0;
+                    const gaFitness = num(system.ga_fitness);
+                    const psoFitness = num(system.pso_fitness);
                     
                     const gaEl = document.getElementById('ga-fitness');
                     const psoEl = document.getElementById('pso-fitness');
@@ -6041,14 +6447,14 @@ HTML_TEMPLATE = '''
                     // PSO Brightness
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
-                        const psoBright = data.system.pso_brightness || 0;
+                        const psoBright = num(system.pso_brightness);
                         psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
                     }
                     
                     // Optimization Runs
                     const optRunsEl = document.getElementById('dash-opt-runs');
                     if (optRunsEl) {
-                        optRunsEl.textContent = data.system.optimization_runs || 0;
+                        optRunsEl.textContent = num(system.optimization_runs);
                     }
                     
                     // Calculate AC power based on temperature logic
@@ -6056,17 +6462,17 @@ HTML_TEMPLATE = '''
                     const actualACState = temperature < 30 ? 'ON' : 'OFF';
                     
                     if (actualACState === 'ON') {
-                        acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
+                        acPower = fanSpeed === 1 ? 100 : (fanSpeed === 2 ? 200 : 300);
                     }
-                    let lampPower = ((data.lamp.brightness1 || 0) + (data.lamp.brightness2 || 0) + (data.lamp.brightness3 || 0)) / 255 * 10;
+                    let lampPower = (num(lamp.brightness1) + num(lamp.brightness2) + num(lamp.brightness3)) / 255 * 10;
                     let totalPower = acPower + lampPower;
 
                     // Use real PZEM data if available, otherwise estimate
                     let realPower = null;
                     let realEnergyKwh = null;
-                    if (data.energy && data.energy.connected) {
-                        realPower = parseFloat(data.energy.power || 0);
-                        realEnergyKwh = parseFloat(data.energy.energy || 0);
+                    if (energy && energy.connected) {
+                        realPower = num(energy.power);
+                        realEnergyKwh = num(energy.energy);
                     }
 
                     let acEnergyKwh = (acPower / 1000) * 24;
@@ -6096,8 +6502,8 @@ HTML_TEMPLATE = '''
                     }
                     
                     // Energy Monitor (PZEM-016) data
-                    if (data.energy) {
-                        const e = data.energy;
+                    if (energy) {
+                        const e = energy;
                         const eVolt = document.getElementById('energy-voltage');
                         const eCurr = document.getElementById('energy-current');
                         const ePow = document.getElementById('energy-power');
@@ -6130,7 +6536,7 @@ HTML_TEMPLATE = '''
                     }
 
                     updateModeBadges();
-                });
+                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
         }
 
         function updateLogs() {
@@ -6149,7 +6555,118 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== DEVICE STATUS ====================
+        function diagLog(msg) {
+            var el = document.getElementById('diag-result');
+            if (el) el.textContent += msg + '\n';
+        }
+        function diagClear(title) {
+            var el = document.getElementById('diag-result');
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
+        }
+
+        function checkMqttStatus(showDetail) {
+            fetch('/api/mqtt/status')
+                .then(r => r.json())
+                .then(data => {
+                    var dot = document.getElementById('mqtt-dot');
+                    var txt = document.getElementById('mqtt-status-text');
+                    if (dot && txt) {
+                        if (data.connected) {
+                            dot.className = 'device-dot online';
+                            txt.textContent = 'Connected' + (data.message_count > 0 ? ' (' + data.message_count + ' msgs)' : '');
+                        } else {
+                            dot.className = 'device-dot offline';
+                            txt.textContent = data.error ? data.error.substring(0, 30) : 'Disconnected';
+                        }
+                    }
+                    if (showDetail) {
+                        diagClear('=== MQTT STATUS ===');
+                        diagLog('Broker: ' + data.broker);
+                        diagLog('Connected: ' + (data.connected ? 'YES' : 'NO'));
+                        diagLog('Messages received: ' + data.message_count);
+                        diagLog('Last connect: ' + (data.last_connect || 'Never'));
+                        diagLog('Last message: ' + (data.last_message || 'Never'));
+                        diagLog('Error: ' + (data.error || 'None'));
+                        diagLog('Subscriptions: ' + (data.subscriptions || []).join(', '));
+                        if (!data.connected) {
+                            diagLog('');
+                            diagLog('SOLUSI: Pastikan MQTT broker (Mosquitto) berjalan!');
+                            diagLog('Windows: net start mosquitto');
+                            diagLog('Linux/Pi: sudo systemctl start mosquitto');
+                        }
+                    }
+                })
+                .catch(function() {
+                    var dot = document.getElementById('mqtt-dot');
+                    var txt = document.getElementById('mqtt-status-text');
+                    if (dot) dot.className = 'device-dot offline';
+                    if (txt) txt.textContent = 'API Error';
+                    if (showDetail) diagLog('ERROR: Tidak bisa fetch /api/mqtt/status');
+                });
+        }
+
+        function runSimulate() {
+            diagClear('=== TEST FRONTEND (INJECT DATA DUMMY) ===');
+            diagLog('Mengirim data dummy ke server...');
+            fetch('/api/simulate', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        diagLog('BERHASIL! Data dummy sudah diinjek:');
+                        diagLog('  AC Temperature: ' + data.ac_temp + ' C');
+                        diagLog('  Lamp Lux1: ' + data.lamp_lux + ' lux');
+                        diagLog('');
+                        diagLog('Jika nilai di dashboard berubah dari 0 -> FRONTEND OK');
+                        diagLog('Jika tetap 0 -> Ada masalah di JavaScript/DOM');
+                        updateDashboard();
+                    } else {
+                        diagLog('ERROR: ' + data.message);
+                    }
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
+        function runMqttSelftest() {
+            diagClear('=== TEST MQTT BROKER (SELF-TEST) ===');
+            diagLog('Server akan publish ke smartroom/ac/sensors...');
+            fetch('/api/mqtt/selftest', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        diagLog('BERHASIL! Pesan test berhasil dipublish ke broker.');
+                        diagLog(data.message);
+                        diagLog('');
+                        diagLog('Tunggu 2 detik... lalu cek apakah data muncul di dashboard.');
+                        diagLog('Jika muncul -> MQTT Broker OK, masalah ada di ESP32');
+                        diagLog('Jika tidak muncul -> Ada masalah subscribe/routing topic');
+                        setTimeout(function() { updateDashboard(); diagLog('Dashboard refreshed.'); }, 2000);
+                    } else {
+                        diagLog('GAGAL: ' + data.message);
+                        diagLog('');
+                        diagLog('Artinya: MQTT Broker tidak berjalan atau tidak bisa terkoneksi!');
+                        diagLog('Jalankan Mosquitto terlebih dahulu.');
+                    }
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
+        function runMqttReconnect() {
+            diagClear('=== RECONNECT MQTT ===');
+            diagLog('Mencoba reconnect ke MQTT broker...');
+            fetch('/api/mqtt/reconnect', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    diagLog('Response: ' + data.message);
+                    setTimeout(function() {
+                        checkMqttStatus(true);
+                        diagLog('Status setelah reconnect dicek.');
+                    }, 2000);
+                })
+                .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
+        }
+
         function updateDeviceStatus() {
+            checkMqttStatus(false);
             fetch('/api/device/status')
                 .then(r => r.json())
                 .then(data => {
@@ -6171,7 +6688,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== ALERT SYSTEM ====================
-        let alertQueue = [];
+        var alertQueue = [];
         socket.on('alert', function(alert) {
             showAlertBanner(alert);
         });
@@ -6262,9 +6779,17 @@ HTML_TEMPLATE = '''
                         badge.style.borderColor = 'rgba(107, 114, 128, 0.3)';
                     }
                 }
+                
+                // Show energy data bubble notification
+                const pwr = parseFloat(e.power || 0);
+                const vlt = parseFloat(e.voltage || 0);
+                const cur = parseFloat(e.current || 0);
+                if (pwr > 0 || vlt > 0) {
+                    showEnergyBubble(pwr, vlt, cur);
+                }
             }
 
-            // Real-time optimization (GA→AC / PSO→Lamp) updates
+            // Real-time optimization (GA->AC / PSO->Lamp) updates
             if (data.type === 'system') {
                 const gaFitness = parseFloat(data.data.ga_fitness) || 0;
                 const psoFitness = parseFloat(data.data.pso_fitness) || 0;
@@ -6299,7 +6824,7 @@ HTML_TEMPLATE = '''
                 const psoBrightEl = document.getElementById('pso-brightness');
                 if (psoBrightEl && psoBrightness > 0) psoBrightEl.textContent = psoBrightness;
                 
-                console.log('📊 Optimization Update:', {
+                console.log('[ML] Optimization Update:', {
                     ga: gaFitness.toFixed(2), ac_temp: gaTemp, ac_fan: gaFan,
                     pso: psoFitness.toFixed(2), lamp_brightness: psoBrightness,
                     runs: runs
@@ -6307,11 +6832,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast(`GA→AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO→Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
+                    showToast(`GA->AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO->Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
                 } else if (gaFitness > 0) {
-                    showToast(`GA→AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
+                    showToast(`GA->AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
                 } else if (psoFitness > 0) {
-                    showToast(`PSO→Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
+                    showToast(`PSO->Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -6468,7 +6993,7 @@ HTML_TEMPLATE = '''
                     }
                 }
                 
-                console.log('📹 Camera Update:', {
+                console.log('[CAM] Camera Update:', {
                     count: personCount,
                     confidence: confidence,
                     detected: personDetected
@@ -6478,19 +7003,19 @@ HTML_TEMPLATE = '''
 
         // ML Optimization status from main.py
         socket.on('ml_status', function(data) {
-            console.log('🤖 ML Status:', data);
+            console.log('[ML] ML Status:', data);
             const status = data.status || '';
             const algo = (data.algorithm || '').toUpperCase();
             
             if (status === 'running') {
-                showToast(`🚀 ${algo} optimization running...`, 'success');
+                showToast(`${algo} optimization running...`, 'success');
                 // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
             } else if (status === 'completed') {
-                showToast(`✅ ${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
+                showToast(`${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
                 // Re-enable run buttons
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
@@ -6499,18 +7024,18 @@ HTML_TEMPLATE = '''
                 // Refresh ML data
                 refreshMLData();
             } else if (status === 'error') {
-                showToast(`❌ ${algo} error: ${data.message || 'Unknown error'}`, 'error');
+                showToast(`${algo} error: ${data.message || 'Unknown error'}`, 'error');
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
                     btn.style.opacity = '1';
                 });
             } else if (status === 'busy') {
-                showToast(`⏳ Optimization already in progress`, 'warning');
+                showToast(`Optimization already in progress`, 'warning');
             }
         });
 
         socket.on('ir_learned', function(data) {
-            console.log('🎉 IR Learned event received:', data);
+            console.log('[OK] IR Learned event received:', data);
             
             let buttonName = data.button;
             let buttonElement = document.querySelector('[data-button="' + buttonName + '"]');
@@ -6524,7 +7049,7 @@ HTML_TEMPLATE = '''
             }
             
             if (data.status === 'error') {
-                showToast('❌ IR Learning failed: ' + (data.message || 'Unknown error'), 'error');
+                showToast('[ERROR] IR learning failed: ' + (data.message || 'Unknown error'), 'error');
                 if (buttonElement) buttonElement.classList.remove('learning');
                 if (statusElement) {
                     statusElement.textContent = 'Failed';
@@ -6540,11 +7065,11 @@ HTML_TEMPLATE = '''
             }
             
             if (statusElement) {
-                statusElement.textContent = 'Learned ✓';
+                statusElement.textContent = 'Learned [OK]';
                 statusElement.style.color = '#10b981';
             }
             
-            let message = '✅ IR Code learned: ' + buttonName;
+            let message = 'IR Code learned: ' + buttonName;
             if (data.is_toggle) {
                 message += ' (Power Toggle)';
             }
@@ -6560,7 +7085,7 @@ HTML_TEMPLATE = '''
             
             // If learning mode and IR topic detected, show notification
             if (currentLearningButton && (data.topic.includes('ir') || data.topic.includes('IR'))) {
-                console.log('⚠️ IR-related MQTT message while in learning mode!');
+                console.log('[WARN] IR-related MQTT message while in learning mode!');
             }
         });
 
@@ -6585,42 +7110,114 @@ HTML_TEMPLATE = '''
         }
 
         window.onload = function() {
-            console.log('🚀 Smart Room Dashboard Loading...');
-            initCharts();
-            loadSavedPreferences();
-            loadSavedSettings();
-            updateSoundToggleUI();
-            updateCameraToggleUI();
-            updateDashboard();
-            updateDeviceStatus();
-            updateLogs();
-            checkCameraStatus();
-            loadAllEnergyCharts();
+            console.log('[INIT] Smart Room Dashboard Loading...');
+            try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
+            try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
+            try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
+            try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
+            try { updateCameraToggleUI(); } catch(e) { console.error('[ERROR] updateCameraToggleUI:', e); }
+            try { updateDashboard(); } catch(e) { console.error('[ERROR] updateDashboard:', e); }
+            try { updateDeviceStatus(); } catch(e) { console.error('[ERROR] updateDeviceStatus:', e); }
+            // Auto-show diagnostic panel if MQTT is not connected
+            setTimeout(function() {
+                fetch('/api/mqtt/status').then(r => r.json()).then(function(d) {
+                    if (!d.connected) {
+                        var p = document.getElementById('diag-panel');
+                        if (p) {
+                            p.style.display = 'block';
+                            var res = document.getElementById('diag-result');
+                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Tidak diketahui') + '\n\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                        }
+                    }
+                }).catch(function() {});
+            }, 2000);
+            try { updateLogs(); } catch(e) { console.error('[ERROR] updateLogs:', e); }
+            try { checkCameraStatus(); } catch(e) { console.error('[ERROR] checkCameraStatus:', e); }
+            try { loadAllEnergyCharts(); } catch(e) { console.error('[ERROR] loadAllEnergyCharts:', e); }
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
             }
-            loadFeedbackHistory();
+            try { loadFeedbackHistory(); } catch(e) { console.error('[ERROR] loadFeedbackHistory:', e); }
             
             // Initialize AC mode UI on page load
-            updateModeBadges();
+            try { updateModeBadges(); } catch(e) { console.error('[ERROR] updateModeBadges:', e); }
             
             Object.keys(chartRanges).forEach(chartName => {
-                updateChartData(chartName, chartRanges[chartName]);
+                try { updateChartData(chartName, chartRanges[chartName]); } catch(e) { console.error('[ERROR] updateChartData ' + chartName + ':', e); }
             });
             
-            setInterval(updateDashboard, 1000);
-            setInterval(updateDeviceStatus, 5000);
-            setInterval(updateLogs, 5000);
+            setInterval(function() { try { updateDashboard(); } catch(e) {} }, 1000);
+            setInterval(function() { try { updateDeviceStatus(); } catch(e) {} }, 5000);
+            setInterval(function() { try { updateLogs(); } catch(e) {} }, 5000);
             
             setInterval(() => {
                 Object.keys(chartRanges).forEach(chartName => {
-                    updateChartData(chartName, chartRanges[chartName]);
+                    try { updateChartData(chartName, chartRanges[chartName]); } catch(e) {}
                 });
             }, 30000);
             
-            console.log('✅ Dashboard Ready!');
+            console.log('[OK] Dashboard Ready!');
         };
+    </script>
+
+    <!-- Failsafe Navigation - independent script block -->
+    <script>
+        (function() {
+            if (typeof window.showPage === 'function') {
+                console.log('[OK] showPage already defined');
+                return;
+            }
+            console.warn('[FAILSAFE] Main script failed - activating failsafe navigation');
+            window.showPage = function(pageId) {
+                var pages = document.querySelectorAll('.page');
+                var navs = document.querySelectorAll('.nav-item');
+                for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
+                for (var i = 0; i < navs.length; i++) navs[i].classList.remove('active');
+                var el = document.getElementById(pageId);
+                if (el) el.classList.add('active');
+                for (var i = 0; i < navs.length; i++) {
+                    var oc = navs[i].getAttribute('onclick');
+                    if (oc && oc.indexOf(pageId) !== -1) navs[i].classList.add('active');
+                }
+                localStorage.setItem('currentPage', pageId);
+            };
+            window.toggleSidebar = function() {
+                var sb = document.getElementById('sidebar');
+                var ov = document.getElementById('sidebar-overlay');
+                if (sb) sb.classList.toggle('open');
+                if (ov) ov.classList.toggle('active');
+            };
+            window.toggleTheme = function() {
+                var cur = document.documentElement.getAttribute('data-theme');
+                var nw = cur === 'dark' ? 'light' : 'dark';
+                document.documentElement.setAttribute('data-theme', nw);
+                localStorage.setItem('theme', nw);
+            };
+            // Start basic data polling
+            function basicUpdate() {
+                try {
+                    var x = new XMLHttpRequest();
+                    x.open('GET', '/api/data');
+                    x.onload = function() {
+                        if (x.status === 200) {
+                            var d = JSON.parse(x.responseText);
+                            var t = document.getElementById('room-temp');
+                            var h = document.getElementById('room-hum');
+                            if (t && d.ac) t.textContent = (d.ac.temperature || 0) + String.fromCharCode(176) + 'C';
+                            if (h && d.ac) h.textContent = (d.ac.humidity || 0) + '%';
+                        }
+                    };
+                    x.send();
+                } catch(e) {}
+            }
+            setInterval(basicUpdate, 2000);
+            // Restore saved page
+            var saved = localStorage.getItem('currentPage');
+            if (saved && document.getElementById(saved)) {
+                window.showPage(saved);
+            }
+        })();
     </script>
 </body>
 </html>
@@ -6628,54 +7225,54 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  🏠 Smart Room Dashboard - YOLOv8n + Auto AC Control")
+    print("  Smart Room Dashboard - YOLOv8n + Auto AC Control")
     print("=" * 60)
     
     # Load saved IR codes from file
-    print("  📡 Loading saved IR codes...")
+    print("  [INIT] Loading saved IR codes...")
     try:
         import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
         if os.path.exists(ir_file):
             with open(ir_file, 'r') as f:
                 mqtt_data['ir_codes'] = json.load(f)
-            print(f"  ✅ Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
+            print(f"  [OK] Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
             # Verify each code's completeness
             for btn_name, code in mqtt_data['ir_codes'].items():
                 if isinstance(code, str) and code.startswith('RAW:'):
                     raw_count = code[4:].count(',') + 1
-                    status = '✅' if raw_count >= 100 else '⚠️ '
+                    status = '[OK]' if raw_count >= 100 else '[WARN]'
                     print(f"    {status} {btn_name}: RAW {raw_count} values, {len(code)} chars")
                 else:
-                    print(f"    📡 {btn_name}: {len(code)} chars")
+                    print(f"    [IR] {btn_name}: {len(code)} chars")
         else:
-            print("  ℹ️  No saved IR codes found")
+            print("  [INFO] No saved IR codes found")
     except Exception as e:
-        print(f"  ⚠️  Error loading IR codes: {e}")
+        print(f"  [WARN] Error loading IR codes: {e}")
     
-    print("  📥 Loading YOLO model (please wait)...")
+    print("  [INIT] Loading YOLO model (please wait)...")
     
     # Load YOLO SYNCHRONOUSLY
     yolo_loaded = load_yolo_model()
     
     if yolo_loaded:
-        print("  ✅ YOLO ready for person detection!")
+        print("  [OK] YOLO ready for person detection!")
     else:
-        print("  ⚠️  YOLO failed to load, running without detection")
+        print("  [WARN] YOLO failed to load, running without detection")
     
     # Start background camera detection thread (runs 24/7 for auto ON/OFF)
-    print("  🎥 Starting background camera detection thread...")
+    print("  [CAM] Starting background camera detection thread...")
     detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
     detection_thread.start()
-    print("  ✅ Detection thread running — auto ON/OFF active")
+    print("  [OK] Detection thread running — auto ON/OFF active")
     
     print("=" * 60)
-    print("  🌐 Dashboard URL: http://172.20.0.65:5000")
-    print("  📹 Video Feed:    http://172.20.0.65:5000/video_feed")
-    print("  ✨ Features:")
+    print("  [URL] Dashboard URL: http://172.20.0.65:5000")
+    print("  [URL] Video Feed:    http://172.20.0.65:5000/video_feed")
+    print("  Features:")
     print("     - YOLOv8n Person Detection (background thread)")
-    print("     - Auto ON: 3 frames (~2s) person confirmed → AC ON")
-    print("     - Auto OFF: 10 min no person → AC OFF")
+    print("     - Auto ON: 3 frames (~2s) person confirmed -> AC ON")
+    print("     - Auto OFF: 10 min no person -> AC OFF")
     print("     - 4K Camera (fallback 1080p)")
     print("     - Real-time Person Count & Confidence")
     print("=" * 60)
