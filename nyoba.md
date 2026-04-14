@@ -3891,9 +3891,6 @@ HTML_TEMPLATE = '''
             <div class="header">
                 <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
                 <p>Real-time & historical energy monitoring from PZEM-016</p>
-                <button class="chart-option-btn" onclick="exportEnergyHistory()" style="margin-top: 8px;">
-                    <i class="fas fa-download"></i> Export Energy Data CSV
-                </button>
             </div>
 
             <!-- Real-time summary cards -->
@@ -3928,7 +3925,6 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyPower', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
@@ -3937,6 +3933,12 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyPowerChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-power-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-power-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-power-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-power-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Historical Voltage Chart -->
@@ -3944,7 +3946,6 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyVoltage', 'Voltage (V)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
@@ -3953,6 +3954,12 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyVoltageChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-voltage-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-voltage-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-voltage-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Historical Energy kWh Chart -->
@@ -3960,22 +3967,24 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
                     </div>
                 </div>
                 <canvas id="energyKwhChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-kwh-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-kwh-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-kwh-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-kwh-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Estimated daily energy (real-time) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
                     <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energy', 'Energy (kWh/day)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                    </div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
@@ -4023,7 +4032,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompare', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
@@ -4038,7 +4046,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompareKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
@@ -4872,6 +4879,20 @@ HTML_TEMPLATE = '''
             'energy_kwh': '#10b981'
         };
 
+        function updateEnergyStats(field, values) {
+            if (!values || values.length === 0) return;
+            const prefix = field === 'power' ? 'energy-power' : (field === 'voltage' ? 'energy-voltage' : 'energy-kwh');
+            const minV = Math.min(...values);
+            const maxV = Math.max(...values);
+            const avgV = values.reduce((a, b) => a + b, 0) / values.length;
+            const lastV = values[values.length - 1];
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+            set(prefix + '-latest', lastV.toFixed(2));
+            set(prefix + '-min', minV.toFixed(2));
+            set(prefix + '-max', maxV.toFixed(2));
+            set(prefix + '-avg', avgV.toFixed(2));
+        }
+
         function drawEnergyFallback(field, points) {
             const canvasId = energyCanvasMap[field];
             const canvas = document.getElementById(canvasId);
@@ -4925,6 +4946,7 @@ HTML_TEMPLATE = '''
             ctx.strokeStyle = energyColorMap[field] || '#a855f7';
             ctx.lineWidth = 2;
             ctx.beginPath();
+            const dotColor = energyColorMap[field] || '#a855f7';
             values.forEach((v, i) => {
                 const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
                 const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
@@ -4933,10 +4955,24 @@ HTML_TEMPLATE = '''
             });
             ctx.stroke();
 
+            // Point markers for each incoming sample
+            values.forEach((v, i) => {
+                const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
+                const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
+                ctx.beginPath();
+                ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+                ctx.fillStyle = dotColor;
+                ctx.fill();
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+            });
+
             const last = values[values.length - 1];
             ctx.fillStyle = '#cbd5e1';
             ctx.font = '12px sans-serif';
             ctx.fillText('Latest: ' + last.toFixed(2), 12, 14);
+            updateEnergyStats(field, values);
         }
 
         function loadEnergyHistory(field, period, btnElement) {
@@ -4958,8 +4994,10 @@ HTML_TEMPLATE = '''
 
                     if (chart && chart.data && chart.data.datasets && chart.data.datasets[0]) {
                         chart.data.labels = data.map(d => d.time);
-                        chart.data.datasets[0].data = data.map(d => d.value);
+                        const values = data.map(d => parseFloat(d.value || 0));
+                        chart.data.datasets[0].data = values;
                         chart.update();
+                        updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
                     } else {
                         drawEnergyFallback(field, data);
                     }
@@ -7556,18 +7594,36 @@ HTML_TEMPLATE = '''
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 2;
                     ctx.beginPath();
+                    var dotPoints = [];
                     for (var k = 0; k < vals.length; k++) {
                         var x = padX + (k / Math.max(1, vals.length - 1)) * plotW;
                         var y = padY + (1 - ((vals[k] - minV) / (maxV - minV))) * plotH;
+                        dotPoints.push({x: x, y: y});
                         if (k === 0) ctx.moveTo(x, y);
                         else ctx.lineTo(x, y);
                     }
                     ctx.stroke();
 
+                    // Draw circular markers for each sample point.
+                    for (var m = 0; m < dotPoints.length; m++) {
+                        ctx.beginPath();
+                        ctx.arc(dotPoints[m].x, dotPoints[m].y, 2.8, 0, Math.PI * 2);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                        ctx.lineWidth = 1;
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.stroke();
+                    }
+
                     var latest = vals[vals.length - 1];
+                    var minVal = Math.min.apply(null, vals);
+                    var maxVal = Math.max.apply(null, vals);
+                    var sumVal = 0;
+                    for (var n = 0; n < vals.length; n++) sumVal += vals[n];
+                    var avgVal = sumVal / Math.max(1, vals.length);
                     ctx.fillStyle = '#334155';
                     ctx.font = '12px sans-serif';
-                    ctx.fillText(label + ': ' + latest.toFixed(2), 12, 15);
+                    ctx.fillText(label + ': ' + latest.toFixed(2) + '  min:' + minVal.toFixed(2) + '  max:' + maxVal.toFixed(2) + '  avg:' + avgVal.toFixed(2), 12, 15);
                 } catch (e) {}
             }
 
