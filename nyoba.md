@@ -4782,6 +4782,43 @@ HTML_TEMPLATE = '''
             });
         }
 
+        // Ensure charts are available even if init runs before library/page is fully ready.
+        function ensureChartsReady() {
+            if (typeof Chart === 'undefined') {
+                console.warn('[CHART] Chart.js not loaded yet');
+                if (!window.__chartFallbackRequested) {
+                    window.__chartFallbackRequested = true;
+                    try {
+                        var s = document.createElement('script');
+                        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
+                        s.onload = function() {
+                            console.log('[CHART] Fallback Chart.js loaded');
+                            try { initCharts(); } catch(e) { console.error('[CHART] init after fallback failed:', e); }
+                            try { loadAllEnergyCharts(); } catch(e) { console.error('[CHART] load after fallback failed:', e); }
+                        };
+                        s.onerror = function() {
+                            console.error('[CHART] Fallback Chart.js failed to load');
+                        };
+                        document.head.appendChild(s);
+                    } catch (e) {
+                        console.error('[CHART] Fallback loader error:', e);
+                    }
+                }
+                return false;
+            }
+
+            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompare || !charts.energyCompareKwh) {
+                try {
+                    initCharts();
+                } catch (e) {
+                    console.error('[CHART] initCharts retry failed:', e);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         function updateChartData(chartName, hours) {
             let endpoint = '';
             switch(chartName) {
@@ -5062,7 +5099,21 @@ HTML_TEMPLATE = '''
                 try { loadFeedbackHistory(); } catch(e) {}
             }
             if (pageId === 'energy') {
+                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ensureChartsReady error:', e); }
                 try { loadAllEnergyCharts(); } catch(e) { console.error('[NAV] energy init error:', e); }
+                // Chart.js often needs a resize pass when canvas was initialized in a hidden page.
+                setTimeout(function() {
+                    try {
+                        Object.keys(charts).forEach(function(k) {
+                            if (charts[k] && typeof charts[k].resize === 'function') {
+                                charts[k].resize();
+                                charts[k].update('none');
+                            }
+                        });
+                    } catch(e) {
+                        console.error('[NAV] chart resize error:', e);
+                    }
+                }, 120);
             }
         }
 
@@ -7209,6 +7260,7 @@ HTML_TEMPLATE = '''
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
+            try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
             try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
             try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
@@ -7231,6 +7283,15 @@ HTML_TEMPLATE = '''
             try { updateLogs(); } catch(e) { console.error('[ERROR] updateLogs:', e); }
             try { checkCameraStatus(); } catch(e) { console.error('[ERROR] checkCameraStatus:', e); }
             try { loadAllEnergyCharts(); } catch(e) { console.error('[ERROR] loadAllEnergyCharts:', e); }
+            setTimeout(function() {
+                try {
+                    if (ensureChartsReady()) {
+                        loadAllEnergyCharts();
+                    }
+                } catch(e) {
+                    console.error('[ERROR] delayed energy chart init:', e);
+                }
+            }, 600);
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
