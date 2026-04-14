@@ -2523,6 +2523,69 @@ HTML_TEMPLATE = '''
             border-color: var(--primary);
         }
 
+        /* Energy page premium chart styling */
+        #energy .power-card {
+            border-radius: 16px;
+            border: 1px solid rgba(99, 102, 241, 0.16);
+            background: linear-gradient(150deg, rgba(99,102,241,0.08), rgba(15,23,42,0.03));
+            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+        }
+
+        #energy .chart-container {
+            border-radius: 16px;
+            border: 1px solid rgba(99, 102, 241, 0.18);
+            background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.9));
+            box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08);
+            padding: 18px 20px 16px;
+            margin-bottom: 22px;
+        }
+
+        #energy .chart-header {
+            margin-bottom: 14px;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        #energy .chart-title {
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            color: var(--text-primary);
+        }
+
+        #energy .chart-options {
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        #energy .chart-option-btn {
+            border-radius: 999px;
+            padding: 6px 13px;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid rgba(99, 102, 241, 0.22);
+            background: rgba(99, 102, 241, 0.06);
+            color: #475569;
+        }
+
+        #energy .chart-option-btn:hover {
+            transform: translateY(-1px);
+            background: rgba(99, 102, 241, 0.12);
+            color: #1e293b;
+        }
+
+        #energy .chart-option-btn.active {
+            background: linear-gradient(135deg, #4f46e5, #6366f1);
+            color: #ffffff;
+            border-color: transparent;
+            box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
+        }
+
+        #energy canvas {
+            height: 250px !important;
+            max-height: 250px;
+        }
+
         /* ML Optimization Page Styles */
         .ml-table {
             width: 100%;
@@ -3990,7 +4053,7 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- ===== BEFORE vs AFTER Adaptive AC Comparison ===== -->
-            <div style="margin-top: 40px; padding: 24px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+            <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
                 <div style="text-align: center; margin-bottom: 20px;">
                     <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
                         <i class="fas fa-exchange-alt"></i> Before vs After Adaptive AC
@@ -4012,16 +4075,16 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <!-- Savings Summary Cards -->
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px;">
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2);">
+                <div style="display: grid; grid-template-columns: repeat(3, minmax(130px,1fr)); gap: 12px; margin-bottom: 20px;">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
                         <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="compare-avg-before">--</span> W</div>
                     </div>
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2);">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(16, 185, 129, 0.10); border: 1px solid rgba(16, 185, 129, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg After</div>
                         <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="compare-avg-after">--</span> W</div>
                     </div>
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.2);">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(99, 102, 241, 0.10); border: 1px solid rgba(99, 102, 241, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Energy Savings</div>
                         <div style="font-size: 22px; font-weight: 700; color: #6366f1;"><span id="compare-savings">--</span>%</div>
                     </div>
@@ -4656,6 +4719,9 @@ HTML_TEMPLATE = '''
                     label: function(ctx) {
                         const label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
                         return label + ': ' + formatChartValue(ctx.parsed.y, unit);
+                    },
+                    title: function(items) {
+                        return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
                     }
                 }
             };
@@ -4674,12 +4740,14 @@ HTML_TEMPLATE = '''
 
             if (chart.data && Array.isArray(chart.data.datasets)) {
                 chart.data.datasets.forEach(function(ds) {
-                    ds.borderWidth = 2.5;
+                    ds.borderWidth = 2.8;
                     ds.tension = 0.35;
-                    ds.pointRadius = 3.8;
-                    ds.pointHoverRadius = 6.5;
+                    ds.pointRadius = 4.4;
+                    ds.pointHoverRadius = 7.5;
                     ds.pointBorderWidth = 1.6;
                     ds.pointBorderColor = '#ffffff';
+                    ds.hitRadius = 10;
+                    ds.hoverBorderWidth = 2;
                 });
             }
         }
