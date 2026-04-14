@@ -4773,12 +4773,16 @@ HTML_TEMPLATE = '''
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
+            const getVal = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? el.value : fallback;
+            };
             const settings = {
-                acTemp: document.getElementById('ac-temp-slider')?.value || 24,
-                fanSpeed: document.getElementById('fan-speed-slider')?.value || 1,
-                lampBrightness1: document.getElementById('brightness-slider-1')?.value || 0,
-                lampBrightness2: document.getElementById('brightness-slider-2')?.value || 0,
-                lampBrightness3: document.getElementById('brightness-slider-3')?.value || 0
+                acTemp: getVal('ac-temp-slider', 24) || 24,
+                fanSpeed: getVal('fan-speed-slider', 1) || 1,
+                lampBrightness1: getVal('brightness-slider-1', 0) || 0,
+                lampBrightness2: getVal('brightness-slider-2', 0) || 0,
+                lampBrightness3: getVal('brightness-slider-3', 0) || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -5440,10 +5444,19 @@ HTML_TEMPLATE = '''
                         const humEl = document.getElementById('ml-cur-hum');
                         const luxEl = document.getElementById('ml-cur-lux');
                         const personEl = document.getElementById('ml-cur-person');
-                        if (tempEl) tempEl.textContent = d.ac?.temperature?.toFixed(1) || '--';
-                        if (humEl) humEl.textContent = d.ac?.humidity?.toFixed(1) || '--';
-                        if (luxEl) luxEl.textContent = d.lamp?.lux || '--';
-                        if (personEl) personEl.textContent = d.camera?.person_detected ? 'Yes' : 'No';
+                        if (tempEl) {
+                            const t = d && d.ac ? parseFloat(d.ac.temperature || 0) : NaN;
+                            tempEl.textContent = Number.isFinite(t) ? t.toFixed(1) : '--';
+                        }
+                        if (humEl) {
+                            const h = d && d.ac ? parseFloat(d.ac.humidity || 0) : NaN;
+                            humEl.textContent = Number.isFinite(h) ? h.toFixed(1) : '--';
+                        }
+                        if (luxEl) {
+                            const lux = d && d.lamp ? (d.lamp.lux_avg || d.lamp.lux1 || d.lamp.lux || '--') : '--';
+                            luxEl.textContent = lux;
+                        }
+                        if (personEl) personEl.textContent = (d && d.camera && d.camera.person_detected) ? 'Yes' : 'No';
                     }).catch(() => {});
                 })
                 .catch(err => console.error('ML refresh error:', err));
@@ -5669,20 +5682,24 @@ HTML_TEMPLATE = '''
         }
 
         function getMLParams(algo) {
+            const getInput = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? el.value : fallback;
+            };
             if (algo === 'ga') {
                 return {
-                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 15,
-                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 30,
-                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.25,
-                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.8,
+                    population_size: parseInt(getInput('ml-ga-pop', 15), 10) || 15,
+                    generations: parseInt(getInput('ml-ga-gen', 30), 10) || 30,
+                    mutation_rate: parseFloat(getInput('ml-ga-mut', 0.25)) || 0.25,
+                    crossover_rate: parseFloat(getInput('ml-ga-cross', 0.8)) || 0.8,
                     elitism_ratio: 0.2
                 };
             } else {
                 return {
-                    swarm_size: parseInt(document.getElementById('ml-pso-swarm')?.value) || 30,
-                    iterations: parseInt(document.getElementById('ml-pso-iter')?.value) || 100,
-                    w: parseFloat(document.getElementById('ml-pso-w')?.value) || 0.7,
-                    c: parseFloat(document.getElementById('ml-pso-c')?.value) || 1.5
+                    swarm_size: parseInt(getInput('ml-pso-swarm', 30), 10) || 30,
+                    iterations: parseInt(getInput('ml-pso-iter', 100), 10) || 100,
+                    w: parseFloat(getInput('ml-pso-w', 0.7)) || 0.7,
+                    c: parseFloat(getInput('ml-pso-c', 1.5)) || 1.5
                 };
             }
         }
@@ -6614,7 +6631,7 @@ HTML_TEMPLATE = '''
                     rating: selectedFeedbackRating,
                     comment: comment,
                     google_form_url: formUrl,
-                    occupancy_count: parseInt(document.getElementById('cam-count')?.textContent || '0', 10)
+                    occupancy_count: parseInt((document.getElementById('cam-count') ? document.getElementById('cam-count').textContent : '0') || '0', 10)
                 })
             })
             .then(r => r.json())
