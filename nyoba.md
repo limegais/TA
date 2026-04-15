@@ -3862,7 +3862,10 @@ HTML_TEMPLATE = '''
                 <div class="chart-container" style="border: none; padding: 0;">
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
-                        <button onclick="loadEnergyCompare('power')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                        <div style="display:flex;gap:6px;">
+                            <button onclick="loadEnergyCompare('power')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompare', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        </div>
                     </div>
                     <canvas id="energyCompareChart" height="100"></canvas>
                 </div>
@@ -3871,7 +3874,10 @@ HTML_TEMPLATE = '''
                 <div class="chart-container" style="border: none; padding: 0; margin-top: 16px;">
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
-                        <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                        <div style="display:flex;gap:6px;">
+                            <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompareKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        </div>
                     </div>
                     <canvas id="energyCompareKwhChart" height="100"></canvas>
                 </div>
@@ -4523,10 +4529,7 @@ HTML_TEMPLATE = '''
             setGradient(charts.energyVoltage, 0, 'rgba(59,130,246,0.34)', 'rgba(59,130,246,0.03)');
             setGradient(charts.energyKwh, 0, 'rgba(16,185,129,0.34)', 'rgba(16,185,129,0.03)');
             setGradient(charts.energy, 0, 'rgba(168,85,247,0.34)', 'rgba(168,85,247,0.03)');
-            setGradient(charts.energyCompare, 0, 'rgba(245,158,11,0.26)', 'rgba(245,158,11,0.02)');
-            setGradient(charts.energyCompare, 1, 'rgba(16,185,129,0.26)', 'rgba(16,185,129,0.02)');
-            setGradient(charts.energyCompareKwh, 0, 'rgba(245,158,11,0.26)', 'rgba(245,158,11,0.02)');
-            setGradient(charts.energyCompareKwh, 1, 'rgba(16,185,129,0.26)', 'rgba(16,185,129,0.02)');
+            // energyCompare & energyCompareKwh are bar charts — no gradient needed
         }
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
@@ -4641,23 +4644,45 @@ HTML_TEMPLATE = '''
             });
 
             charts.energyCompare = new Chart(document.getElementById('energyCompareChart'), {
-                type: 'line', options: makeOpts(true),
+                type: 'bar',
+                options: {
+                    ...makeOpts(true),
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: 'var(--text-secondary)', font: { size: 11 }, maxRotation: 45 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: 'var(--text-secondary)', font: { size: 11 } }, title: { display: true, text: 'Watt', color: 'var(--text-secondary)' } }
+                    },
+                    plugins: {
+                        ...makeOpts(true).plugins,
+                        tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15,23,42,0.9)', padding: 12, cornerRadius: 10, titleFont: { weight: '700' } }
+                    }
+                },
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
+                        { label: 'Before Adaptive AC', data: [], backgroundColor: 'rgba(245,158,11,0.7)', borderColor: '#f59e0b', borderWidth: 2, borderRadius: 6, barPercentage: 0.8, categoryPercentage: 0.7 },
+                        { label: 'After Adaptive AC', data: [], backgroundColor: 'rgba(16,185,129,0.7)', borderColor: '#10b981', borderWidth: 2, borderRadius: 6, barPercentage: 0.8, categoryPercentage: 0.7 }
                     ]
                 }
             });
 
             charts.energyCompareKwh = new Chart(document.getElementById('energyCompareKwhChart'), {
-                type: 'line', options: makeOpts(true),
+                type: 'bar',
+                options: {
+                    ...makeOpts(true),
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: 'var(--text-secondary)', font: { size: 11 }, maxRotation: 45 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: 'var(--text-secondary)', font: { size: 11 } }, title: { display: true, text: 'kWh', color: 'var(--text-secondary)' } }
+                    },
+                    plugins: {
+                        ...makeOpts(true).plugins,
+                        tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15,23,42,0.9)', padding: 12, cornerRadius: 10, titleFont: { weight: '700' } }
+                    }
+                },
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
+                        { label: 'Before Adaptive AC', data: [], backgroundColor: 'rgba(245,158,11,0.7)', borderColor: '#f59e0b', borderWidth: 2, borderRadius: 6, barPercentage: 0.8, categoryPercentage: 0.7 },
+                        { label: 'After Adaptive AC', data: [], backgroundColor: 'rgba(16,185,129,0.7)', borderColor: '#10b981', borderWidth: 2, borderRadius: 6, barPercentage: 0.8, categoryPercentage: 0.7 }
                     ]
                 }
             });
@@ -4693,18 +4718,7 @@ HTML_TEMPLATE = '''
             styleLineChart(charts.energyVoltage, 'V', false);
             styleLineChart(charts.energyKwh, 'kWh', false);
             styleLineChart(charts.energy, 'kWh/day', false);
-            styleLineChart(charts.energyCompare, 'W', true);
-            styleLineChart(charts.energyCompareKwh, 'kWh', true);
-
-            // Keep comparison lines visually distinct.
-            if (charts.energyCompare && charts.energyCompare.data && charts.energyCompare.data.datasets) {
-                charts.energyCompare.data.datasets[0].borderDash = [6, 4];
-                charts.energyCompare.data.datasets[1].borderDash = [];
-            }
-            if (charts.energyCompareKwh && charts.energyCompareKwh.data && charts.energyCompareKwh.data.datasets) {
-                charts.energyCompareKwh.data.datasets[0].borderDash = [6, 4];
-                charts.energyCompareKwh.data.datasets[1].borderDash = [];
-            }
+            // Energy compare charts are bar charts — no line styling needed
 
             // Apply gradients after chart area is computed.
             setTimeout(function() {
@@ -5037,22 +5051,49 @@ HTML_TEMPLATE = '''
                     var afterData = result.after || [];
                     var summary = result.summary || {};
 
-                    // Build shared label set sorted by offset
-                    var labelMap = {};
-                    beforeData.forEach(function(d) { labelMap[d.label] = d.offset; });
-                    afterData.forEach(function(d) { if (!(d.label in labelMap)) labelMap[d.label] = d.offset; });
-                    var allLabels = Object.keys(labelMap).sort(function(a, b) { return labelMap[a] - labelMap[b]; });
+                    // Normalize: resample both datasets to same number of bins for side-by-side bar comparison
+                    var maxLen = Math.max(beforeData.length, afterData.length, 1);
+                    var numBins = Math.min(maxLen, 30); // Max 30 bars for readability
 
-                    var beforeMap = {};
-                    beforeData.forEach(function(d) { beforeMap[d.label] = d.value; });
-                    var afterMap = {};
-                    afterData.forEach(function(d) { afterMap[d.label] = d.value; });
+                    function resampleToBins(data, numBins) {
+                        if (data.length === 0) return new Array(numBins).fill(null);
+                        if (data.length <= numBins) {
+                            var out = data.map(function(d) { return d.value; });
+                            while (out.length < numBins) out.push(null);
+                            return out;
+                        }
+                        var binSize = data.length / numBins;
+                        var bins = [];
+                        for (var i = 0; i < numBins; i++) {
+                            var start = Math.floor(i * binSize);
+                            var end = Math.floor((i + 1) * binSize);
+                            var sum = 0, cnt = 0;
+                            for (var j = start; j < end; j++) {
+                                if (data[j] && data[j].value != null) { sum += data[j].value; cnt++; }
+                            }
+                            bins.push(cnt > 0 ? Math.round(sum / cnt * 100) / 100 : null);
+                        }
+                        return bins;
+                    }
+
+                    // Generate labels based on the longer dataset's time range
+                    var refData = beforeData.length >= afterData.length ? beforeData : afterData;
+                    var labels = [];
+                    if (refData.length <= numBins) {
+                        labels = refData.map(function(d) { return d.label; });
+                        while (labels.length < numBins) labels.push('');
+                    } else {
+                        var binSize = refData.length / numBins;
+                        for (var i = 0; i < numBins; i++) {
+                            var idx = Math.floor(i * binSize);
+                            labels.push(refData[idx].label);
+                        }
+                    }
 
                     var chart = charts[chartName];
-                    chart.data.labels = allLabels;
-                    chart.data.datasets[0].data = allLabels.map(function(l) { return beforeMap[l] !== undefined ? beforeMap[l] : null; });
-                    chart.data.datasets[1].data = allLabels.map(function(l) { return afterMap[l] !== undefined ? afterMap[l] : null; });
-                    chart.options.spanGaps = true;
+                    chart.data.labels = labels;
+                    chart.data.datasets[0].data = resampleToBins(beforeData, numBins);
+                    chart.data.datasets[1].data = resampleToBins(afterData, numBins);
                     chart.update();
 
                     if (field === 'power') {
