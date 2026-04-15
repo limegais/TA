@@ -3707,7 +3707,7 @@ HTML_TEMPLATE = '''
                 <div class="power-card">
                     <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
                     <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W | Current: <span id="total-current">0</span> A</div>
                 </div>
 
                 <div class="power-card">
@@ -3756,6 +3756,27 @@ HTML_TEMPLATE = '''
                     <span>Min: <strong id="energy-voltage-min" style="color:var(--text-primary);">--</strong></span>
                     <span>Max: <strong id="energy-voltage-max" style="color:var(--text-primary);">--</strong></span>
                     <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
+            </div>
+
+            <!-- Historical Current Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title">Current (A)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyCurrentChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-current-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-current-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-current-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-current-avg" style="color:var(--text-primary);">--</strong></span>
                 </div>
             </div>
 
@@ -4534,6 +4555,7 @@ HTML_TEMPLATE = '''
 
             setGradient(charts.energyPower, 0, 'rgba(239,68,68,0.34)', 'rgba(239,68,68,0.03)');
             setGradient(charts.energyVoltage, 0, 'rgba(59,130,246,0.34)', 'rgba(59,130,246,0.03)');
+            setGradient(charts.energyCurrent, 0, 'rgba(245,158,11,0.34)', 'rgba(245,158,11,0.03)');
             setGradient(charts.energyKwh, 0, 'rgba(16,185,129,0.34)', 'rgba(16,185,129,0.03)');
             setGradient(charts.energy, 0, 'rgba(168,85,247,0.34)', 'rgba(168,85,247,0.03)');
             setGradient(charts.energyCompareBefore, 0, 'rgba(245,158,11,0.30)', 'rgba(245,158,11,0.02)');
@@ -4646,6 +4668,11 @@ HTML_TEMPLATE = '''
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+            });
+
+            charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
@@ -4809,24 +4836,28 @@ HTML_TEMPLATE = '''
         var energyChartMap = {
             'power': 'energyPower',
             'voltage': 'energyVoltage',
+            'current': 'energyCurrent',
             'energy_kwh': 'energyKwh'
         };
 
         var energyCanvasMap = {
             'power': 'energyPowerChart',
             'voltage': 'energyVoltageChart',
+            'current': 'energyCurrentChart',
             'energy_kwh': 'energyKwhChart'
         };
 
         var energyColorMap = {
             'power': '#ef4444',
             'voltage': '#3b82f6',
+            'current': '#f59e0b',
             'energy_kwh': '#10b981'
         };
 
         function updateEnergyStats(field, values) {
             if (!values || values.length === 0) return;
-            const prefix = field === 'power' ? 'energy-power' : (field === 'voltage' ? 'energy-voltage' : 'energy-kwh');
+            var prefixMap = {'power': 'energy-power', 'voltage': 'energy-voltage', 'current': 'energy-current', 'energy_kwh': 'energy-kwh'};
+            const prefix = prefixMap[field] || ('energy-' + field);
             const minV = Math.min(...values);
             const maxV = Math.max(...values);
             const avgV = values.reduce((a, b) => a + b, 0) / values.length;
@@ -4932,7 +4963,10 @@ HTML_TEMPLATE = '''
             if (!chartName) return;
 
             fetch('/api/energy/history?field=' + field + '&period=' + period)
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(result => {
                     const data = result.data || [];
                     const chart = charts[chartName];
@@ -4958,6 +4992,7 @@ HTML_TEMPLATE = '''
         function loadAllEnergyCharts() {
             loadEnergyHistory('power', '1h', null);
             loadEnergyHistory('voltage', '1h', null);
+            loadEnergyHistory('current', '1h', null);
             loadEnergyHistory('energy_kwh', '24h', null);
             loadEnergyCompare('power');
             loadEnergyCompare('energy_kwh');
@@ -6740,9 +6775,11 @@ HTML_TEMPLATE = '''
                     // Use real PZEM data if available, otherwise estimate
                     let realPower = null;
                     let realEnergyKwh = null;
+                    let realCurrent = null;
                     if (energy && energy.connected) {
                         realPower = num(energy.power);
                         realEnergyKwh = num(energy.energy);
+                        realCurrent = num(energy.current);
                     }
 
                     let acEnergyKwh = (acPower / 1000) * 24;
@@ -6754,6 +6791,7 @@ HTML_TEMPLATE = '''
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
                     document.getElementById('total-power').textContent = displayPower.toFixed(1);
+                    document.getElementById('total-current').textContent = realCurrent !== null ? realCurrent.toFixed(2) : '0';
                     document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
                     document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
                     document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
@@ -7077,6 +7115,15 @@ HTML_TEMPLATE = '''
                     charts.energyVoltage.data.labels.push(tStr);
                     charts.energyVoltage.data.datasets[0].data.push(vlt);
                     charts.energyVoltage.update();
+                }
+                if (charts.energyCurrent && cur >= 0) {
+                    if (charts.energyCurrent.data.labels.length > 120) {
+                        charts.energyCurrent.data.labels.shift();
+                        charts.energyCurrent.data.datasets[0].data.shift();
+                    }
+                    charts.energyCurrent.data.labels.push(tStr);
+                    charts.energyCurrent.data.datasets[0].data.push(cur);
+                    charts.energyCurrent.update();
                 }
                 var kwhVal = parseFloat(e.energy || 0);
                 if (charts.energyKwh && kwhVal >= 0) {
