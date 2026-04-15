@@ -1692,22 +1692,59 @@ def ml_run():
 @app.route('/api/ac/control', methods=['POST'])
 def control_ac():
     try:
-        data = request.json
-        command = data.get('command', data.get('action', ''))
+        data = request.json or {}
+        command = str(data.get('command', data.get('action', '')) or '').strip().upper()
+        current_temp = int(mqtt_data['ac'].get('ac_temp', 24) or 24)
+        current_fan = int(mqtt_data['ac'].get('fan_speed', 1) or 1)
+        current_mode = str(mqtt_data['ac'].get('ac_fan_mode', 'COOL') or 'COOL').upper()
+        current_state = str(mqtt_data['ac'].get('ac_state', 'OFF') or 'OFF').upper()
+        payload = dict(data)
+        payload['command'] = command
+        payload['action'] = command
+        payload['temperature'] = int(payload.get('temperature', current_temp) or current_temp)
+        payload['fan_speed'] = int(payload.get('fan_speed', current_fan) or current_fan)
+        payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
+        payload['ac_state'] = str(payload.get('ac_state', current_state) or current_state).upper()
+        payload['power'] = payload['ac_state']
 
-        # Send command to ESP32 — ESP32 now uses IRMitsubishiAC library
-        # to construct and send proper Mitsubishi protocol frames directly.
-        # No need to send RAW IR codes from Flask anymore!
-        mqtt_client.publish('smartroom/ac/control', json.dumps(data))
-        print(f"[AC Control] Sent command '{command}' to ESP32 (Mitsubishi AC library handles IR)")
-
-        # Track AC operating mode locally for instant dashboard update
+        # Mitsubishi Heavy frames are stateful, so always publish a complete state snapshot.
         mode_map = {'MODE_COOL': 'COOL', 'MODE_HEAT': 'HEAT', 'MODE_DRY': 'DRY', 'MODE_FAN': 'FAN', 'MODE_AUTO': 'AUTO'}
-        if command in mode_map:
-            mqtt_data['ac']['ac_fan_mode'] = mode_map[command]
+        if command == 'POWER_ON':
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'POWER_OFF':
+            payload['ac_state'] = 'OFF'
+            payload['power'] = 'OFF'
+        elif command == 'TEMP_UP':
+            payload['temperature'] = min(30, current_temp + 1)
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'TEMP_DOWN':
+            payload['temperature'] = max(16, current_temp - 1)
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command in mode_map:
+            payload['mode'] = mode_map[command]
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'SET':
+            payload['temperature'] = max(16, min(30, int(payload.get('temperature', current_temp) or current_temp)))
+            payload['fan_speed'] = max(1, min(4, int(payload.get('fan_speed', current_fan) or current_fan)))
+            payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
+            payload['ac_state'] = str(payload.get('ac_state', 'ON') or 'ON').upper()
+            payload['power'] = payload['ac_state']
+
+        mqtt_client.publish('smartroom/ac/control', json.dumps(payload))
+        print(f"[AC Control] Sent payload to ESP32: {payload}")
+
+        mqtt_data['ac']['ac_temp'] = payload['temperature']
+        mqtt_data['ac']['fan_speed'] = payload['fan_speed']
+        mqtt_data['ac']['ac_state'] = payload['ac_state']
+        mqtt_data['ac']['ac_fan_mode'] = payload['mode']
+        socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': f'AC command sent: {command}'})
+        return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ac': mqtt_data['ac'], 'payload': payload, 'ir_sent': True})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -5879,6 +5916,36 @@ HTML_TEMPLATE = '''
             saveSettings();
         }
 
+        function applyACSnapshot(ac) {
+            if (!ac) return;
+            if (ac.ac_temp !== undefined && ac.ac_temp !== null) {
+                var tempValue = parseInt(ac.ac_temp, 10);
+                var tempSlider = document.getElementById('ac-temp-slider');
+                var tempDisplay = document.getElementById('ac-temp-display');
+                if (tempSlider && Number.isFinite(tempValue)) tempSlider.value = tempValue;
+                if (tempDisplay && Number.isFinite(tempValue)) tempDisplay.textContent = tempValue;
+            }
+            if (ac.fan_speed !== undefined && ac.fan_speed !== null) {
+                var fanValue = parseInt(ac.fan_speed, 10);
+                var fanSlider = document.getElementById('fan-speed-slider');
+                var fanDisplay = document.getElementById('fan-speed-display');
+                if (fanSlider && Number.isFinite(fanValue)) fanSlider.value = fanValue;
+                if (fanDisplay && Number.isFinite(fanValue)) fanDisplay.textContent = fanValue;
+            }
+            if (ac.ac_fan_mode) {
+                selectedACMode = String(ac.ac_fan_mode).toUpperCase();
+                document.querySelectorAll('.ac-set-mode-btn').forEach(function(btn) {
+                    var active = btn.getAttribute('data-mode') === selectedACMode;
+                    btn.style.background = active ? 'var(--primary)' : 'var(--card-bg)';
+                    btn.style.border = active ? '2px solid var(--primary)' : '2px solid var(--border)';
+                    btn.style.color = active ? 'white' : 'var(--text)';
+                });
+            }
+            if (typeof updateDashboard === 'function') {
+                try { updateDashboard(); } catch (e) {}
+            }
+        }
+
         function sendACCommand(command) {
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
@@ -5893,8 +5960,9 @@ HTML_TEMPLATE = '''
                 })
                 .then(r => r.json())
                 .then(result => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
                     const label = command.replace('_', ' ');
-                    showToast('AC: ' + label, result.ir_sent ? 'success' : 'info');
+                    showToast('AC: ' + label, result && result.status === 'success' ? 'success' : 'info');
                 })
                 .catch(e => showToast('Error: ' + (e.message || e), 'error'));
             });
@@ -5935,7 +6003,10 @@ HTML_TEMPLATE = '''
                     })
                 })
                 .then(r => r.json())
-                .then(result => showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode))
+                .then(result => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
+                    showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode);
+                })
                 .catch(e => showToast('Error: ' + e, 'error'));
             });
         }
@@ -6230,26 +6301,27 @@ HTML_TEMPLATE = '''
                 })
                 .then(r => r.json())
                 .then(result => {
-                const modeLabel = modeName.replace('MODE_', '');
-                showToast('AC Mode: ' + modeLabel, result.ir_sent ? 'success' : 'info');
-                setTimeout(() => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
+                    const modeLabel = modeName.replace('MODE_', '');
+                    showToast('AC Mode: ' + modeLabel, result && result.status === 'success' ? 'success' : 'info');
+                    setTimeout(() => {
+                        document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                            btn.style.opacity = '1';
+                            btn.style.transform = 'scale(1)';
+                        });
+                        if (btnElement) {
+                            btnElement.style.transform = 'scale(1.05)';
+                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                        }
+                    }, 300);
+                })
+                .catch(e => {
+                    showToast('Error: ' + (e.message || e), 'error');
                     document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                         btn.style.opacity = '1';
                         btn.style.transform = 'scale(1)';
                     });
-                    if (btnElement) {
-                        btnElement.style.transform = 'scale(1.05)';
-                        btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
-                    }
-                }, 300);
-            })
-            .catch(e => {
-                showToast('Error: ' + (e.message || e), 'error');
-                document.querySelectorAll('.ac-mode-btn').forEach(btn => {
-                    btn.style.opacity = '1';
-                    btn.style.transform = 'scale(1)';
                 });
-            });
             }); // end fetch /api/data
         }
 
