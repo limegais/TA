@@ -39,8 +39,12 @@ active_alerts = deque(maxlen=50)
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
 occupancy_feedback = deque(maxlen=200)
 
-# Energy Phase: 'before' = sebelum adaptive AC, 'after' = sesudah adaptive AC
-energy_phase = 'before'
+# Energy Phase: 'before' / 'after' / 'idle'
+energy_phase = 'idle'
+energy_recording = {
+    'before': {'active': False, 'start': None, 'end': None},
+    'after': {'active': False, 'start': None, 'end': None}
+}
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -1441,104 +1445,169 @@ def energy_phase_api():
     global energy_phase
     if request.method == 'POST':
         new_phase = request.json.get('phase', '').lower()
-        if new_phase not in ('before', 'after'):
-            return jsonify({'error': 'Phase must be before or after'}), 400
+        if new_phase not in ('before', 'after', 'idle'):
+            return jsonify({'error': 'Phase must be before, after, or idle'}), 400
         energy_phase = new_phase
-        print(f"[ENERGY] Energy phase changed to: {energy_phase}")
-        socketio.emit('energy_phase', {'phase': energy_phase})
-        return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
+        return jsonify({'phase': energy_phase})
     return jsonify({'phase': energy_phase})
+
+@app.route('/api/energy/record', methods=['GET', 'POST'])
+def energy_record_api():
+    """Start/stop recording for before/after energy comparison phases"""
+    global energy_phase, energy_recording
+    if request.method == 'POST':
+        phase = request.json.get('phase', '').lower()
+        action = request.json.get('action', '').lower()
+        if phase not in ('before', 'after'):
+            return jsonify({'error': 'Phase must be before or after'}), 400
+        if action not in ('start', 'stop'):
+            return jsonify({'error': 'Action must be start or stop'}), 400
+
+        if action == 'start':
+            # Stop the other phase if it is recording
+            other = 'after' if phase == 'before' else 'before'
+            if energy_recording[other]['active']:
+                energy_recording[other]['active'] = False
+                energy_recording[other]['end'] = datetime.utcnow().isoformat()
+            energy_recording[phase]['active'] = True
+            energy_recording[phase]['start'] = datetime.utcnow().isoformat()
+            energy_recording[phase]['end'] = None
+            energy_phase = phase
+            print(f"[ENERGY] Started recording: {phase}")
+        else:
+            energy_recording[phase]['active'] = False
+            energy_recording[phase]['end'] = datetime.utcnow().isoformat()
+            energy_phase = 'idle'
+            print(f"[ENERGY] Stopped recording: {phase}")
+
+        socketio.emit('energy_recording', {'recording': energy_recording, 'phase': energy_phase})
+        return jsonify({'recording': energy_recording, 'phase': energy_phase})
+
+    return jsonify({'recording': energy_recording, 'phase': energy_phase})
 
 @app.route('/api/energy/compare')
 def energy_compare():
-    """Compare energy data between before and after adaptive AC phases"""
-    period = request.args.get('period', '7d')
+    """Compare energy data between recorded before and after adaptive AC periods"""
     field = request.args.get('field', 'power')
-    
-    period_map = {
-        '30m': {'range': '-30m', 'window': '30s'},
-        '24h': {'range': '-24h', 'window': '15m'},
-        '7d':  {'range': '-7d',  'window': '1h'},
-        '30d': {'range': '-30d', 'window': '6h'}
-    }
-    
-    if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 30m, 24h, 7d, 30d'}), 400
-    
+
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
-    
-    p = period_map[period]
-    time_format = '%H:%M:%S' if period == '30m' else ('%H:%M' if period == '24h' else '%m/%d %H:%M')
-    
+
     try:
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
-        
+
         results = {}
         for phase in ['before', 'after']:
+            rec = energy_recording[phase]
+            if not rec['start']:
+                results[phase] = []
+                continue
+
+            start_dt = datetime.fromisoformat(rec['start'])
+            if rec['end']:
+                end_dt = datetime.fromisoformat(rec['end'])
+            elif rec['active']:
+                end_dt = datetime.utcnow()
+            else:
+                results[phase] = []
+                continue
+
+            dur_h = (end_dt - start_dt).total_seconds() / 3600
+            if dur_h <= 1:
+                window = '30s'
+            elif dur_h <= 24:
+                window = '10m'
+            elif dur_h <= 168:
+                window = '1h'
+            else:
+                window = '6h'
+
+            start_iso = start_dt.isoformat() + 'Z'
+            end_iso = end_dt.isoformat() + 'Z'
+
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
-              |> range(start: {p['range']})
+              |> range(start: {start_iso}, stop: {end_iso})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field}")
               |> filter(fn: (r) => r["phase"] == "{phase}")
-              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
               |> yield(name: "mean")
             '''
+
             result = query_api.query(query=query)
             data_points = []
             for table in result:
                 for record in table.records:
+                    rec_time = record.get_time().replace(tzinfo=None)
+                    offset_h = (rec_time - start_dt).total_seconds() / 3600
+                    if dur_h <= 1:
+                        label = f"{int(offset_h * 60)}m"
+                    elif dur_h <= 24:
+                        label = f"{int(offset_h)}:{int((offset_h % 1) * 60):02d}"
+                    elif dur_h <= 168:
+                        day = int(offset_h / 24) + 1
+                        hr = int(offset_h % 24)
+                        label = f"Day {day} {hr:02d}:00"
+                    else:
+                        day = int(offset_h / 24) + 1
+                        label = f"Day {day}"
                     data_points.append({
-                        'time': record.get_time().strftime(time_format),
+                        'offset': round(offset_h, 2),
+                        'label': label,
                         'value': round(float(record.get_value()), 2)
                     })
             results[phase] = data_points
 
-        # Fallback to runtime buffer if Influx doesn't have comparison data yet.
+        # Fallback to runtime buffer when InfluxDB has no data yet
         if not results['before'] and not results['after']:
-            lookback = {
-                '30m': timedelta(minutes=30),
-                '24h': timedelta(hours=24),
-                '7d': timedelta(days=7),
-                '30d': timedelta(days=30),
-            }[period]
-            cutoff = datetime.now() - lookback
-            runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
-            if runtime:
-                step = max(1, len(runtime) // 120)
-                sampled = runtime[::step]
-                for phase in ['before', 'after']:
-                    results[phase] = [
-                        {
-                            'time': r['ts'].strftime(time_format),
+            for phase in ['before', 'after']:
+                phase_data = [r for r in energy_runtime_history if r.get('phase') == phase]
+                if phase_data:
+                    start_ts = phase_data[0]['ts']
+                    dur_h = max(0.01, (phase_data[-1]['ts'] - start_ts).total_seconds() / 3600)
+                    step = max(1, len(phase_data) // 120)
+                    sampled = phase_data[::step]
+                    pts = []
+                    for r in sampled:
+                        off = (r['ts'] - start_ts).total_seconds() / 3600
+                        if dur_h <= 1:
+                            label = f"{int(off * 60)}m"
+                        elif dur_h <= 24:
+                            label = f"{int(off)}:{int((off % 1) * 60):02d}"
+                        else:
+                            day = int(off / 24) + 1
+                            hr = int(off % 24)
+                            label = f"Day {day} {hr:02d}:00"
+                        pts.append({
+                            'offset': round(off, 2),
+                            'label': label,
                             'value': round(float(r.get(field, 0)), 2)
-                        }
-                        for r in sampled if r.get('phase') == phase
-                    ]
-        
+                        })
+                    results[phase] = pts
+
         # Calculate averages for summary
         before_vals = [d['value'] for d in results['before']] if results['before'] else []
         after_vals = [d['value'] for d in results['after']] if results['after'] else []
         avg_before = round(sum(before_vals) / len(before_vals), 2) if before_vals else 0
         avg_after = round(sum(after_vals) / len(after_vals), 2) if after_vals else 0
         savings_pct = round((1 - avg_after / avg_before) * 100, 1) if avg_before > 0 else 0
-        
+
         client.close()
         return jsonify({
-            'period': period,
             'field': field,
             'before': results['before'],
             'after': results['after'],
+            'recording': energy_recording,
             'summary': {
                 'avg_before': avg_before,
                 'avg_after': avg_after,
                 'savings_percent': savings_pct
             }
         })
-        
+
     except Exception as e:
         print(f"[ERROR] Energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
@@ -4113,17 +4182,34 @@ HTML_TEMPLATE = '''
                     <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
                 </div>
 
-                <!-- Phase Selector -->
-                <div style="display: flex; justify-content: center; gap: 12px; margin-bottom: 20px;">
-                    <button id="btn-phase-before" onclick="setEnergyPhase('before')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px;">
-                        <i class="fas fa-clock"></i> BEFORE (Recording)
-                    </button>
-                    <button id="btn-phase-after" onclick="setEnergyPhase('after')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px; opacity: 0.6;">
-                        <i class="fas fa-robot"></i> AFTER (Recording)
-                    </button>
-                </div>
-                <div id="phase-indicator" style="text-align: center; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 600; margin-bottom: 20px; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
-                    <i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC
+                <!-- Recording Controls -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
+                    <!-- BEFORE Panel -->
+                    <div id="panel-before" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">
+                            <i class="fas fa-clock"></i> BEFORE Adaptive AC
+                        </div>
+                        <div id="status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
+                            &#9675; Not started
+                        </div>
+                        <button id="btn-record-before" onclick="toggleRecording('before')"
+                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
+                            <i class="fas fa-circle"></i> START RECORDING
+                        </button>
+                    </div>
+                    <!-- AFTER Panel -->
+                    <div id="panel-after" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">
+                            <i class="fas fa-robot"></i> AFTER Adaptive AC
+                        </div>
+                        <div id="status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
+                            &#9675; Not started
+                        </div>
+                        <button id="btn-record-after" onclick="toggleRecording('after')"
+                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
+                            <i class="fas fa-circle"></i> START RECORDING
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Savings Summary Cards -->
@@ -4146,12 +4232,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-container" style="border: none; padding: 0;">
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
-                        <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '30d', this)">30d</button>
-                        </div>
+                        <button onclick="loadEnergyCompare('power')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
                     </div>
                     <canvas id="energyCompareChart" height="100"></canvas>
                 </div>
@@ -4160,12 +4241,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-container" style="border: none; padding: 0; margin-top: 16px;">
                     <div class="chart-header">
                         <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
-                        <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '30d', this)">30d</button>
-                        </div>
+                        <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; cursor: pointer;"><i class="fas fa-sync-alt"></i> Refresh</button>
                     </div>
                     <canvas id="energyCompareKwhChart" height="100"></canvas>
                 </div>
@@ -5243,112 +5319,116 @@ HTML_TEMPLATE = '''
             loadEnergyHistory('power', '1h', null);
             loadEnergyHistory('voltage', '1h', null);
             loadEnergyHistory('energy_kwh', '24h', null);
-            loadEnergyCompare('power', '30m', null);
-            loadEnergyCompare('energy_kwh', '30m', null);
-            loadCurrentPhase();
+            loadEnergyCompare('power');
+            loadEnergyCompare('energy_kwh');
+            loadRecordingState();
         }
 
-        // ==================== BEFORE vs AFTER COMPARISON ====================
-        var currentEnergyPhase = 'before';
+        // ==================== BEFORE vs AFTER RECORDING ====================
+        var energyRecording = {
+            before: {active: false, start: null, end: null},
+            after: {active: false, start: null, end: null}
+        };
 
-        function loadCurrentPhase() {
-            fetch('/api/energy/phase')
+        function loadRecordingState() {
+            fetch('/api/energy/record')
                 .then(r => r.json())
                 .then(data => {
-                    currentEnergyPhase = data.phase;
-                    updatePhaseUI(data.phase);
+                    updateRecordingUI(data.recording);
                 })
-                .catch(e => console.error('Phase load error:', e));
+                .catch(e => console.error('Load recording state error:', e));
         }
 
-        function setEnergyPhase(phase) {
-            fetch('/api/energy/phase', {
+        function toggleRecording(phase) {
+            var rec = energyRecording[phase];
+            var action = rec.active ? 'stop' : 'start';
+            fetch('/api/energy/record', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({phase: phase})
+                body: JSON.stringify({phase: phase, action: action})
             })
             .then(r => r.json())
             .then(data => {
-                currentEnergyPhase = data.phase;
-                updatePhaseUI(data.phase);
+                updateRecordingUI(data.recording);
+                loadEnergyCompare('power');
+                loadEnergyCompare('energy_kwh');
+                showToast(action === 'start'
+                    ? 'Recording ' + phase.toUpperCase() + ' started'
+                    : 'Recording ' + phase.toUpperCase() + ' stopped', 'success');
             })
-            .catch(e => console.error('Phase set error:', e));
+            .catch(e => console.error('Record error:', e));
         }
 
-        function updatePhaseUI(phase) {
-            const btnBefore = document.getElementById('btn-phase-before');
-            const btnAfter = document.getElementById('btn-phase-after');
-            const indicator = document.getElementById('phase-indicator');
+        function updateRecordingUI(rec) {
+            if (!rec) return;
+            energyRecording = rec;
+            ['before', 'after'].forEach(function(phase) {
+                var r = rec[phase];
+                var statusEl = document.getElementById('status-' + phase);
+                var btnEl = document.getElementById('btn-record-' + phase);
+                if (!statusEl || !btnEl) return;
 
-            if (phase === 'before') {
-                btnBefore.style.border = '3px solid #f59e0b';
-                btnBefore.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-                btnBefore.style.color = 'white';
-                btnBefore.style.opacity = '1';
-                btnAfter.style.border = '3px solid var(--border)';
-                btnAfter.style.background = 'var(--bg-card)';
-                btnAfter.style.color = 'var(--text-secondary)';
-                btnAfter.style.opacity = '0.6';
-                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC';
-                indicator.style.background = 'rgba(245, 158, 11, 0.1)';
-                indicator.style.color = '#f59e0b';
-                indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-            } else {
-                btnAfter.style.border = '3px solid #10b981';
-                btnAfter.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                btnAfter.style.color = 'white';
-                btnAfter.style.opacity = '1';
-                btnBefore.style.border = '3px solid var(--border)';
-                btnBefore.style.background = 'var(--bg-card)';
-                btnBefore.style.color = 'var(--text-secondary)';
-                btnBefore.style.opacity = '0.6';
-                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>AFTER</strong> adaptive AC';
-                indicator.style.background = 'rgba(16, 185, 129, 0.1)';
-                indicator.style.color = '#10b981';
-                indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-            }
+                var baseColor = phase === 'before' ? '#f59e0b' : '#10b981';
+                var darkColor = phase === 'before' ? '#d97706' : '#059669';
+
+                if (r.active) {
+                    var start = new Date(r.start + 'Z');
+                    var elapsed = Math.round((Date.now() - start.getTime()) / 3600000);
+                    var days = Math.floor(elapsed / 24);
+                    var hours = elapsed % 24;
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color: #ef4444; font-size: 8px; animation: blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleDateString() + ' ' + start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    btnEl.innerHTML = '<i class="fas fa-stop"></i> STOP RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                } else if (r.start && r.end) {
+                    var start = new Date(r.start + 'Z');
+                    var end = new Date(r.end + 'Z');
+                    var dur = Math.round((end - start) / 3600000);
+                    var days = Math.floor(dur / 24);
+                    var hours = dur % 24;
+                    statusEl.innerHTML = '<i class="fas fa-check-circle" style="color: ' + baseColor + ';"></i> <strong>Completed</strong><br>' + start.toLocaleDateString() + ' &rarr; ' + end.toLocaleDateString() + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    btnEl.innerHTML = '<i class="fas fa-redo"></i> RESET & RE-RECORD';
+                    btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
+                } else {
+                    statusEl.innerHTML = '&#9675; Not started';
+                    btnEl.innerHTML = '<i class="fas fa-circle"></i> START RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
+                }
+            });
         }
 
-        function loadEnergyCompare(field, period, btnElement) {
-            if (btnElement) {
-                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
-                buttons.forEach(btn => btn.classList.remove('active'));
-                btnElement.classList.add('active');
-            }
-
-            const chartName = field === 'energy_kwh' ? 'energyCompareKwh' : 'energyCompare';
+        function loadEnergyCompare(field) {
+            var chartName = field === 'energy_kwh' ? 'energyCompareKwh' : 'energyCompare';
             if (!charts[chartName]) return;
 
-            fetch('/api/energy/compare?field=' + field + '&period=' + period)
+            fetch('/api/energy/compare?field=' + field)
                 .then(r => r.json())
                 .then(result => {
-                    const beforeData = result.before || [];
-                    const afterData = result.after || [];
-                    const summary = result.summary || {};
+                    var beforeData = result.before || [];
+                    var afterData = result.after || [];
+                    var summary = result.summary || {};
 
-                    // Use the longer dataset's time labels
-                    var timeSet = {};
-                    beforeData.forEach(function(d) { timeSet[d.time] = true; });
-                    afterData.forEach(function(d) { timeSet[d.time] = true; });
-                    var allTimes = Object.keys(timeSet).sort();
+                    // Build shared label set sorted by offset
+                    var labelMap = {};
+                    beforeData.forEach(function(d) { labelMap[d.label] = d.offset; });
+                    afterData.forEach(function(d) { if (!(d.label in labelMap)) labelMap[d.label] = d.offset; });
+                    var allLabels = Object.keys(labelMap).sort(function(a, b) { return labelMap[a] - labelMap[b]; });
 
-                    const beforeMap = {};
-                    beforeData.forEach(d => beforeMap[d.time] = d.value);
-                    const afterMap = {};
-                    afterData.forEach(d => afterMap[d.time] = d.value);
+                    var beforeMap = {};
+                    beforeData.forEach(function(d) { beforeMap[d.label] = d.value; });
+                    var afterMap = {};
+                    afterData.forEach(function(d) { afterMap[d.label] = d.value; });
 
-                    const chart = charts[chartName];
-                    chart.data.labels = allTimes;
-                    chart.data.datasets[0].data = allTimes.map(t => beforeMap[t] !== undefined ? beforeMap[t] : null);
-                    chart.data.datasets[1].data = allTimes.map(t => afterMap[t] !== undefined ? afterMap[t] : null);
+                    var chart = charts[chartName];
+                    chart.data.labels = allLabels;
+                    chart.data.datasets[0].data = allLabels.map(function(l) { return beforeMap[l] !== undefined ? beforeMap[l] : null; });
+                    chart.data.datasets[1].data = allLabels.map(function(l) { return afterMap[l] !== undefined ? afterMap[l] : null; });
                     chart.options.spanGaps = true;
                     chart.update();
 
-                    // Update summary cards (only for power comparison)
                     if (field === 'power') {
                         document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
                         document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
-                        const savingsEl = document.getElementById('compare-savings');
+                        var savingsEl = document.getElementById('compare-savings');
                         savingsEl.textContent = summary.savings_percent || '--';
                         if (summary.savings_percent > 0) {
                             savingsEl.style.color = '#10b981';
@@ -5356,14 +5436,15 @@ HTML_TEMPLATE = '''
                             savingsEl.style.color = '#ef4444';
                         }
                     }
+
+                    if (result.recording) updateRecordingUI(result.recording);
                 })
                 .catch(e => console.error('Energy compare error:', e));
         }
 
-        // Listen for phase changes from server
-        socket.on('energy_phase', function(data) {
-            currentEnergyPhase = data.phase;
-            updatePhaseUI(data.phase);
+        // Listen for recording state changes from server
+        socket.on('energy_recording', function(data) {
+            updateRecordingUI(data.recording);
         });
 
         // ==================== THEME TOGGLE ====================
