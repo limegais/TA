@@ -2185,7 +2185,6 @@ HTML_TEMPLATE = '''
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -4670,7 +4669,7 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
-    <script type="text/babel" data-presets="env">
+    <script>
         window.onerror = function(msg, url, line, col, error) {
             console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
             return false;
@@ -5587,9 +5586,9 @@ HTML_TEMPLATE = '''
                 showToast('No optimization data to export', 'error');
                 return;
             }
-            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\\n';
             mlHistory.forEach(e => {
-                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
+                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
@@ -5601,14 +5600,14 @@ HTML_TEMPLATE = '''
                 showToast('No logs to export', 'error');
                 return;
             }
-            let csv = 'Time,Level,Message\n';
+            let csv = 'Time,Level,Message\\n';
             Array.from(container.children).forEach(entry => {
                 const text = entry.textContent || '';
                 const timeMatch = text.match(/\\[(.+?)\\]/);
                 const time = timeMatch ? timeMatch[1] : '';
                 const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
-                csv += '"' + time + '","' + level + '","' + msg + '"\n';
+                csv += '"' + time + '","' + level + '","' + msg + '"\\n';
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
@@ -5623,10 +5622,10 @@ HTML_TEMPLATE = '''
                         showToast('No feedback data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
+                    let csv = 'Time,Rating,Occupancy Count,Comment\\n';
                     rows.forEach(item => {
                         const comment = (item.comment || '').replace(/"/g, '""');
-                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\n';
+                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\\n';
                     });
                     downloadCSV('occupancy_feedback.csv', csv);
                     showToast('Feedback exported', 'success');
@@ -5643,7 +5642,7 @@ HTML_TEMPLATE = '''
                         showToast('No energy data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\\n';
                     const times = data.power.map(p => p.time);
                     const powers = data.power || [];
                     const voltages = data.voltage || [];
@@ -5652,7 +5651,7 @@ HTML_TEMPLATE = '''
                         const pw = powers[i] ? powers[i].value : '';
                         const vl = voltages[i] ? voltages[i].value : '';
                         const en = energies[i] ? energies[i].value : '';
-                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\n';
+                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\\n';
                     });
                     downloadCSV('energy_history_' + period + '.csv', csv);
                     showToast('Energy data exported (' + period + ')', 'success');
@@ -5667,10 +5666,10 @@ HTML_TEMPLATE = '''
                 showToast('No data to export for ' + chartName, 'error');
                 return;
             }
-            let csv = 'Time,' + valueLabel + '\n';
+            let csv = 'Time,' + valueLabel + '\\n';
             chart.data.labels.forEach((label, i) => {
                 const val = chart.data.datasets[0].data[i];
-                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\\n';
             });
             downloadCSV(chartName + '_data.csv', csv);
             showToast(chartName + ' data exported', 'success');
@@ -5684,14 +5683,14 @@ HTML_TEMPLATE = '''
                 return;
             }
             const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
-            let csv = 'Time,' + dsNames.join(',') + '\n';
+            let csv = 'Time,' + dsNames.join(',') + '\\n';
             chart.data.labels.forEach((label, i) => {
                 let row = '"' + label + '"';
                 chart.data.datasets.forEach(ds => {
                     const val = ds.data[i];
                     row += ',' + (val !== null && val !== undefined ? val : '');
                 });
-                csv += row + '\n';
+                csv += row + '\\n';
             });
             downloadCSV(chartName + '_compare.csv', csv);
             showToast(chartName + ' comparison exported', 'success');
@@ -7023,7 +7022,7 @@ HTML_TEMPLATE = '''
                     }
 
                     updateModeBadges();
-                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
+                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
         }
 
         function updateLogs() {
@@ -7044,11 +7043,11 @@ HTML_TEMPLATE = '''
         // ==================== DEVICE STATUS ====================
         function diagLog(msg) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent += msg + '\n';
+            if (el) el.textContent += msg + '\\n';
         }
         function diagClear(title) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\\n';
         }
 
         function checkMqttStatus(showDetail) {
@@ -7637,7 +7636,7 @@ HTML_TEMPLATE = '''
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Tidak diketahui') + '\n\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Tidak diketahui') + '\\n\\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
                         }
                     }
                 }).catch(function() {});
