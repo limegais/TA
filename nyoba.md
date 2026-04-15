@@ -4836,72 +4836,69 @@ HTML_TEMPLATE = '''
 
         // ==================== CHARTS ====================
         function initCharts() {
-            const chartConfig = {
-                type: 'line',
-                options: {
+            function makeOpts(showLegend) {
+                var opts = {
                     responsive: true,
                     maintainAspectRatio: true,
-                    plugins: { legend: { display: false } },
+                    plugins: { legend: { display: !!showLegend } },
                     scales: {
                         y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
                         x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
                     }
+                };
+                if (showLegend) {
+                    opts.plugins.legend.labels = { color: '#94a3b8', font: { size: 12 } };
                 }
-            };
+                return opts;
+            }
 
             charts.temp = new Chart(document.getElementById('tempChart'), {
-                ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Temperature (°C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Temperature (\u00b0C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.hum = new Chart(document.getElementById('humChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Humidity (%)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
-                ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'AC Target Temp (°C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'AC Target Temp (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Light Intensity (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.energy = new Chart(document.getElementById('energyChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
-            // Historical Energy Charts (PZEM-016 from InfluxDB)
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
-            // Before vs After Comparison Charts
             charts.energyCompare = new Chart(document.getElementById('energyCompareChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
-                },
+                type: 'line', options: makeOpts(true),
                 data: {
                     labels: [],
                     datasets: [
@@ -4912,11 +4909,7 @@ HTML_TEMPLATE = '''
             });
 
             charts.energyCompareKwh = new Chart(document.getElementById('energyCompareKwhChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
-                },
+                type: 'line', options: makeOpts(true),
                 data: {
                     labels: [],
                     datasets: [
@@ -4927,27 +4920,22 @@ HTML_TEMPLATE = '''
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
-            // ML Optimization Charts
             charts.gaFitness = new Chart(document.getElementById('gaFitnessChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'PSO Best Fitness', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8' } } }
-                },
+                type: 'line', options: makeOpts(true),
                 data: {
                     labels: [],
                     datasets: [
@@ -5302,10 +5290,10 @@ HTML_TEMPLATE = '''
                     const summary = result.summary || {};
 
                     // Use the longer dataset's time labels
-                    const allTimes = [...new Set([
-                        ...beforeData.map(d => d.time),
-                        ...afterData.map(d => d.time)
-                    ])].sort();
+                    var timeSet = {};
+                    beforeData.forEach(function(d) { timeSet[d.time] = true; });
+                    afterData.forEach(function(d) { timeSet[d.time] = true; });
+                    var allTimes = Object.keys(timeSet).sort();
 
                     const beforeMap = {};
                     beforeData.forEach(d => beforeMap[d.time] = d.value);
