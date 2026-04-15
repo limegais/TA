@@ -115,27 +115,19 @@ mqtt_status = {
 # Runtime energy history fallback (used when Influx query returns no points)
 energy_runtime_history = deque(maxlen=5000)
 
-# Debug counter for /api/data response snapshots
-api_data_debug_counter = 0
-
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
     try:
-        print(f"[DB] Attempting to write to InfluxDB: {measurement}")
-        print(f"   URL: {INFLUX_URL}, ORG: {INFLUX_ORG}, BUCKET: {INFLUX_BUCKET}")
-        
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = client.write_api(write_options=SYNCHRONOUS)
         
         point = Point(measurement).time(datetime.utcnow(), WritePrecision.NS)
         
-        # Add tags if provided
         if tags:
             for key, value in tags.items():
                 point = point.tag(key, str(value))
         
-        # Add fields
         for key, value in fields.items():
             if isinstance(value, (int, float)):
                 point = point.field(key, float(value))
@@ -144,108 +136,57 @@ def write_to_influxdb(measurement, fields, tags=None):
             else:
                 point = point.field(key, str(value))
         
-        print(f"   Data: {fields}")
-        
-        # Write to InfluxDB
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
         write_api.close()
         client.close()
-        print(f"[OK] Successfully written to InfluxDB: {measurement}")
         return True
     except Exception as e:
         print(f"[ERROR] InfluxDB Write Error ({measurement}): {str(e)}")
-        import traceback
-        traceback.print_exc()
         return False
 
 def save_sensor_data(temperature, humidity, heat_index):
-    """Save temperature and humidity data to InfluxDB"""
     try:
-        result = write_to_influxdb(
-            measurement="ac_sensor",
-            fields={
-                "temperature": float(temperature),
-                "humidity": float(humidity),
-                "heat_index": float(heat_index)
-            },
-            tags={"device": "esp32_ac", "location": "room"}
-        )
-        if result:
-            print(f"[OK] Sensor data saved: {temperature}°C, {humidity}%")
+        write_to_influxdb('ac_sensor', {
+            'temperature': float(temperature), 'humidity': float(humidity), 'heat_index': float(heat_index)
+        }, tags={'device': 'esp32_ac', 'location': 'room'})
     except Exception as e:
-        print(f"[ERROR] Error saving sensor data: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f'[ERROR] save_sensor_data: {e}')
 
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
-    """Save lamp sensor data to InfluxDB (3 lamps)"""
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
-        result = write_to_influxdb(
-            measurement="lamp_sensor",
-            fields={
-                "lux1": float(lux1), "lux2": float(lux2), "lux3": float(lux3), "lux_avg": float(lux_avg),
-                "brightness1": float(brightness1), "brightness2": float(brightness2), "brightness3": float(brightness3), "brightness_avg": float(bright_avg),
-                "motion": bool(motion)
-            },
-            tags={"device": "esp32_lamp", "location": "room"}
-        )
-        if result:
-            print(f"[OK] Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
+        write_to_influxdb('lamp_sensor', {
+            'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
+            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
+            'motion': bool(motion)
+        }, tags={'device': 'esp32_lamp', 'location': 'room'})
     except Exception as e:
-        print(f"[ERROR] Error saving lamp data: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f'[ERROR] save_lamp_data: {e}')
 
 def save_person_detection(person_count, confidence):
-    """Save person detection data to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="camera_detection",
-            fields={
-                "person_count": int(person_count),
-                "confidence": float(confidence),
-                "person_detected": bool(person_count > 0)
-            },
-            tags={"device": "camera_yolo", "model": "yolov8n"}
-        )
-        if person_count > 0:
-            print(f"[OK] Detection saved: {person_count} person(s), {confidence:.2f} confidence")
+        write_to_influxdb('camera_detection', {
+            'person_count': int(person_count), 'confidence': float(confidence), 'person_detected': bool(person_count > 0)
+        }, tags={'device': 'camera_yolo', 'model': 'yolov8n'})
     except Exception as e:
-        print(f"[ERROR] Error saving detection data: {e}")
+        print(f'[ERROR] save_person_detection: {e}')
 
 def save_ir_command(device, command, signal_length):
-    """Save IR remote command to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="ir_remote",
-            fields={
-                "command": str(command),
-                "signal_length": int(signal_length),
-                "learned": True
-            },
-            tags={"device": str(device), "type": "ir_code"}
-        )
-        print(f"[OK] IR command saved: {device} - {command}")
+        write_to_influxdb('ir_remote', {
+            'command': str(command), 'signal_length': int(signal_length), 'learned': True
+        }, tags={'device': str(device), 'type': 'ir_code'})
     except Exception as e:
-        print(f"[ERROR] Error saving IR command: {e}")
+        print(f'[ERROR] save_ir_command: {e}')
 
 def save_ac_control(ac_temp, fan_speed, ac_state):
-    """Save AC control settings to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="ac_sensor",
-            fields={
-                "ac_temp": float(ac_temp),
-                "fan_speed": int(fan_speed),
-                "ac_state": str(ac_state)
-            },
-            tags={"device": "esp32_ac", "type": "control"}
-        )
-        print(f"[OK] AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
+        write_to_influxdb('ac_sensor', {
+            'ac_temp': float(ac_temp), 'fan_speed': int(fan_speed), 'ac_state': str(ac_state)
+        }, tags={'device': 'esp32_ac', 'type': 'control'})
     except Exception as e:
-        print(f"[ERROR] Error saving AC control: {e}")
+        print(f'[ERROR] save_ac_control: {e}')
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -276,8 +217,6 @@ def load_yolo_model():
         
     except Exception as e:
         print(f"[ERROR] YOLO loading error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                            'msg': f'YOLO error: {str(e)}', 'level': 'error'})
         return False
@@ -318,8 +257,6 @@ def detect_persons(frame):
             
     except Exception as e:
         print(f"[ERROR] YOLO detection error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return frame, 0, 0.0, []
 
 def _person_present_recently():
@@ -354,17 +291,13 @@ def handle_person_based_control(person_count):
             _last_person_confirmed_time = time.time()  # Record time person was confirmed
             _no_person_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
-            _auto_off_time = 0.0  # Clear cooldown
-            print(f"[OK] Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+            _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
-            if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
-                print(f"[WAIT] Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
         
         # Auto ON: person confirmed AND cooldown elapsed
         if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"[ON] Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -391,10 +324,9 @@ def handle_person_based_control(person_count):
         # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
         elapsed = time.time() - _no_person_start_time
         if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
-            _auto_off_triggered = True  # Always set flag to block adaptive SET
-            _auto_off_time = time.time()  # Start cooldown timer
+            _auto_off_triggered = True
+            _auto_off_time = time.time()
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"[OFF] No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
@@ -417,21 +349,16 @@ def get_camera():
     if camera is None:
         # Auto-detect camera: try index 0-4
         for idx in range(5):
-            print(f"[CAM] Trying camera index {idx}...")
             cam = cv2.VideoCapture(idx)
             if cam.isOpened():
-                # Verify it can actually capture a frame
                 ret, test_frame = cam.read()
                 if ret and test_frame is not None:
                     camera = cam
-                    print(f"[OK] Camera found at index {idx}")
                     break
                 else:
                     cam.release()
-                    print(f"   Index {idx}: opened but can't read frames")
             else:
                 cam.release()
-                print(f"   Index {idx}: not available")
         
         if camera is not None and camera.isOpened():
             # 720p for best FPS — YOLO only uses 640px input anyway
@@ -458,7 +385,6 @@ def get_camera():
             actual_fps = int(camera.get(cv2.CAP_PROP_FPS))
             
             mqtt_data['camera']['status'] = 'active'
-            print(f"[OK] Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
             log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                                'msg': f'Camera: {actual_w}x{actual_h} @ {actual_fps}fps', 
                                'level': 'success'})
@@ -483,7 +409,6 @@ def camera_detection_loop():
     fps_counter = 0
     fps_timer = time.time()
     
-    print("[CAM] Camera detection background thread started (runs 24/7)")
     last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
     CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
@@ -506,7 +431,6 @@ def camera_detection_loop():
                             camera.release()
                             camera = None
                         mqtt_data['camera']['status'] = 'reconnecting'
-                        print("[WARN] Camera read failed, will retry...")
             
             # If no frame captured, wait and retry (lock is released)
             if frame is None:
@@ -595,12 +519,6 @@ def camera_detection_loop():
                 cv2.putText(frame, f'Persons Detected: {last_person_count}', (20, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             
-            # Debug: print timer status every 60 seconds
-            if _no_person_start_time is not None:
-                elapsed = time.time() - _no_person_start_time
-                if int(elapsed) % 60 < 1:
-                    print(f"[TIMER] No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
-            
             # Encode frame and store for video_feed consumers
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if ret:
@@ -617,11 +535,7 @@ def camera_detection_loop():
             
         except Exception as e:
             print(f"[ERROR] Detection loop error: {e}")
-            import traceback
-            traceback.print_exc()
             time.sleep(retry_delay)
-    
-    print("[STOP] Camera detection background thread stopped")
 
 def generate_frames():
     """Stream latest frames to /video_feed — reads from background thread"""
@@ -655,10 +569,6 @@ mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW I
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     global mqtt_status
-    print("\n" + "="*70)
-    print("  [MQTT] FLASK MQTT CONNECTION EVENT")
-    print("="*70)
-    
     is_success = False
     if hasattr(reason_code, 'is_failure'):
         is_success = not reason_code.is_failure
@@ -669,21 +579,16 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         mqtt_status['connected'] = True
         mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
         mqtt_status['error'] = None
-        print("[OK] MQTT CONNECTED SUCCESSFULLY!")
-        
+        print("[OK] MQTT connected")
         client.subscribe("smartroom/#")
         client.subscribe("ir/#")
         client.subscribe("IR/#")
         client.subscribe("+/ir/#")
-        print("[OK] Subscribed to: smartroom/#, ir/#, IR/#, +/ir/#")
-        print("="*70 + "\n")
-        
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected!', 'level': 'success'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'MQTT Connected!', 'level': 'success'})
     else:
         mqtt_status['connected'] = False
         mqtt_status['error'] = f'Connection failed: {reason_code}'
         print(f"[ERROR] MQTT CONNECTION FAILED! RC={reason_code}")
-        print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
     global ir_learning_mode, ir_learning_button, ir_learning_device, mqtt_status
@@ -693,62 +598,24 @@ def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         
-        # Debug: Print ALL incoming MQTT messages with timestamp
-        print("\n" + "─"*70)
-        print(f"[MSG] [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
-        print(f"Topic: {topic}")
-        print(f"Payload Length: {len(msg.payload)} bytes")
-        print(f"QoS: {msg.qos} | Retain: {msg.retain}")
-        
         # Broadcast to frontend for debugging
         try:
-            payload_str = msg.payload.decode()[:100]
             socketio.emit('mqtt_debug', {
                 'topic': topic,
-                'payload': payload_str,
+                'payload': msg.payload.decode()[:100],
                 'time': datetime.now().strftime('%H:%M:%S')
             })
-        except Exception as e:
+        except Exception:
             pass
         
-        # Try to parse as JSON first
+        # Parse JSON payload
         try:
-            full_payload_str = msg.payload.decode()  # Decode ONCE, use full string
+            full_payload_str = msg.payload.decode()
             payload = json.loads(full_payload_str)
-            # Don't print full payload (RAW IR codes are 1000+ chars), show summary
-            if isinstance(payload, dict) and 'code' in payload:
-                code_val = payload['code']
-                code_len = len(code_val) if isinstance(code_val, str) else 0
-                raw_count = code_val.count(',') + 1 if isinstance(code_val, str) and code_val.startswith('RAW:') else 0
-                print(f"   Data (JSON): code length={code_len} chars, RAW values={raw_count}")
-                print(f"   Code preview: {code_val[:80]}..." if code_len > 80 else f"   Code: {code_val}")
-            else:
-                print(f"   Data (JSON): {payload}")
-        except Exception as json_err:
-            print(f"[JSON ERROR] Failed to parse JSON: {json_err} - Payload: {full_payload_str}")
-            # If not JSON, treat as plain text
-            payload_text = msg.payload.decode()
-            print(f"   Data (Text): {payload_text[:200]}..." if len(payload_text) > 200 else f"   Data (Text): {payload_text}")
-            payload = {'raw': payload_text}
-        
-        # DEBUG: Check which condition will match
-        print(f"\n[ROUTE] Topic Routing Check:")
-        print(f"   'ac/sensors' in topic: {'ac/sensors' in topic}")
-        print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
-        print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
-        print(f"   'dashboard/state' in topic: {'dashboard/state' in topic}")
-        print(f"   'ml/result' in topic: {'ml/result' in topic}")
-        print(f"   'ac/mode' in topic: {'ac/mode' in topic}")
-        print(f"   'lamp/mode' in topic: {'lamp/mode' in topic}")
-        print(f"   'ir/learned' in topic: {'ir/learned' in topic}")
-        print(f"   'IR/learned' in topic.lower(): {'IR/learned' in topic.lower()}")
+        except Exception:
+            payload = {'raw': msg.payload.decode()}
         
         if 'ac/sensors' in topic:
-            print("[SENSOR] Processing AC Sensor Data:")
-            print(f"   Temperature: {payload.get('temperature', 0)}°C")
-            print(f"   Humidity: {payload.get('humidity', 0)}%")
-            print(f"   Heat Index: {payload.get('heat_index', 0)}°C")
-            
             mqtt_data['ac'].update({
                 'temperature': payload.get('temperature', 0),
                 'humidity': payload.get('humidity', 0),
@@ -767,23 +634,9 @@ def on_message(client, userdata, msg):
                 'temp3': payload.get('temp3', 0),
                 'hum3': payload.get('hum3', 0),
             })
-            # Save sensor data to InfluxDB
-            print("   [DB] Saving to InfluxDB...")
-            save_sensor_data(
-                mqtt_data['ac']['temperature'],
-                mqtt_data['ac']['humidity'],
-                mqtt_data['ac']['heat_index']
-            )
-            # Save AC control state
-            save_ac_control(
-                mqtt_data['ac']['ac_temp'],
-                mqtt_data['ac']['fan_speed'],
-                mqtt_data['ac']['ac_state']
-            )
-            print("   [OK] AC data updated in memory & InfluxDB")
+            save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
+            save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
-            print("   [WS] Sent to frontend via WebSocket")
-            # Track device status & check alerts
             device_last_seen['esp32_ac']['last_seen'] = datetime.now()
             device_last_seen['esp32_ac']['status'] = 'online'
             check_alert_rules()
@@ -821,8 +674,6 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            print(f"   [ENERGY] Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
-            # Save to InfluxDB for historical data (30 day retention)
             write_to_influxdb('energy_monitor', {
                 'voltage': float(mqtt_data['energy']['voltage']),
                 'current': float(mqtt_data['energy']['current']),
@@ -876,7 +727,6 @@ def on_message(client, userdata, msg):
                 'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                 'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
             })
-            print(f"[ML] Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
             # Write optimization history to InfluxDB
             write_to_influxdb('optimization_result', {
@@ -899,11 +749,8 @@ def on_message(client, userdata, msg):
                         _last_adaptive_ac_apply = now
                         ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                        print(f"[ADAPTIVE] -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
-                    else:
-                        print(f"[ADAPTIVE] -> AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                print(f"[ADAPTIVE] -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+                pass
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
@@ -913,13 +760,8 @@ def on_message(client, userdata, msg):
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
                         client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
-                        print(f"[ADAPTIVE] -> Applied to All Lamps: {opt_brightness}%")
-                    else:
-                        print(f"[ADAPTIVE] -> Lamp apply debounced")
         
         elif 'ml/status' in topic:
-            # ML optimization status from main.py (running/completed/error/busy)
-            print(f"[ML] ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
             socketio.emit('ml_status', payload)
             log_messages.append({
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -943,9 +785,7 @@ def on_message(client, userdata, msg):
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
-                    print(f"[ML] ML Completed -> Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
-                    socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
-        
+                    
         elif 'ac/mode' in topic:
             mqtt_data['ac']['mode'] = payload.get('mode', 'ADAPTIVE')
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
@@ -955,115 +795,42 @@ def on_message(client, userdata, msg):
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
         
         elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
-            print("\n" + "="*70)
-            print("[IR] IR SIGNAL RECEIVED FROM ESP32!")
-            print("="*70)
-            print(f"Topic received: {topic}")
-            print(f"ir_learning_mode: {ir_learning_mode}")
-            print(f"ir_learning_button: {ir_learning_button}")
-            print(f"ir_learning_device: {ir_learning_device}")
-            
-            # Determine if this is a forwarded signal (ESP32 not in learn mode)
             esp32_status = payload.get('status', '') if isinstance(payload, dict) else ''
-            esp32_learning = payload.get('learning_mode', True) if isinstance(payload, dict) else True
-            print(f"ESP32 status: {esp32_status}")
-            print(f"ESP32 learning_mode: {esp32_learning}")
-            print("="*70)
             
-            # Handle different payload formats
             ir_code = ''
             device = ir_learning_device or 'remote'
+            button_name = ir_learning_button
             
-            # CRITICAL: Always use Flask's ir_learning_button (not ESP32's)
-            # because ESP32 might send "auto_captured" when not in its own learn mode
-            button_name = ir_learning_button  # Flask always knows the correct button
-            
-            # Format 1: {"button": "...", "code": "..."}
             if isinstance(payload, dict):
-                # Only use ESP32's button name if Flask doesn't have one set
                 if not button_name:
                     button_name = payload.get('button', '')
                 ir_code = payload.get('code', payload.get('ir_code', payload.get('raw', '')))
                 if not ir_learning_device:
                     device = payload.get('device', device)
-            # Format 2: Plain text IR code
             elif isinstance(payload, str):
                 ir_code = payload
-            # Format 3: Raw data
             else:
                 ir_code = str(payload)
             
-            # Count actual RAW values to verify completeness
-            raw_value_count = 0
-            if ir_code.startswith('RAW:'):
-                raw_part = ir_code[4:]  # Skip 'RAW:'
-                raw_value_count = raw_part.count(',') + 1 if raw_part else 0
-            print(f"   Parsed - Button: {button_name}, Device: {device}")
-            print(f"   Code length: {len(ir_code)} chars")
-            if raw_value_count > 0:
-                print(f"   [OK] RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
-                if raw_value_count < 100:
-                    print(f"   [WARN] Only {raw_value_count} values! Signal mungkin tidak lengkap!")
-                    print(f"   [WARN] Mitsubishi SRK AC butuh ~200+ values (2 frame)")
-            
-            # CHECK: Is Flask in learning mode?
             if not ir_learning_mode:
-                print(f"[WARN] Flask NOT in learning mode — ignoring signal")
-                print(f"   (Signal has {len(ir_code)} chars, {raw_value_count} RAW values)")
-                print(f"   To capture: click Learn button on dashboard first")
-                print("="*70)
+                pass  # Not in learning mode, ignore
             elif button_name and ir_code and len(ir_code) > 0:
-                print(f"[OK] Flask IS in learning mode — SAVING signal!")
-                
-                # Check if this is a power toggle (same code for ON/OFF)
                 is_power_toggle = False
                 if 'power' in button_name.lower():
-                    # Check if we already have a power code for this device
-                    existing_power_codes = {
-                        k: v for k, v in mqtt_data['ir_codes'].items() 
-                        if 'power' in k.lower() and device in k
-                    }
-                    
+                    existing_power_codes = {k: v for k, v in mqtt_data['ir_codes'].items() if 'power' in k.lower() and device in k}
                     if existing_power_codes and ir_code in existing_power_codes.values():
-                        # Same code detected - this is a toggle button
                         is_power_toggle = True
                         button_name = f"{device}_power_toggle"
-                        mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
-                        print(f"[WARN] Power toggle detected for {device}: Same code for ON/OFF")
+                        mqtt_data['ir_states'][button_name] = 'OFF'
                 
-                # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
-                print(f"[OK] IR code saved to memory: {button_name}")
-                
-                # Verify code integrity
-                if ir_code.startswith('RAW:'):
-                    raw_cnt = ir_code[4:].count(',') + 1
-                    print(f"   [OK] Verified RAW signal: {raw_cnt} values stored for {button_name}")
-                else:
-                    print(f"   [OK] Non-RAW code stored: {len(ir_code)} chars")
-                
-                # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
                 
-                # Save to file for persistence
                 try:
                     import os
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
-                    print(f"[SAVE] IR codes saved to file: {ir_file}")
-                    
-                    # Verify file write
-                    with open(ir_file, 'r') as f:
-                        verify = json.load(f)
-                    if button_name in verify:
-                        saved_code = verify[button_name]
-                        if saved_code == ir_code:
-                            print(f"   [OK] File verified: {button_name} saved correctly ({len(saved_code)} chars)")
-                        else:
-                            print(f"   [WARN] File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
-                    else:
-                        print(f"   [WARN] Button {button_name} NOT found in saved file!")
                 except Exception as e:
                     print(f"[ERROR] Error saving IR codes to file: {e}")
                 
@@ -1073,46 +840,22 @@ def on_message(client, userdata, msg):
                     'level': 'success'
                 })
                 
-                # Emit to frontend
-                print("\n[WS] Emitting 'ir_learned' event to frontend via WebSocket...")
-                print(f"   Event data: button={button_name}, device={device}, is_toggle={is_power_toggle}")
-                
                 socketio.emit('ir_learned', {
-                    'button': button_name, 
-                    'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,  # Truncate for display
+                    'button': button_name,
+                    'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,
                     'device': device,
                     'is_toggle': is_power_toggle,
                     'status': 'success'
                 })
                 
-                print("[OK] WebSocket event emitted successfully!")
-                print("   Frontend should update NOW!")
-                print("="*70)
-                
-                print(f"[OK] IR learning completed for: {button_name}")
-                
                 ir_learning_mode = False
                 ir_learning_button = ""
                 ir_learning_device = ""
             else:
-                print(f"[ERROR] IR learning failed: Missing button name or code")
-                socketio.emit('ir_learned', {
-                    'status': 'error',
-                    'message': 'Invalid IR data received'
-                })
-        
-        else:
-            # No handler matched this topic
-            print(f"[WARN] UNHANDLED TOPIC: {topic}")
-            print(f"   No matching handler found for this topic!")
-            print(f"   Available handlers: ac/sensors, lamp/sensors, camera/detection, ir/learned, etc.")
-            
-        print("─"*70 + "\n")
+                socketio.emit('ir_learned', {'status': 'error', 'message': 'Invalid IR data received'})
         
     except Exception as e:
         print(f"[ERROR] MQTT Message Handler Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
@@ -1128,10 +871,7 @@ mqtt_client.on_disconnect = on_disconnect
 # Enable auto-reconnect with 5 second delay
 mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-print(f"[INIT] MQTT Client connecting to {MQTT_BROKER}:{MQTT_PORT}...")
-
 def start_mqtt():
-    """Start MQTT connection in background thread with retry"""
     global mqtt_status
     mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
     retries = 0
@@ -1139,23 +879,15 @@ def start_mqtt():
         try:
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
             mqtt_client.loop_start()
-            print(f"[OK] MQTT loop started (attempt {retries + 1})")
             time.sleep(2)
-            if mqtt_client.is_connected():
-                print("[OK] MQTT Connected!")
-            else:
-                print("[WARN] MQTT loop started, waiting for connection...")
             return
         except Exception as e:
             retries += 1
             mqtt_status['error'] = str(e)
-            print(f"[WARN] MQTT connect attempt {retries}/5 failed: {e}")
             if retries < 5:
                 time.sleep(3)
-    print("[ERROR] MQTT: All connection attempts failed. Dashboard will run without MQTT.")
-    print("[ERROR] Make sure mosquitto/MQTT broker is running: sudo systemctl start mosquitto")
+    print("[ERROR] MQTT: All connection attempts failed.")
 
-# Start MQTT in a background thread so it doesn't block app startup
 mqtt_thread = threading.Thread(target=start_mqtt, daemon=True)
 mqtt_thread.start()
 
@@ -1283,14 +1015,6 @@ def toggle_camera():
 
 @app.route('/api/data')
 def get_data():
-    global api_data_debug_counter
-    api_data_debug_counter += 1
-    if api_data_debug_counter % 5 == 0:
-        try:
-            print(f"[API DATA] ac.temp={mqtt_data.get('ac', {}).get('temperature', 0)} hum={mqtt_data.get('ac', {}).get('humidity', 0)} energy.power={mqtt_data.get('energy', {}).get('power', 0)}")
-        except Exception:
-            pass
-
     response = jsonify(mqtt_data)
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     response.headers['Pragma'] = 'no-cache'
@@ -1341,12 +1065,9 @@ def mqtt_config():
         try:
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
             mqtt_client.loop_start()
-            print(f"[CONFIG] MQTT reconnected to {MQTT_BROKER}:{MQTT_PORT}")
         except Exception as e:
             mqtt_status['error'] = str(e)
-            print(f"[ERROR] MQTT connect to {MQTT_BROKER}:{MQTT_PORT} failed: {e}")
     threading.Thread(target=reconnect_thread, daemon=True).start()
-    print(f"[CONFIG] MQTT broker changed: {old_broker} -> {MQTT_BROKER}:{MQTT_PORT}")
     return jsonify({'status': 'ok', 'message': f'Mencoba connect ke {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
 
 @app.route('/api/simulate', methods=['POST'])
@@ -1383,7 +1104,6 @@ def simulate_data():
     })
     socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
     socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
-    print(f"[SIMULATE] Dummy data injected into mqtt_data successfully")
     return jsonify({'status': 'ok', 'message': 'Dummy data injected', 'ac_temp': mqtt_data['ac']['temperature'], 'lamp_lux': mqtt_data['lamp']['lux1']})
 
 @app.route('/api/mqtt/selftest', methods=['POST'])
@@ -1395,7 +1115,6 @@ def mqtt_selftest():
         test_payload = json.dumps({'temperature': 28.5, 'humidity': 65.0, 'heat_index': 30.0, 'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2, 'rssi': -55, 'uptime': 100, 'temp1': 28.0, 'temp2': 28.5, 'temp3': 29.0, 'hum1': 64.0, 'hum2': 65.0, 'hum3': 66.0})
         result = mqtt_client.publish('smartroom/ac/sensors', test_payload, qos=1)
         result.wait_for_publish(timeout=3)
-        print(f"[SELFTEST] Published test AC message to smartroom/ac/sensors")
         return jsonify({'status': 'ok', 'message': 'Test message published to smartroom/ac/sensors. Check if data appears in dashboard.'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1473,12 +1192,10 @@ def energy_record_api():
             energy_recording[phase]['start'] = datetime.utcnow().isoformat()
             energy_recording[phase]['end'] = None
             energy_phase = phase
-            print(f"[ENERGY] Started recording: {phase}")
         else:
             energy_recording[phase]['active'] = False
             energy_recording[phase]['end'] = datetime.utcnow().isoformat()
             energy_phase = 'idle'
-            print(f"[ENERGY] Stopped recording: {phase}")
 
         socketio.emit('energy_recording', {'recording': energy_recording, 'phase': energy_phase})
         return jsonify({'recording': energy_recording, 'phase': energy_phase})
@@ -1804,7 +1521,6 @@ def control_ac():
             payload['power'] = payload['ac_state']
 
         mqtt_client.publish('smartroom/ac/control', json.dumps(payload))
-        print(f"[AC Control] Sent payload to ESP32: {payload}")
 
         mqtt_data['ac']['ac_temp'] = payload['temperature']
         mqtt_data['ac']['fan_speed'] = payload['fan_speed']
@@ -1874,10 +1590,7 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        print(f"[ML] Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
-        
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-        # Skip if camera auto-OFF is active (no person detected)
         if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = mqtt_data['system'].get('ga_temp', 0)
             opt_fan = mqtt_data['system'].get('ga_fan', 0)
@@ -1888,12 +1601,7 @@ def update_optimization():
                     _last_adaptive_ac_apply = now
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    print(f"[ADAPTIVE] (HTTP) -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
-                else:
-                    print(f"[ADAPTIVE] (HTTP) -> AC apply debounced (MQTT already handled it)")
-        elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            print(f"[ADAPTIVE] (HTTP) -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
@@ -1905,10 +1613,7 @@ def update_optimization():
                     _last_adaptive_lamp_apply = now
                     lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    print(f"[ADAPTIVE] (HTTP) -> Applied to Lamp: {opt_brightness}%")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
-                else:
-                    print(f"[ADAPTIVE] (HTTP) -> Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -1939,26 +1644,7 @@ def learn_ir():
         mqtt_payload_str = json.dumps(mqtt_payload)
         
         # DEBUG LOGGING - SEE WHAT WE'RE SENDING!
-        print("\n" + "="*60)
-        print("[IR] FLASK: PUBLISHING IR LEARN COMMAND")
-        print("="*60)
-        print(f"Topic    : smartroom/ir/learn")
-        print(f"Button   : {button_name}")
-        print(f"Device   : {device_name}")
-        print(f"Payload  : {mqtt_payload_str}")
-        print(f"Length   : {len(mqtt_payload_str)} bytes")
-        print(f"MQTT Connected: {mqtt_client.is_connected()}")
-        print("="*60)
-        
-        # PUBLISH WITH RESULT CHECK
         result = mqtt_client.publish('smartroom/ir/learn', mqtt_payload_str)
-        
-        print(f"Publish Result: {result.rc}")
-        if result.rc == 0:
-            print("[OK] MQTT PUBLISH SUCCESS!")
-        else:
-            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
-        print("="*60 + "\n")
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
@@ -1972,9 +1658,7 @@ def learn_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"[ERROR] EXCEPTION in learn_ir(): {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] learn_ir: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/send', methods=['POST'])
@@ -1983,73 +1667,21 @@ def send_ir():
         data = request.json
         button_name = data.get('button', '')
         
-        print("\n" + "="*70)
-        print("[IR] IR SEND REQUEST RECEIVED")
-        print("="*70)
-        print(f"Button requested: {button_name}")
-        print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
-        
         if button_name not in mqtt_data['ir_codes']:
-            print(f"[ERROR] Button '{button_name}' not found in learned codes!")
-            print("="*70 + "\n")
             return jsonify({'status': 'error', 'message': 'IR code not learned yet'}), 400
         
         ir_code = mqtt_data['ir_codes'][button_name]
         
-        # Verify code completeness before sending
-        raw_value_count = 0
-        if isinstance(ir_code, str) and ir_code.startswith('RAW:'):
-            raw_part = ir_code[4:]
-            raw_value_count = raw_part.count(',') + 1 if raw_part else 0
-        
-        print(f"[OK] IR code found!")
-        print(f"Code length: {len(ir_code)} chars")
-        if raw_value_count > 0:
-            print(f"RAW values: {raw_value_count} values")
-            if raw_value_count < 100:
-                print(f"[WARN] Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
-        print(f"Code preview: {ir_code[:100]}..." if len(ir_code) > 100 else f"Code: {ir_code}")
-        
         # Handle toggle buttons (power ON/OFF with same code)
         action_suffix = ''
         if 'toggle' in button_name.lower() or button_name in mqtt_data['ir_states']:
-            # Toggle the state
             current_state = mqtt_data['ir_states'].get(button_name, 'OFF')
             new_state = 'ON' if current_state == 'OFF' else 'OFF'
             mqtt_data['ir_states'][button_name] = new_state
             action_suffix = f' ({new_state})'
-            print(f"[IR] Toggle button: {current_state} -> {new_state}")
         
-        # MQTT Payload - send COMPLETE code, no truncation!
-        mqtt_payload = {
-            'button': button_name, 
-            'code': ir_code  # FULL code, no slicing!
-        }
-        mqtt_payload_str = json.dumps(mqtt_payload)
-        
-        # Verify the JSON payload still contains the full code
-        verify_payload = json.loads(mqtt_payload_str)
-        verify_code = verify_payload.get('code', '')
-        verify_raw_count = 0
-        if verify_code.startswith('RAW:'):
-            verify_raw_count = verify_code[4:].count(',') + 1
-        
-        print(f"\n[PUB] Publishing to MQTT...")
-        print(f"Topic: smartroom/ir/send")
-        print(f"Payload size: {len(mqtt_payload_str)} bytes")
-        if verify_raw_count > 0:
-            print(f"RAW values in payload: {verify_raw_count} (verified after JSON encode)")
-        print(f"MQTT Connected: {mqtt_client.is_connected()}")
-        
-        result = mqtt_client.publish('smartroom/ir/send', mqtt_payload_str)
-        
-        print(f"Publish Result: {result.rc}")
-        if result.rc == 0:
-            print("[OK] MQTT PUBLISH SUCCESS!")
-            print("ESP32 should transmit IR signal NOW!")
-        else:
-            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
-        print("="*70 + "\n")
+        mqtt_payload = json.dumps({'button': button_name, 'code': ir_code})
+        result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
@@ -2064,9 +1696,7 @@ def send_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"[ERROR] EXCEPTION in send_ir(): {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] send_ir: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/codes')
@@ -7829,251 +7459,14 @@ HTML_TEMPLATE = '''
             console.log('[OK] Dashboard Ready!');
         };
     </script>
-
-    <!-- Failsafe Navigation - independent script block -->
-    <script>
-        (function() {
-            try {
-                var ovBoot = document.getElementById('sidebar-overlay');
-                if (ovBoot) {
-                    ovBoot.classList.remove('active');
-                    ovBoot.style.display = 'none';
-                    ovBoot.style.pointerEvents = 'none';
-                }
-            } catch (e) {}
-
-            if (typeof window.showPage === 'function') {
-                console.log('[OK] showPage already defined');
-                return;
-            }
-            console.warn('[FAILSAFE] Main script failed - activating failsafe navigation');
-            window.showPage = function(pageId) {
-                var pages = document.querySelectorAll('.page');
-                var navs = document.querySelectorAll('.nav-item');
-                for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
-                for (var i = 0; i < navs.length; i++) navs[i].classList.remove('active');
-                var el = document.getElementById(pageId);
-                if (el) el.classList.add('active');
-                for (var i = 0; i < navs.length; i++) {
-                    var oc = navs[i].getAttribute('onclick');
-                    if (oc && oc.indexOf(pageId) !== -1) navs[i].classList.add('active');
-                }
-                localStorage.setItem('currentPage', pageId);
-            };
-            window.toggleSidebar = function() {
-                var sb = document.getElementById('sidebar');
-                var ov = document.getElementById('sidebar-overlay');
-                if (sb) sb.classList.toggle('open');
-                if (ov) ov.classList.toggle('active');
-            };
-            window.toggleTheme = function() {
-                var cur = document.documentElement.getAttribute('data-theme');
-                var nw = cur === 'dark' ? 'light' : 'dark';
-                document.documentElement.setAttribute('data-theme', nw);
-                localStorage.setItem('theme', nw);
-            };
-            // Start basic data polling
-            function basicUpdate() {
-                try {
-                    var x = new XMLHttpRequest();
-                    x.open('GET', '/api/data');
-                    x.onload = function() {
-                        if (x.status === 200) {
-                            var d = JSON.parse(x.responseText);
-                            var ac = d && d.ac ? d.ac : {};
-                            var energy = d && d.energy ? d.energy : {};
-                            var n = function(v, fallback) {
-                                var num = parseFloat(v);
-                                return isNaN(num) ? (fallback || 0) : num;
-                            };
-                            var setText = function(id, val) {
-                                var el = document.getElementById(id);
-                                if (el) el.textContent = val;
-                            };
-
-                            // Dashboard AC cards
-                            setText('dash-temp', n(ac.temperature, 0).toFixed(1));
-                            setText('dash-hum', n(ac.humidity, 0).toFixed(1));
-                            setText('dash-temp1', n(ac.temp1, 0).toFixed(1));
-                            setText('dash-temp2', n(ac.temp2, 0).toFixed(1));
-                            setText('dash-temp3', n(ac.temp3, 0).toFixed(1));
-                            setText('dash-hum1', n(ac.hum1, 0).toFixed(1));
-                            setText('dash-hum2', n(ac.hum2, 0).toFixed(1));
-                            setText('dash-hum3', n(ac.hum3, 0).toFixed(1));
-                            setText('dash-heat-index', n(ac.heat_index, 0).toFixed(1));
-                            setText('dash-ac-state', ac.ac_state || 'OFF');
-                            setText('dash-ac-temp', Math.round(n(ac.ac_temp, 24)));
-                            setText('dash-ac-fan', Math.round(n(ac.fan_speed, 1)));
-                            setText('dash-ac-mode', ac.ac_fan_mode || 'COOL');
-                            setText('dash-rssi', Math.round(n(ac.rssi, 0)));
-                            setText('dash-ac-room-temp', n(ac.temperature, 0).toFixed(1));
-                            setText('dash-ac-room-hum', n(ac.humidity, 0).toFixed(1));
-
-                            // Energy cards
-                            setText('energy-voltage', n(energy.voltage, 0).toFixed(1));
-                            setText('energy-current', n(energy.current, 0).toFixed(2));
-                            setText('energy-power', n(energy.power, 0).toFixed(1));
-                            setText('energy-kwh', n(energy.energy, 0).toFixed(3));
-                            setText('energy-freq', n(energy.frequency, 0).toFixed(1));
-                            setText('energy-pf', n(energy.pf, 0).toFixed(2));
-
-                            // Legacy fallback ids (if any old card still exists)
-                            var t = document.getElementById('room-temp');
-                            var h = document.getElementById('room-hum');
-                            if (t) t.textContent = n(ac.temperature, 0).toFixed(1) + String.fromCharCode(176) + 'C';
-                            if (h) h.textContent = n(ac.humidity, 0).toFixed(1) + '%';
-                        }
-                    };
-                    x.send();
-                } catch(e) {}
-            }
-
-            function drawLineOnCanvas(canvasId, points, color, label) {
-                try {
-                    var canvas = document.getElementById(canvasId);
-                    if (!canvas) return;
-                    var rect = canvas.getBoundingClientRect();
-                    var w = Math.max(320, Math.floor(rect.width || canvas.width || 640));
-                    var h = Math.max(150, Math.floor(rect.height || canvas.height || 220));
-                    canvas.width = w;
-                    canvas.height = h;
-                    var ctx = canvas.getContext('2d');
-                    if (!ctx) return;
-
-                    ctx.clearRect(0, 0, w, h);
-                    ctx.fillStyle = 'rgba(15, 23, 42, 0.04)';
-                    ctx.fillRect(0, 0, w, h);
-
-                    // Grid
-                    ctx.strokeStyle = 'rgba(148,163,184,0.25)';
-                    ctx.lineWidth = 1;
-                    for (var i = 1; i <= 4; i++) {
-                        var gy = (h / 5) * i;
-                        ctx.beginPath();
-                        ctx.moveTo(0, gy);
-                        ctx.lineTo(w, gy);
-                        ctx.stroke();
-                    }
-
-                    if (!points || points.length === 0) {
-                        ctx.fillStyle = '#94a3b8';
-                        ctx.font = '13px sans-serif';
-                        ctx.fillText('Waiting ' + label + ' data...', 14, Math.floor(h / 2));
-                        return;
-                    }
-
-                    var vals = [];
-                    for (var j = 0; j < points.length; j++) {
-                        var v = parseFloat(points[j].value);
-                        if (!isNaN(v)) vals.push(v);
-                    }
-                    if (vals.length === 0) return;
-
-                    var minV = Math.min.apply(null, vals);
-                    var maxV = Math.max.apply(null, vals);
-                    if (minV === maxV) {
-                        minV = minV - 1;
-                        maxV = maxV + 1;
-                    }
-
-                    var padX = 26;
-                    var padY = 20;
-                    var plotW = w - (padX * 2);
-                    var plotH = h - (padY * 2);
-
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    var dotPoints = [];
-                    for (var k = 0; k < vals.length; k++) {
-                        var x = padX + (k / Math.max(1, vals.length - 1)) * plotW;
-                        var y = padY + (1 - ((vals[k] - minV) / (maxV - minV))) * plotH;
-                        dotPoints.push({x: x, y: y});
-                        if (k === 0) ctx.moveTo(x, y);
-                        else ctx.lineTo(x, y);
-                    }
-                    ctx.stroke();
-
-                    // Draw circular markers for each sample point.
-                    for (var m = 0; m < dotPoints.length; m++) {
-                        ctx.beginPath();
-                        ctx.arc(dotPoints[m].x, dotPoints[m].y, 2.8, 0, Math.PI * 2);
-                        ctx.fillStyle = color;
-                        ctx.fill();
-                        ctx.lineWidth = 1;
-                        ctx.strokeStyle = '#ffffff';
-                        ctx.stroke();
-                    }
-
-                    var latest = vals[vals.length - 1];
-                    var minVal = Math.min.apply(null, vals);
-                    var maxVal = Math.max.apply(null, vals);
-                    var sumVal = 0;
-                    for (var n = 0; n < vals.length; n++) sumVal += vals[n];
-                    var avgVal = sumVal / Math.max(1, vals.length);
-                    ctx.fillStyle = '#334155';
-                    ctx.font = '12px sans-serif';
-                    ctx.fillText(label + ': ' + latest.toFixed(2) + '  min:' + minVal.toFixed(2) + '  max:' + maxVal.toFixed(2) + '  avg:' + avgVal.toFixed(2), 12, 15);
-                } catch (e) {}
-            }
-
-            function fetchEnergySeries(field, period, cb) {
-                try {
-                    var x = new XMLHttpRequest();
-                    x.open('GET', '/api/energy/history?field=' + encodeURIComponent(field) + '&period=' + encodeURIComponent(period));
-                    x.onload = function() {
-                        if (x.status === 200) {
-                            try {
-                                var res = JSON.parse(x.responseText);
-                                cb((res && res.data) ? res.data : []);
-                            } catch (e) {
-                                cb([]);
-                            }
-                        } else {
-                            cb([]);
-                        }
-                    };
-                    x.onerror = function() { cb([]); };
-                    x.send();
-                } catch (e) {
-                    cb([]);
-                }
-            }
-
-            function loadEnergyChartsFailsafe() {
-                fetchEnergySeries('power', '1h', function(points) {
-                    drawLineOnCanvas('energyPowerChart', points, '#ef4444', 'Power (W)');
-                });
-                fetchEnergySeries('voltage', '1h', function(points) {
-                    drawLineOnCanvas('energyVoltageChart', points, '#3b82f6', 'Voltage (V)');
-                });
-                fetchEnergySeries('energy_kwh', '24h', function(points) {
-                    drawLineOnCanvas('energyKwhChart', points, '#10b981', 'Energy (kWh)');
-                });
-            }
-
-            basicUpdate();
-            setInterval(basicUpdate, 2000);
-            loadEnergyChartsFailsafe();
-            setInterval(loadEnergyChartsFailsafe, 8000);
-            // Restore saved page
-            var saved = localStorage.getItem('currentPage');
-            if (saved && document.getElementById(saved)) {
-                window.showPage(saved);
-            }
-        })();
-    </script>
 </body>
 </html>
 '''
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  Smart Room Dashboard - YOLOv8n + Auto AC Control")
-    print("=" * 60)
+    print("Smart Room Dashboard starting...")
     
     # Load saved IR codes from file
-    print("  [INIT] Loading saved IR codes...")
     try:
         import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
@@ -8081,44 +7474,19 @@ if __name__ == '__main__':
             with open(ir_file, 'r') as f:
                 mqtt_data['ir_codes'] = json.load(f)
             print(f"  [OK] Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
-            # Verify each code's completeness
-            for btn_name, code in mqtt_data['ir_codes'].items():
-                if isinstance(code, str) and code.startswith('RAW:'):
-                    raw_count = code[4:].count(',') + 1
-                    status = '[OK]' if raw_count >= 100 else '[WARN]'
-                    print(f"    {status} {btn_name}: RAW {raw_count} values, {len(code)} chars")
-                else:
-                    print(f"    [IR] {btn_name}: {len(code)} chars")
         else:
             print("  [INFO] No saved IR codes found")
     except Exception as e:
         print(f"  [WARN] Error loading IR codes: {e}")
     
-    print("  [INIT] Loading YOLO model (please wait)...")
-    
     # Load YOLO SYNCHRONOUSLY
     yolo_loaded = load_yolo_model()
+    print(f"  [YOLO] {'Ready' if yolo_loaded else 'Failed to load'}")
     
-    if yolo_loaded:
-        print("  [OK] YOLO ready for person detection!")
-    else:
-        print("  [WARN] YOLO failed to load, running without detection")
-    
-    # Start background camera detection thread (runs 24/7 for auto ON/OFF)
-    print("  [CAM] Starting background camera detection thread...")
+    # Start background camera detection thread
     detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
     detection_thread.start()
-    print("  [OK] Detection thread running — auto ON/OFF active")
     
-    print("=" * 60)
-    print("  [URL] Dashboard URL: http://172.20.0.65:5000")
-    print("  [URL] Video Feed:    http://172.20.0.65:5000/video_feed")
-    print("  Features:")
-    print("     - YOLOv8n Person Detection (background thread)")
-    print("     - Auto ON: 3 frames (~2s) person confirmed -> AC ON")
-    print("     - Auto OFF: 10 min no person -> AC OFF")
-    print("     - 4K Camera (fallback 1080p)")
-    print("     - Real-time Person Count & Confidence")
-    print("=" * 60)
+    print("  [URL] Dashboard: http://172.20.0.65:5000")
     
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
