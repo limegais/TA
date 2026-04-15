@@ -1887,23 +1887,22 @@ LOGIN_TEMPLATE = '''
 <body>
     <div class="login-box">
         <div class="login-logo">
-            <i class="fas fa-brain"></i>
             <h1>Smart Room IoT</h1>
             <p>Login to access dashboard</p>
         </div>
         {% if error %}
-        <div class="error-msg"><i class="fas fa-exclamation-circle"></i> {{ error }}</div>
+        <div class="error-msg">{{ error }}</div>
         {% endif %}
         <form method="POST">
             <div class="form-group">
-                <label><i class="fas fa-user"></i> Username</label>
+                <label>Username</label>
                 <input type="text" name="username" required autocomplete="username" placeholder="Enter username">
             </div>
             <div class="form-group">
-                <label><i class="fas fa-lock"></i> Password</label>
+                <label>Password</label>
                 <input type="password" name="password" required autocomplete="current-password" placeholder="Enter password">
             </div>
-            <button type="submit" class="login-btn"><i class="fas fa-sign-in-alt"></i> Login</button>
+            <button type="submit" class="login-btn">Login</button>
         </form>
     </div>
 </body>
@@ -3033,51 +3032,39 @@ HTML_TEMPLATE = '''
     <!-- Sidebar -->
     <div class="sidebar" id="sidebar">
         <div class="logo">
-            <i class="fas fa-brain"></i>
             Smart Room
         </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
-            <i class="fas fa-snowflake"></i>
             <span>AC Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('dashboard-lamp')">
-            <i class="fas fa-lightbulb"></i>
             <span>Lamp Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('ac-analytics')">
-            <i class="fas fa-chart-line"></i>
             <span>AC Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('lamp-analytics')">
-            <i class="fas fa-chart-bar"></i>
             <span>Lamp Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('camera')">
-            <i class="fas fa-video"></i>
             <span>Camera</span>
         </div>
         <div class="nav-item" onclick="showPage('energy')">
-            <i class="fas fa-bolt"></i>
             <span>Energy Usage</span>
         </div>
         <div class="nav-item" onclick="showPage('control-ac')">
-            <i class="fas fa-sliders-h"></i>
             <span>AC Control</span>
         </div>
         <div class="nav-item" onclick="showPage('control-lamp')">
-            <i class="fas fa-adjust"></i>
             <span>Lamp Control</span>
         </div>
         <div class="nav-item" onclick="showPage('ml-optimization')">
-            <i class="fas fa-brain"></i>
             <span>ML Optimization</span>
         </div>
         <div class="nav-item" onclick="showPage('logs')">
-            <i class="fas fa-file-alt"></i>
             <span>System Logs</span>
         </div>
         <div class="nav-item" onclick="showPage('occupancy-feedback')">
-            <i class="fas fa-clipboard-check"></i>
             <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
@@ -3086,7 +3073,6 @@ HTML_TEMPLATE = '''
             <span id="theme-label">Dark Mode</span>
         </button>
         <a href="/logout" class="theme-toggle" style="text-decoration: none; color: var(--danger); border-color: var(--danger);">
-            <i class="fas fa-sign-out-alt"></i>
             <span>Logout</span>
         </a>
     </div>
@@ -3096,8 +3082,8 @@ HTML_TEMPLATE = '''
         <!-- AC Dashboard Page -->
         <div id="dashboard-ac" class="page active">
             <div class="header">
-                <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;"><i class="fas fa-stethoscope"></i> Diagnostik</button></p>
+                <h1>AC Dashboard</h1>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostik</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -3120,23 +3106,23 @@ HTML_TEMPLATE = '''
             <!-- DIAGNOSTIC PANEL -->
             <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #f59e0b; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
-                    <i class="fas fa-stethoscope" style="color: #f59e0b; font-size: 18px;"></i>
+                    <div style="font-size: 18px; color: #f59e0b; font-weight: 800;">D</div>
                     <strong style="color: #f59e0b;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
                 <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
-                        <i class="fas fa-vial"></i> Test Frontend (Inject Data Dummy)
+                        Test Frontend (Inject Data Dummy)
                     </button>
                     <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-satellite-dish"></i> Test MQTT Broker (Self-Test)
+                        Test MQTT Broker (Self-Test)
                     </button>
                     <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #8b5cf6; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-sync"></i> Reconnect MQTT
+                        Reconnect MQTT
                     </button>
                     <button onclick="checkMqttStatus(true)" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #6b7280; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-info-circle"></i> MQTT Status Detail
+                        MQTT Status Detail
                     </button>
                 </div>
             </div>
@@ -3146,12 +3132,11 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Room Temperature</span>
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
-                            <i class="fas fa-temperature-high"></i>
+                            T
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-temp">0</span>°C</div>
                     <div class="stat-change up">
-                        <i class="fas fa-robot"></i>
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
@@ -3165,12 +3150,11 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Humidity</span>
                         <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">
-                            <i class="fas fa-tint"></i>
+                            H
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-hum">0</span>%</div>
                     <div class="stat-change">
-                        <i class="fas fa-robot"></i>
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
@@ -3184,7 +3168,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Heat Index</span>
                         <div class="stat-icon" style="background: rgba(249, 115, 22, 0.2); color: #f97316;">
-                            <i class="fas fa-sun"></i>
+                            HI
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
@@ -3197,7 +3181,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">ESP32 Signal</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-wifi"></i>
+                            dB
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-rssi">0</span> dBm</div>
@@ -3211,8 +3195,8 @@ HTML_TEMPLATE = '''
                     <!-- Header Bar -->
                     <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-snowflake" style="font-size: 18px; color: #6366f1;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 14px;">
+                                AC
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">AC Status</div>
@@ -3229,7 +3213,7 @@ HTML_TEMPLATE = '''
                         <!-- Set Temperature -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-thermometer-half"></i> Set Temperature
+                                Set Temperature
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
@@ -3237,7 +3221,7 @@ HTML_TEMPLATE = '''
                         <!-- Fan Speed -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(139, 92, 246, 0.06); border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-fan"></i> Fan Speed
+                                Fan Speed
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #8b5cf6;" id="dash-ac-fan">1</div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="dash-ac-fan-label">Low</div>
@@ -3245,31 +3229,31 @@ HTML_TEMPLATE = '''
                         <!-- AC Mode (COOL/HEAT/DRY/FAN/AUTO) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(14, 165, 233, 0.06); border-radius: 12px; border: 1px solid rgba(14, 165, 233, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-cog"></i> Mode AC
+                                Mode AC
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon"><i class="fas fa-snowflake"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon">❄</div>
                             <div style="font-size: 14px; font-weight: 700; color: #0ea5e9; margin-top: 2px;" id="dash-ac-mode">COOL</div>
                         </div>
                         <!-- Operating Mode (ADAPTIVE/MANUAL) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-sliders-h"></i> Kontrol
+                                Kontrol
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon"><i class="fas fa-robot"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon">A</div>
                             <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
                         </div>
                     </div>
                     <!-- Footer: Room Environment + extra info -->
                     <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
+                            <span>Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
-                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Avg: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
+                            <span>Hum: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
                         <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
-                            <i class="fas fa-robot"></i> AI Controlled
+                            AI Controlled
                         </div>
                     </div>
                 </div>
@@ -3278,8 +3262,8 @@ HTML_TEMPLATE = '''
                 <div class="stat-card" id="energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-bolt" style="font-size: 18px; color: #f59e0b;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 14px;">
+                                E
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Monitor</div>
@@ -3293,33 +3277,33 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px;">
                         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-plug" style="color: #f59e0b;"></i> Voltage</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Voltage</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-voltage">0</span><span style="font-size: 12px; color: var(--text-secondary);"> V</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-wave-square" style="color: #ef4444;"></i> Current</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Current</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-current">0</span><span style="font-size: 12px; color: var(--text-secondary);"> A</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-fire" style="color: #f97316;"></i> Power</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power</div>
                                 <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="energy-power">0</span><span style="font-size: 12px; color: var(--text-secondary);"> W</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-battery-half" style="color: #10b981;"></i> Energy</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Energy</div>
                                 <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="energy-kwh">0</span><span style="font-size: 12px; color: var(--text-secondary);"> kWh</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-signal" style="color: #6366f1;"></i> Frequency</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Frequency</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-freq">0</span><span style="font-size: 12px; color: var(--text-secondary);"> Hz</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-tachometer-alt" style="color: #8b5cf6;"></i> Power Factor</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power Factor</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-pf">0</span></div>
                             </div>
                         </div>
                         <!-- Estimasi biaya harian -->
                         <div style="margin-top: 12px; padding: 10px 14px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(217, 119, 6, 0.05)); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
-                            <div style="font-size: 12px; color: var(--text-secondary);"><i class="fas fa-coins" style="color: #f59e0b;"></i> Cost Estimate (Rp 1.444,70/kWh)</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">Cost Estimate (Rp 1.444,70/kWh)</div>
                             <div style="font-size: 14px; font-weight: 700; color: #f59e0b;">Rp <span id="energy-cost">0</span></div>
                         </div>
                     </div>
@@ -3329,8 +3313,8 @@ HTML_TEMPLATE = '''
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-user-friends" style="font-size: 18px; color: #ef4444;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #ef4444; font-size: 14px;">
+                                PD
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
@@ -3344,23 +3328,23 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
                         <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-users"></i> Person Count
+                                Person Count
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-crosshairs"></i> Confidence
+                                Confidence
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-bolt"></i> Auto Control
+                                Auto Control
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status">ON</div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
                         </div>
                     </div>
@@ -3368,14 +3352,14 @@ HTML_TEMPLATE = '''
                     <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                         <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
                             <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
-                                <i class="fas fa-clock"></i> Last Person Detection
+                                Last Person Detection
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
                             <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
                         </div>
                         <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
-                                <i class="fas fa-power-off"></i> Auto-OFF AC
+                                Auto-OFF AC
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
                             <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
@@ -3386,8 +3370,8 @@ HTML_TEMPLATE = '''
                 <!-- GA + PSO Optimization - Full Width -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center;">
-                            <i class="fas fa-brain" style="font-size: 18px; color: #10b981;"></i>
+                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #10b981; font-size: 14px;">
+                                ML
                         </div>
                         <div>
                             <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
@@ -3398,7 +3382,7 @@ HTML_TEMPLATE = '''
                         <!-- GA Section -->
                         <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-dna"></i> GA -> AC Control
+                                GA -> AC Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3420,7 +3404,7 @@ HTML_TEMPLATE = '''
                         <!-- PSO Section -->
                         <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-lightbulb"></i> PSO -> Lamp Control
+                                PSO -> Lamp Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3447,7 +3431,7 @@ HTML_TEMPLATE = '''
         <!-- Lamp Dashboard Page -->
         <div id="dashboard-lamp" class="page">
             <div class="header">
-                <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
+                <h1>Lamp Dashboard</h1>
                 <p>Lighting monitoring & status — 3 Lamps</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
@@ -3464,7 +3448,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-sun"></i>
+                            L1
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
@@ -3478,7 +3462,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-sun"></i>
+                            L2
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
@@ -3492,7 +3476,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 3 — Lux</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-sun"></i>
+                            L3
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
@@ -3506,7 +3490,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Average (3 Lamps)</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-chart-bar"></i>
+                            AVG
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
@@ -3520,7 +3504,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Motion Detection</span>
                         <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
-                            <i class="fas fa-walking"></i>
+                            PIR
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-motion">NO MOTION</span></div>
@@ -3534,13 +3518,13 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp Control</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-chart-line"></i>
+                            PSO
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="pso-fitness">0.00</span></div>
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;"><i class="fas fa-lightbulb"></i> Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
+                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
             </div>
@@ -3630,7 +3614,7 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
+                <h1>Live Camera Feed - YOLOv8 Detection</h1>
                 <p>Real-time person detection using YOLOv8n</p>
             </div>
 
@@ -3640,7 +3624,7 @@ HTML_TEMPLATE = '''
                         <div style="display: flex; gap: 10px; align-items: center;">
                             <span class="camera-rec-badge"><i class="fas fa-circle"></i> LIVE</span>
                             <span class="person-badge not-detected" id="overlay-person-badge">
-                                <i class="fas fa-user-slash"></i> No Person
+                                No Person
                             </span>
                         </div>
                         <span class="camera-time-badge" id="camera-time">00:00:00</span>
@@ -3648,53 +3632,52 @@ HTML_TEMPLATE = '''
                     <img id="camera-img" src="/video_feed" alt="Camera Feed"
                          onerror="this.style.display='none'; document.getElementById('camera-error').style.display='flex';">
                     <div id="camera-error" class="camera-error" style="display:none; flex-direction:column; align-items:center;">
-                        <i class="fas fa-video-slash"></i>
                         <h3>Camera Not Available</h3>
                         <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
                             Make sure USB camera is properly connected
                         </p>
                         <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
-                            <i class="fas fa-sync"></i> Retry Connection
+                            Retry Connection
                         </button>
                     </div>
                 </div>
 
                 <div class="camera-info-grid">
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-circle" style="color: var(--success);"></i> Status</div>
+                        <div class="camera-info-label">Status</div>
                         <div class="camera-info-value" id="cam-status">Connecting...</div>
                     </div>
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-expand"></i> Resolution</div>
+                        <div class="camera-info-label">Resolution</div>
                         <div class="camera-info-value" id="cam-resolution">Loading...</div>
                     </div>
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-tachometer-alt"></i> Frame Rate</div>
+                        <div class="camera-info-label">Frame Rate</div>
                         <div class="camera-info-value" id="cam-fps">Loading...</div>
                     </div>
                     <div class="camera-info-card" id="person-detected-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-walking"></i> Person Detected</div>
+                        <div class="camera-info-label">Person Detected</div>
                         <div class="camera-info-value" id="cam-person" style="color: var(--danger);">No</div>
                     </div>
                     <div class="camera-info-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-users"></i> Person Count</div>
+                        <div class="camera-info-label">Person Count</div>
                         <div class="camera-info-value" id="cam-count-display">0</div>
                     </div>
                     <div class="camera-info-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-percentage"></i> Confidence</div>
+                        <div class="camera-info-label">Confidence</div>
                         <div class="camera-info-value" id="cam-confidence-display">0%</div>
                     </div>
                 </div>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
                     <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
-                        <i class="fas fa-video" id="camera-toggle-icon"></i> <span id="camera-toggle-text">Camera ON</span>
+                        <span id="camera-toggle-text">Camera ON</span>
                     </button>
                     <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
-                        <i class="fas fa-volume-up" id="sound-toggle-icon"></i> <span id="sound-toggle-text">Sound ON</span>
+                        <span id="sound-toggle-text">Sound ON</span>
                     </button>
                     <button class="btn btn-success" onclick="retryCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600;">
-                        <i class="fas fa-sync"></i> Refresh Feed
+                        Refresh Feed
                     </button>
                 </div>
             </div>
@@ -3703,7 +3686,7 @@ HTML_TEMPLATE = '''
         <!-- Energy Usage Page -->
         <div id="energy" class="page">
             <div class="header">
-                <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
+                <h1>Energy Usage</h1>
                 <p>Real-time & historical energy monitoring from PZEM-016</p>
             </div>
 
@@ -3737,7 +3720,7 @@ HTML_TEMPLATE = '''
             <!-- Historical Power Chart -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
+                    <div class="chart-title">Power Consumption (W)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
@@ -3758,7 +3741,7 @@ HTML_TEMPLATE = '''
             <!-- Historical Voltage Chart -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
+                    <div class="chart-title">Voltage (V)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
@@ -3779,7 +3762,7 @@ HTML_TEMPLATE = '''
             <!-- Historical Energy kWh Chart -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
+                    <div class="chart-title">Cumulative Energy (kWh)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
@@ -3798,7 +3781,7 @@ HTML_TEMPLATE = '''
             <!-- Estimated daily energy (real-time) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
+                    <div class="chart-title">Real-time Energy Trend (kWh/day estimate)</div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
@@ -3807,7 +3790,7 @@ HTML_TEMPLATE = '''
             <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
                 <div style="text-align: center; margin-bottom: 20px;">
                     <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
-                        <i class="fas fa-exchange-alt"></i> Before vs After Adaptive AC
+                        Before vs After Adaptive AC
                     </h2>
                     <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
                 </div>
@@ -3817,27 +3800,27 @@ HTML_TEMPLATE = '''
                     <!-- BEFORE Panel -->
                     <div id="panel-before" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
                         <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">
-                            <i class="fas fa-clock"></i> BEFORE Adaptive AC
+                            BEFORE Adaptive AC
                         </div>
                         <div id="status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
                             &#9675; Not started
                         </div>
                         <button id="btn-record-before" onclick="toggleRecording('before')"
                             style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
-                            <i class="fas fa-circle"></i> START RECORDING
+                            START RECORDING
                         </button>
                     </div>
                     <!-- AFTER Panel -->
                     <div id="panel-after" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
                         <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">
-                            <i class="fas fa-robot"></i> AFTER Adaptive AC
+                            AFTER Adaptive AC
                         </div>
                         <div id="status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
                             &#9675; Not started
                         </div>
                         <button id="btn-record-after" onclick="toggleRecording('after')"
                             style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
-                            <i class="fas fa-circle"></i> START RECORDING
+                            START RECORDING
                         </button>
                     </div>
                 </div>
@@ -3862,9 +3845,9 @@ HTML_TEMPLATE = '''
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
                     <div class="chart-container" style="border: none; padding: 0;">
                         <div class="chart-header">
-                            <div class="chart-title" style="color: #f59e0b;"><i class="fas fa-chart-area"></i> BEFORE — Power (W)</div>
+                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Power (W)</div>
                             <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;"><i class="fas fa-sync-alt"></i></button>
+                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
                                 <button class="chart-option-btn" onclick="exportChartData('energyCompareBefore', 'Power Before (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             </div>
                         </div>
@@ -3872,9 +3855,9 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="chart-container" style="border: none; padding: 0;">
                         <div class="chart-header">
-                            <div class="chart-title" style="color: #10b981;"><i class="fas fa-chart-area"></i> AFTER — Power (W)</div>
+                            <div class="chart-title" style="color: #10b981;">AFTER — Power (W)</div>
                             <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;"><i class="fas fa-sync-alt"></i></button>
+                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
                                 <button class="chart-option-btn" onclick="exportChartData('energyCompareAfter', 'Power After (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             </div>
                         </div>
@@ -3886,9 +3869,9 @@ HTML_TEMPLATE = '''
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px;">
                     <div class="chart-container" style="border: none; padding: 0;">
                         <div class="chart-header">
-                            <div class="chart-title" style="color: #f59e0b;"><i class="fas fa-battery-half"></i> BEFORE — Energy (kWh)</div>
+                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Energy (kWh)</div>
                             <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;"><i class="fas fa-sync-alt"></i></button>
+                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
                                 <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhBefore', 'Energy Before (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             </div>
                         </div>
@@ -3896,9 +3879,9 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="chart-container" style="border: none; padding: 0;">
                         <div class="chart-header">
-                            <div class="chart-title" style="color: #10b981;"><i class="fas fa-battery-half"></i> AFTER — Energy (kWh)</div>
+                            <div class="chart-title" style="color: #10b981;">AFTER — Energy (kWh)</div>
                             <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;"><i class="fas fa-sync-alt"></i></button>
+                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
                                 <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhAfter', 'Energy After (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                             </div>
                         </div>
@@ -3999,10 +3982,10 @@ HTML_TEMPLATE = '''
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
                     <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
-                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
+                        AC ON
                     </button>
                     <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
-                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
+                        AC OFF
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
                         TEMP +
@@ -4086,7 +4069,7 @@ HTML_TEMPLATE = '''
         <!-- Lamp Control Page -->
         <div id="control-lamp" class="page">
             <div class="header">
-                <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
+                <h1>Lamp Control Panel</h1>
                 <p>Manual lamp control and brightness settings — 3 Lamps</p>
             </div>
 
@@ -4097,26 +4080,26 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #f59e0b;"></i> Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
+                    <label class="control-label">Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #10b981;"></i> Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
+                    <label class="control-label">Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #6366f1;"></i> Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
+                    <label class="control-label">Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
                 </div>
 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-primary" onclick="applyLampSettings()">
-                        <i class="fas fa-check"></i> Apply All
+                        Apply All
                     </button>
                     <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
-                        <i class="fas fa-sync"></i> Sync All to Lamp 1
+                        Sync All to Lamp 1
                     </button>
                 </div>
             </div>
@@ -4125,7 +4108,7 @@ HTML_TEMPLATE = '''
         <!-- ML Optimization Page -->
         <div id="ml-optimization" class="page">
             <div class="header">
-                <h1><i class="fas fa-brain"></i> Machine Learning Optimization</h1>
+                <h1>Machine Learning Optimization</h1>
                 <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
             </div>
 
@@ -4134,7 +4117,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">GA -> AC</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><i class="fas fa-dna"></i></div>
+                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">GA</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #10b981;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
@@ -4143,7 +4126,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimized Temp</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;"><i class="fas fa-thermometer-half"></i></div>
+                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
                     <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span></span></div>
@@ -4152,7 +4135,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><i class="fas fa-chart-line"></i></div>
+                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
@@ -4161,7 +4144,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimized Brightness</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-lightbulb"></i></div>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-brightness" style="color: #6366f1;">--</span>%</div>
                     <div class="stat-change"><span>Lamp Level</span></div>
@@ -4170,7 +4153,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Current Conditions</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-database"></i></div>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">DB</div>
                     </div>
                     <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
                         Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
@@ -4182,7 +4165,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimization Runs</span>
-                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;"><i class="fas fa-sync-alt"></i></div>
+                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">#</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #a855f7;">0</span></div>
                     <div class="stat-change"><span>Total Cycles</span></div>
@@ -4192,11 +4175,11 @@ HTML_TEMPLATE = '''
             <!-- GA Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-dna" style="color: #10b981;"></i> GA Fitness Convergence (AC Optimization)</div>
+                    <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run GA
+                            Run GA
                         </button>
                     </div>
                 </div>
@@ -4206,11 +4189,11 @@ HTML_TEMPLATE = '''
             <!-- PSO Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-line" style="color: #f59e0b;"></i> PSO Fitness Convergence (Lamp Optimization)</div>
+                    <div class="chart-title">PSO Fitness Convergence (Lamp Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run PSO
+                            Run PSO
                         </button>
                     </div>
                 </div>
@@ -4220,14 +4203,14 @@ HTML_TEMPLATE = '''
             <!-- GA vs PSO Comparison Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-balance-scale" style="color: #6366f1;"></i> GA vs PSO — Fitness Comparison</div>
+                    <div class="chart-title">GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run Both
+                            Run Both
                         </button>
                         <button class="chart-option-btn" onclick="clearMLCharts()">
-                            <i class="fas fa-eraser"></i> Clear
+                            Clear
                         </button>
                     </div>
                 </div>
@@ -4237,13 +4220,13 @@ HTML_TEMPLATE = '''
             <!-- Optimization History Table -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-history" style="color: #a855f7;"></i> Optimization History</div>
+                    <div class="chart-title">Optimization History</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportMLHistory()">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
                         <button class="chart-option-btn" onclick="refreshMLHistory()">
-                            <i class="fas fa-sync"></i> Refresh
+                            Refresh
                         </button>
                     </div>
                 </div>
@@ -4272,7 +4255,7 @@ HTML_TEMPLATE = '''
             <div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
                 <div class="chart-container" style="margin-bottom: 0;">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-cog" style="color: #10b981;"></i> GA Parameters</div>
+                        <div class="chart-title">GA Parameters</div>
                     </div>
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
@@ -4296,7 +4279,7 @@ HTML_TEMPLATE = '''
 
                 <div class="chart-container" style="margin-bottom: 0;">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-cog" style="color: #f59e0b;"></i> PSO Parameters</div>
+                        <div class="chart-title">PSO Parameters</div>
                     </div>
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
@@ -4337,7 +4320,7 @@ HTML_TEMPLATE = '''
         <!-- Occupancy Trend & Feedback Page -->
         <div id="occupancy-feedback" class="page">
             <div class="header">
-                <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
+                <h1>Occupancy Trend & Feedback</h1>
                 <p>Monitor occupancy trends and submit room comfort ratings (1-5)</p>
             </div>
 
@@ -4366,7 +4349,7 @@ HTML_TEMPLATE = '''
             <div class="feedback-grid">
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-star"></i> Comfort Feedback</div>
+                        <div class="chart-title">Comfort Feedback</div>
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         Scale: 1 = Not Satisfied, 5 = Very Satisfied
@@ -4387,20 +4370,20 @@ HTML_TEMPLATE = '''
 
                     <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
                         <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
-                            <i class="fas fa-save"></i> Save Form Link
+                            Save Form Link
                         </button>
                         <button class="btn btn-success" onclick="openGoogleForm()">
-                            <i class="fas fa-external-link-alt"></i> Open Google Form
+                            Open Google Form
                         </button>
                         <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
-                            <i class="fas fa-paper-plane"></i> Submit Feedback
+                            Submit Feedback
                         </button>
                     </div>
                 </div>
 
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-history"></i> Recent Feedback</div>
+                        <div class="chart-title">Recent Feedback</div>
                         <div class="chart-options">
                             <button class="chart-option-btn" onclick="exportFeedback()">
                                 <i class="fas fa-download"></i> Export CSV
@@ -4427,17 +4410,17 @@ HTML_TEMPLATE = '''
     <!-- Detection Alert -->
     <div id="detection-alert" class="detection-alert">
         <button class="detection-close" onclick="closeDetectionAlert()">
-            <i class="fas fa-times"></i>
+            &times;
         </button>
         <div class="detection-alert-header">
-            <i class="fas fa-exclamation-triangle detection-alert-icon"></i>
+            <span style="font-size: 24px;">!</span>
             <span>Person Detected!</span>
         </div>
         <div class="detection-alert-body">
             <div><strong id="alert-person-count">0</strong> person(s) detected</div>
             <div>Confidence: <strong id="alert-person-confidence">0%</strong></div>
             <div style="margin-top: 8px; font-size: 12px; opacity: 0.8;">
-                <i class="fas fa-clock"></i> <span id="alert-time">--:--:--</span>
+                <span id="alert-time">--:--:--</span>
             </div>
         </div>
     </div>
@@ -4675,8 +4658,8 @@ HTML_TEMPLATE = '''
                 return {
                     ...makeOpts(false),
                     scales: {
-                        x: { grid: { display: false }, ticks: { color: 'var(--text-secondary)', font: { size: 10 }, maxRotation: 45, maxTicksLimit: 12 } },
-                        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: 'var(--text-secondary)', font: { size: 10 } }, title: { display: true, text: unit, color: 'var(--text-secondary)', font: { size: 11 } } }
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 }, maxRotation: 45, maxTicksLimit: 12 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#94a3b8', font: { size: 10 } }, title: { display: true, text: unit, color: '#94a3b8', font: { size: 11 } } }
                     }
                 };
             };
@@ -4800,7 +4783,7 @@ HTML_TEMPLATE = '''
             }
 
             fetch(endpoint)
-                .then(r => r.json())
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
                 .then(data => {
                     if (data && data.length > 0) {
                         charts[chartName].data.labels = data.map(d => d.time);
@@ -4808,7 +4791,7 @@ HTML_TEMPLATE = '''
                         charts[chartName].update();
                     }
                 })
-                .catch(e => console.error('Chart error:', e));
+                .catch(e => console.warn('Chart data unavailable (' + chartName + '):', e.message));
         }
 
         function changeChartRange(chartName, hours) {
@@ -5034,7 +5017,7 @@ HTML_TEMPLATE = '''
                     var days = Math.floor(elapsed / 24);
                     var hours = elapsed % 24;
                     statusEl.innerHTML = '<i class="fas fa-circle" style="color: #ef4444; font-size: 8px; animation: blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleDateString() + ' ' + start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '<br>Duration: ' + days + 'd ' + hours + 'h';
-                    btnEl.innerHTML = '<i class="fas fa-stop"></i> STOP RECORDING';
+                    btnEl.innerHTML = 'STOP RECORDING';
                     btnEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
                 } else if (r.start && r.end) {
                     var start = new Date(r.start + 'Z');
@@ -5042,12 +5025,12 @@ HTML_TEMPLATE = '''
                     var dur = Math.round((end - start) / 3600000);
                     var days = Math.floor(dur / 24);
                     var hours = dur % 24;
-                    statusEl.innerHTML = '<i class="fas fa-check-circle" style="color: ' + baseColor + ';"></i> <strong>Completed</strong><br>' + start.toLocaleDateString() + ' &rarr; ' + end.toLocaleDateString() + '<br>Duration: ' + days + 'd ' + hours + 'h';
-                    btnEl.innerHTML = '<i class="fas fa-redo"></i> RESET & RE-RECORD';
+                    statusEl.innerHTML = '<strong>Completed</strong><br>' + start.toLocaleDateString() + ' &rarr; ' + end.toLocaleDateString() + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    btnEl.innerHTML = 'RESET & RE-RECORD';
                     btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
                 } else {
                     statusEl.innerHTML = '&#9675; Not started';
-                    btnEl.innerHTML = '<i class="fas fa-circle"></i> START RECORDING';
+                    btnEl.innerHTML = 'START RECORDING';
                     btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
                 }
             });
@@ -5589,16 +5572,13 @@ HTML_TEMPLATE = '''
 
         function updateCameraToggleUI() {
             const btn = document.getElementById('camera-toggle-btn');
-            const icon = document.getElementById('camera-toggle-icon');
             const text = document.getElementById('camera-toggle-text');
             if (!btn) return;
             if (cameraEnabled) {
                 btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                icon.className = 'fas fa-video';
                 text.textContent = 'Camera ON';
             } else {
                 btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
-                icon.className = 'fas fa-video-slash';
                 text.textContent = 'Camera OFF';
             }
         }
@@ -6287,16 +6267,13 @@ HTML_TEMPLATE = '''
         // Initialize sound toggle button visual on load
         function updateSoundToggleUI() {
             const btn = document.getElementById('sound-toggle-btn');
-            const icon = document.getElementById('sound-toggle-icon');
             const text = document.getElementById('sound-toggle-text');
             if (!btn) return;
             if (detectionSoundEnabled) {
                 btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                if (icon) icon.className = 'fas fa-volume-up';
                 if (text) text.textContent = 'Sound ON';
             } else {
                 btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
-                if (icon) icon.className = 'fas fa-volume-mute';
                 if (text) text.textContent = 'Sound OFF';
             }
         }
@@ -6398,7 +6375,7 @@ HTML_TEMPLATE = '''
             const toastMessage = document.getElementById('toast-message');
             const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
             
-            toastMessage.innerHTML = '<i class="fas fa-' + icon + '-circle"></i> ' + message;
+            toastMessage.innerHTML = message;
             toast.classList.add('show');
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
@@ -6593,15 +6570,15 @@ HTML_TEMPLATE = '''
                     const modeIconEl = document.getElementById('dash-ac-mode-icon');
                     const modeTextEl = document.getElementById('dash-ac-mode');
                     const modeIcons = {
-                        'COOL': {icon: 'fa-snowflake', color: '#0ea5e9'},
-                        'HEAT': {icon: 'fa-fire', color: '#f97316'},
-                        'DRY':  {icon: 'fa-tint-slash', color: '#a855f7'},
-                        'FAN':  {icon: 'fa-fan', color: '#8b5cf6'},
-                        'AUTO': {icon: 'fa-magic', color: '#6366f1'}
+                        'COOL': {text: 'COOL', color: '#0ea5e9'},
+                        'HEAT': {text: 'HEAT', color: '#f97316'},
+                        'DRY':  {text: 'DRY', color: '#a855f7'},
+                        'FAN':  {text: 'FAN', color: '#8b5cf6'},
+                        'AUTO': {text: 'AUTO', color: '#6366f1'}
                     };
                     const modeInfo = modeIcons[acMode] || modeIcons['COOL'];
                     if (modeIconEl) {
-                        modeIconEl.innerHTML = '<i class="fas ' + modeInfo.icon + '"></i>';
+                        modeIconEl.textContent = modeInfo.text;
                         modeIconEl.style.color = modeInfo.color;
                     }
                     if (modeTextEl) modeTextEl.style.color = modeInfo.color;
@@ -6612,12 +6589,12 @@ HTML_TEMPLATE = '''
                     const ctrlText = document.getElementById('dash-ac-ctrl-mode');
                     if (ctrlIcon && ctrlText) {
                         if (ctrlMode === 'ADAPTIVE') {
-                            ctrlIcon.innerHTML = '<i class="fas fa-robot"></i>';
+                            ctrlIcon.textContent = 'A';
                             ctrlIcon.style.color = '#10b981';
                             ctrlText.textContent = 'ADAPTIVE';
                             ctrlText.style.color = '#10b981';
                         } else {
-                            ctrlIcon.innerHTML = '<i class="fas fa-hand-paper"></i>';
+                            ctrlIcon.textContent = 'M';
                             ctrlIcon.style.color = '#f59e0b';
                             ctrlText.textContent = 'MANUAL';
                             ctrlText.style.color = '#f59e0b';
@@ -6628,12 +6605,12 @@ HTML_TEMPLATE = '''
                     const srcBadge = document.getElementById('dash-ac-source');
                     if (srcBadge) {
                         if (ctrlMode === 'ADAPTIVE') {
-                            srcBadge.innerHTML = '<i class="fas fa-robot"></i> AI Controlled';
+                            srcBadge.textContent = 'AI Controlled';
                             srcBadge.style.background = 'rgba(16, 185, 129, 0.12)';
                             srcBadge.style.color = '#10b981';
                             srcBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
                         } else {
-                            srcBadge.innerHTML = '<i class="fas fa-hand-paper"></i> Manual Control';
+                            srcBadge.textContent = 'Manual Control';
                             srcBadge.style.background = 'rgba(245, 158, 11, 0.12)';
                             srcBadge.style.color = '#f59e0b';
                             srcBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
@@ -6989,9 +6966,8 @@ HTML_TEMPLATE = '''
         function showAlertBanner(alert) {
             const banner = document.createElement('div');
             banner.className = 'alert-banner ' + alert.level;
-            banner.innerHTML = '<i class="fas fa-' + (alert.level === 'danger' ? 'exclamation-triangle' : 'exclamation-circle') + '"></i>' +
-                '<span>' + alert.message + '</span>' +
-                '<button class="alert-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
+            banner.innerHTML = '<span>' + alert.message + '</span>' +
+                '<button class="alert-close" onclick="this.parentElement.remove()">&times;</button>';
             document.body.appendChild(banner);
             setTimeout(() => { if (banner.parentElement) banner.remove(); }, 8000);
         }
@@ -7261,10 +7237,10 @@ HTML_TEMPLATE = '''
                 if (overlayBadge) {
                     if (personDetected && personCount > 0) {
                         overlayBadge.className = 'person-badge detected';
-                        overlayBadge.innerHTML = '<i class="fas fa-user-check"></i> ' + personCount + ' Person(s) - ' + confidence + '%';
+                        overlayBadge.innerHTML = personCount + ' Person(s) - ' + confidence + '%';
                     } else {
                         overlayBadge.className = 'person-badge not-detected';
-                        overlayBadge.innerHTML = '<i class="fas fa-user-slash"></i> No Person';
+                        overlayBadge.innerHTML = 'No Person';
                     }
                 }
                 
