@@ -3912,60 +3912,60 @@ HTML_TEMPLATE = '''
         <!-- AC Control Page -->
         <div id="control-ac" class="page">
             <div class="header">
-                <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
-                <p>AC Control using IRMitsubishiHeavy library</p>
+                <h1>AC Control Panel</h1>
+                <p>Mitsubishi Heavy — IRMitsubishiHeavy library</p>
             </div>
 
             <!-- ========== MODE SELECTOR (PROMINENT) ========== -->
             <div id="ac-mode-selector" style="margin-bottom: 20px; padding: 20px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
                 <div style="text-align: center; margin-bottom: 14px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">
-                    <i class="fas fa-cog"></i> Control Mode
+                    Control Mode
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                     <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
-                        <i class="fas fa-robot" style="font-size: 28px;"></i>
+                        <span style="font-size: 24px; font-weight: 800;">A</span>
                         <span>ADAPTIVE</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically</span>
                     </button>
                     <button id="btn-mode-manual" onclick="setACMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
-                        <i class="fas fa-hand-paper" style="font-size: 28px;"></i>
+                        <span style="font-size: 24px; font-weight: 800;">M</span>
                         <span>MANUAL</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control AC manually</span>
                     </button>
                 </div>
                 <!-- Current mode indicator -->
                 <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
-                    <i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)
+                    Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization
                 </div>
             </div>
 
             <!-- ========== ADAPTIVE INFO BANNER (shown when ADAPTIVE) ========== -->
             <div id="adaptive-info-banner" style="margin-bottom: 20px; padding: 20px; border-radius: 14px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.12)); border: 2px solid rgba(16, 185, 129, 0.3);">
                 <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
-                    <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center;">
-                        <i class="fas fa-brain" style="color: white; font-size: 22px;"></i>
+                    <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; font-weight: 800;">
+                        GA
                     </div>
                     <div>
                         <div style="font-size: 16px; font-weight: 700; color: #10b981;">Adaptive Mode Active</div>
-                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed automatically</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Temp</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Temp</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-temp">--</div>
                     </div>
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fan</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Fan</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fan">--</div>
                     </div>
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fitness</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Fitness</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fitness">--</div>
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
-                    <i class="fas fa-lock"></i> Manual control is disabled in Adaptive mode. Switch to Manual to control AC manually.
+                    Manual control disabled in Adaptive mode. Switch to Manual to control AC.
                 </div>
             </div>
 
@@ -3973,7 +3973,7 @@ HTML_TEMPLATE = '''
                 <!-- OVERLAY: blocks manual controls when ADAPTIVE -->
                 <div id="ac-manual-overlay" style="display: block; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); backdrop-filter: blur(3px); border-radius: 12px; z-index: 10; display: flex; align-items: center; justify-content: center; cursor: not-allowed;">
                     <div style="text-align: center; color: white;">
-                        <i class="fas fa-lock" style="font-size: 36px; margin-bottom: 10px; opacity: 0.8;"></i>
+                        <div style="font-size: 28px; margin-bottom: 10px; opacity: 0.8;">🔒</div>
                         <div style="font-size: 14px; font-weight: 600;">Adaptive Mode Active</div>
                         <div style="font-size: 12px; opacity: 0.7;">Switch to Manual to use these controls</div>
                     </div>
@@ -3991,9 +3991,9 @@ HTML_TEMPLATE = '''
                         <span style="font-weight: 600; color: var(--text);">AC <span id="ac-live-state">OFF</span></span>
                     </div>
                     <div style="display: flex; gap: 16px; color: var(--text-secondary);">
-                        <span><i class="fas fa-thermometer-half"></i> <span id="ac-live-temp">24</span>°C</span>
-                        <span><i class="fas fa-fan"></i> Fan <span id="ac-live-fan">1</span></span>
-                        <span><i class="fas fa-cog"></i> <span id="ac-live-mode">COOL</span></span>
+                        <span><span id="ac-live-temp">24</span>°C</span>
+                        <span>Fan <span id="ac-live-fan">1</span></span>
+                        <span><span id="ac-live-mode">COOL</span></span>
                     </div>
                 </div>
                 
@@ -4005,30 +4005,30 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
-                        <i class="fas fa-temperature-high" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP +
+                        TEMP +
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_DOWN')">
-                        <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
+                        TEMP −
                     </button>
                 </div>
 
                 <!-- AC Mode Buttons -->
                 <div style="margin-top: 20px;">
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
-                        <i class="fas fa-cog"></i> AC Mode
+                        AC Mode
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
                         <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white; flex-direction: column;" onclick="sendACMode('MODE_AUTO', this)">
-                            <i class="fas fa-magic" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Auto
+                            Auto
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white; flex-direction: column;" onclick="sendACMode('MODE_COOL', this)">
-                            <i class="fas fa-snowflake" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Cool
+                            Cool
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white; flex-direction: column;" onclick="sendACMode('MODE_FAN', this)">
-                            <i class="fas fa-fan" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Fan
+                            Fan
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white; flex-direction: column;" onclick="sendACMode('MODE_DRY', this)">
-                            <i class="fas fa-tint-slash" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Dry
+                            Dry
                         </button>
                     </div>
                 </div>
@@ -4036,7 +4036,7 @@ HTML_TEMPLATE = '''
                 <!-- AC Temperature & Fan Speed Sliders -->
                 <div style="margin-top: 20px; padding: 20px; background: rgba(99, 102, 241, 0.05); border-radius: 12px; border: 1px solid var(--border);">
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 15px; font-weight: 600;">
-                        <i class="fas fa-sliders-h"></i> AC Settings (Direct MQTT)
+                        AC Settings (Direct MQTT)
                     </div>
                     <div class="control-group" style="margin-bottom: 15px;">
                         <label class="control-label">Temperature: <span id="ac-temp-display" style="color: var(--primary); font-weight: bold;">24</span>°C</label>
@@ -4056,29 +4056,29 @@ HTML_TEMPLATE = '''
                         <label class="control-label">AC Mode:</label>
                         <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 8px;">
                             <button class="btn ac-set-mode-btn" data-mode="AUTO" onclick="selectACSetMode('AUTO', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-magic"></i><br>Auto
+                                Auto
                             </button>
                             <button class="btn ac-set-mode-btn active" data-mode="COOL" onclick="selectACSetMode('COOL', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--primary); border: 2px solid var(--primary); color: white; cursor: pointer;">
-                                <i class="fas fa-snowflake"></i><br>Cool
+                                Cool
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="HEAT" onclick="selectACSetMode('HEAT', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-fire"></i><br>Heat
+                                Heat
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="DRY" onclick="selectACSetMode('DRY', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-tint-slash"></i><br>Dry
+                                Dry
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="FAN" onclick="selectACSetMode('FAN', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-fan"></i><br>Fan
+                                Fan
                             </button>
                         </div>
                     </div>
                     <button class="btn btn-primary" onclick="applyACSettings()" style="width: 100%; padding: 12px; border-radius: 10px; font-weight: 600;">
-                        <i class="fas fa-paper-plane"></i> Apply AC Settings
+                        Apply AC Settings
                     </button>
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    <i class="fas fa-info-circle"></i> Using IRMitsubishiHeavy library — no manual learning needed.
+                    IRMitsubishiHeavy library — no manual learning needed.
                 </div>
             </div>
         </div>
@@ -5819,7 +5819,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(16, 185, 129, 0.1)';
                     indicator.style.color = '#10b981';
                     indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization';
                 }
                 // Button styles
                 if (btnAdaptive) {
@@ -5843,7 +5843,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(245, 158, 11, 0.1)';
                     indicator.style.color = '#f59e0b';
                     indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
@@ -7079,6 +7079,38 @@ HTML_TEMPLATE = '''
                 const cur = parseFloat(e.current || 0);
                 if (pwr > 0 || vlt > 0) {
                     showEnergyBubble(pwr, vlt, cur);
+                }
+
+                // Real-time push to energy charts (so charts work even without InfluxDB)
+                var now = new Date();
+                var tStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
+                if (charts.energyPower && pwr >= 0) {
+                    if (charts.energyPower.data.labels.length > 120) {
+                        charts.energyPower.data.labels.shift();
+                        charts.energyPower.data.datasets[0].data.shift();
+                    }
+                    charts.energyPower.data.labels.push(tStr);
+                    charts.energyPower.data.datasets[0].data.push(pwr);
+                    charts.energyPower.update();
+                }
+                if (charts.energyVoltage && vlt >= 0) {
+                    if (charts.energyVoltage.data.labels.length > 120) {
+                        charts.energyVoltage.data.labels.shift();
+                        charts.energyVoltage.data.datasets[0].data.shift();
+                    }
+                    charts.energyVoltage.data.labels.push(tStr);
+                    charts.energyVoltage.data.datasets[0].data.push(vlt);
+                    charts.energyVoltage.update();
+                }
+                var kwhVal = parseFloat(e.energy || 0);
+                if (charts.energyKwh && kwhVal >= 0) {
+                    if (charts.energyKwh.data.labels.length > 120) {
+                        charts.energyKwh.data.labels.shift();
+                        charts.energyKwh.data.datasets[0].data.shift();
+                    }
+                    charts.energyKwh.data.labels.push(tStr);
+                    charts.energyKwh.data.datasets[0].data.push(kwhVal);
+                    charts.energyKwh.update();
                 }
             }
 
