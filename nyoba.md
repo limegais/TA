@@ -739,18 +739,38 @@ def handle_person_based_control(person_count):
 def get_camera():
     global camera
     if camera is None:
-        # Auto-detect camera: try index 0-4
+        # Auto-detect camera: try index 0-4, skip non-capture V4L2 devices
         for idx in range(5):
-            cam = cv2.VideoCapture(idx)
-            if cam.isOpened():
+            dev_path = f'/dev/video{idx}'
+            # On Linux, check if device exists and is a real capture device
+            if os.path.exists('/dev'):
+                if not os.path.exists(dev_path):
+                    continue
+                # Use v4l2-ctl to verify it's a capture device (skip IR/metadata devices)
+                try:
+                    import subprocess
+                    result = subprocess.run(['v4l2-ctl', '-d', dev_path, '--all'],
+                                          capture_output=True, text=True, timeout=3)
+                    if 'Video Capture' not in result.stdout:
+                        print(f"[CAM] Skipping {dev_path} (not a video capture device)")
+                        continue
+                except Exception:
+                    pass  # v4l2-ctl not available, try anyway
+            try:
+                cam = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            except Exception:
+                cam = cv2.VideoCapture(idx)
+            if cam is not None and cam.isOpened():
                 ret, test_frame = cam.read()
                 if ret and test_frame is not None:
                     camera = cam
+                    print(f"[CAM] Opened /dev/video{idx} successfully")
                     break
                 else:
                     cam.release()
             else:
-                cam.release()
+                if cam is not None:
+                    cam.release()
         
         if camera is not None and camera.isOpened():
             # 720p for best FPS — YOLO only uses 640px input anyway
@@ -792,7 +812,9 @@ def camera_detection_loop():
     _detection_thread_running = True
     last_save_time = time.time()
     save_interval = 5
-    retry_delay = 2
+    retry_delay = 5
+    camera_fail_count = 0
+    MAX_CAMERA_RETRIES = 10
     frame_count = 0
     YOLO_EVERY_N = 4  # Run YOLO every 4th frame — other frames just capture+encode
     last_person_count = 0
@@ -824,12 +846,20 @@ def camera_detection_loop():
                             camera = None
                         mqtt_data['camera']['status'] = 'reconnecting'
             
-            # If no frame captured, wait and retry (lock is released)
+            # If no frame captured, wait and retry with increasing backoff
             if frame is None:
-                time.sleep(retry_delay)
+                camera_fail_count += 1
+                if camera_fail_count >= MAX_CAMERA_RETRIES:
+                    print(f"[CAM] No valid camera after {MAX_CAMERA_RETRIES} retries, pausing detection (retry in 60s)")
+                    mqtt_data['camera']['status'] = 'no_camera'
+                    time.sleep(60)
+                    camera_fail_count = 0  # Reset to try again
+                else:
+                    time.sleep(retry_delay)
                 continue
             
             mqtt_data['camera']['status'] = 'active'
+            camera_fail_count = 0  # Reset on successful frame
             frame_count += 1
             
             # Run YOLO only every Nth frame — other frames reuse last detection
@@ -4920,63 +4950,76 @@ HTML_TEMPLATE = '''
 
         function styleLineChart(chart, unit, showLegend) {
             if (!chart) return;
-            chart.options = chart.options || {};
-            chart.options.responsive = true;
-            chart.options.maintainAspectRatio = true;
-            chart.options.interaction = { mode: 'index', intersect: false };
-            chart.options.plugins = chart.options.plugins || {};
-            chart.options.plugins.legend = {
-                display: !!showLegend,
-                labels: {
-                    color: '#94a3b8',
-                    usePointStyle: true,
-                    pointStyle: 'circle',
-                    padding: 14,
-                    font: { size: 12, weight: '600' }
-                }
-            };
-            chart.options.plugins.tooltip = {
-                enabled: true,
-                backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                titleColor: '#f8fafc',
-                bodyColor: '#e2e8f0',
-                borderColor: 'rgba(148,163,184,0.35)',
-                borderWidth: 1,
-                displayColors: true,
-                callbacks: {
-                    label: function(ctx) {
-                        const label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
-                        return label + ': ' + formatChartValue(ctx.parsed.y, unit);
-                    },
-                    title: function(items) {
-                        return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
-                    }
-                }
-            };
-            chart.options.scales = chart.options.scales || {};
-            chart.options.scales.x = chart.options.scales.x || {};
-            chart.options.scales.y = chart.options.scales.y || {};
-            chart.options.scales.x.grid = { color: 'rgba(148,163,184,0.12)' };
-            chart.options.scales.x.ticks = { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 };
-            chart.options.scales.y.grid = { color: 'rgba(148,163,184,0.14)' };
-            chart.options.scales.y.ticks = {
-                color: '#94a3b8',
-                callback: function(value) {
-                    return unit ? (Number(value).toFixed(1) + ' ' + unit) : Number(value).toFixed(1);
-                }
-            };
+            // In Chart.js 4.x, directly replacing options sub-objects after creation causes
+            // "Recursion detected: callback->callback" errors due to internal resolver chains.
+            // Use chart.options property merging carefully — only set leaf properties.
+            try {
+                chart.options.responsive = true;
+                chart.options.maintainAspectRatio = true;
+                chart.options.animation = false;
+                chart.options.interaction = { mode: 'index', intersect: false };
 
-            if (chart.data && Array.isArray(chart.data.datasets)) {
-                chart.data.datasets.forEach(function(ds) {
-                    ds.borderWidth = 2.8;
-                    ds.tension = 0.35;
-                    ds.pointRadius = 4.4;
-                    ds.pointHoverRadius = 7.5;
-                    ds.pointBorderWidth = 1.6;
-                    ds.pointBorderColor = '#ffffff';
-                    ds.hitRadius = 10;
-                    ds.hoverBorderWidth = 2;
-                });
+                // Plugins — safe to replace since Chart.js re-resolves them
+                chart.options.plugins = chart.options.plugins || {};
+                chart.options.plugins.legend = {
+                    display: !!showLegend,
+                    labels: {
+                        color: '#94a3b8',
+                        usePointStyle: true,
+                        pointStyle: 'circle',
+                        padding: 14,
+                        font: { size: 12, weight: '600' }
+                    }
+                };
+                chart.options.plugins.tooltip = {
+                    enabled: true,
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                    titleColor: '#f8fafc',
+                    bodyColor: '#e2e8f0',
+                    borderColor: 'rgba(148,163,184,0.35)',
+                    borderWidth: 1,
+                    displayColors: true,
+                    callbacks: {
+                        label: function(ctx) {
+                            const label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                            return label + ': ' + formatChartValue(ctx.parsed.y, unit);
+                        },
+                        title: function(items) {
+                            return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
+                        }
+                    }
+                };
+
+                // Scales — update leaf properties only, do NOT replace the scale objects
+                if (chart.options.scales && chart.options.scales.x) {
+                    chart.options.scales.x.grid = { color: 'rgba(148,163,184,0.12)' };
+                    chart.options.scales.x.ticks = { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 };
+                }
+                if (chart.options.scales && chart.options.scales.y) {
+                    chart.options.scales.y.grid = { color: 'rgba(148,163,184,0.14)' };
+                    chart.options.scales.y.ticks = {
+                        color: '#94a3b8',
+                        callback: function(value) {
+                            return unit ? (Number(value).toFixed(1) + ' ' + unit) : Number(value).toFixed(1);
+                        }
+                    };
+                }
+
+                if (chart.data && Array.isArray(chart.data.datasets)) {
+                    chart.data.datasets.forEach(function(ds) {
+                        ds.borderWidth = 2.8;
+                        ds.tension = 0.35;
+                        ds.pointRadius = 4.4;
+                        ds.pointHoverRadius = 7.5;
+                        ds.pointBorderWidth = 1.6;
+                        ds.pointBorderColor = '#ffffff';
+                        ds.hitRadius = 10;
+                        ds.hoverBorderWidth = 2;
+                    });
+                }
+                chart.update('none');  // 'none' mode skips animation to avoid callback recursion
+            } catch(e) {
+                console.warn('styleLineChart error (non-fatal):', e.message);
             }
         }
 
@@ -5054,6 +5097,7 @@ HTML_TEMPLATE = '''
                 var opts = {
                     responsive: true,
                     maintainAspectRatio: true,
+                    animation: false,
                     plugins: { legend: { display: !!showLegend } },
                     scales: {
                         y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
@@ -5119,7 +5163,10 @@ HTML_TEMPLATE = '''
             // Energy Comparison: 4 separate charts (Before/After x Power/kWh) for side-by-side view
             var compareLineOpts = function(unit) {
                 return {
-                    ...makeOpts(false),
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    animation: false,
+                    plugins: { legend: { display: false } },
                     scales: {
                         x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 }, maxRotation: 45, maxTicksLimit: 12 } },
                         y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#94a3b8', font: { size: 10 } }, title: { display: true, text: unit, color: '#94a3b8', font: { size: 11 } } }
@@ -5251,7 +5298,7 @@ HTML_TEMPLATE = '''
                     if (data && data.length > 0) {
                         charts[chartName].data.labels = data.map(d => d.time);
                         charts[chartName].data.datasets[0].data = data.map(d => d.value);
-                        charts[chartName].update();
+                        charts[chartName].update('none');
                     }
                 })
                 .catch(e => console.warn('Chart data unavailable (' + chartName + '):', e.message));
@@ -5412,7 +5459,7 @@ HTML_TEMPLATE = '''
                         const values = data.map(d => parseFloat(d.value || 0));
                         chart.data.datasets[0].data = values;
                         try { applyChartGradients(); } catch(e) {}
-                        chart.update();
+                        chart.update('none');
                         updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
                     } else {
                         drawEnergyFallback(field, data);
@@ -5543,12 +5590,12 @@ HTML_TEMPLATE = '''
                     // BEFORE chart — its own labels & data
                     beforeChart.data.labels = beforeData.map(function(d) { return d.label; });
                     beforeChart.data.datasets[0].data = beforeData.map(function(d) { return d.value; });
-                    beforeChart.update();
+                    beforeChart.update('none');
 
                     // AFTER chart — its own labels & data
                     afterChart.data.labels = afterData.map(function(d) { return d.label; });
                     afterChart.data.datasets[0].data = afterData.map(function(d) { return d.value; });
-                    afterChart.update();
+                    afterChart.update('none');
 
                     // Sync Y-axis scale so both charts have same max for fair visual comparison
                     var allVals = beforeData.map(function(d){return d.value;}).concat(afterData.map(function(d){return d.value;}));
@@ -5556,8 +5603,8 @@ HTML_TEMPLATE = '''
                         var maxVal = Math.max.apply(null, allVals) * 1.1;
                         beforeChart.options.scales.y.max = maxVal;
                         afterChart.options.scales.y.max = maxVal;
-                        beforeChart.update();
-                        afterChart.update();
+                        beforeChart.update('none');
+                        afterChart.update('none');
                     }
 
                     if (field === 'power') {
@@ -5752,7 +5799,7 @@ HTML_TEMPLATE = '''
 
             chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
             chart.data.datasets[0].data = history;
-            chart.update();
+            chart.update('none');
         }
 
         function addToComparisonChart(gaFit, psoFit) {
@@ -5771,7 +5818,7 @@ HTML_TEMPLATE = '''
             chart.data.labels.push(label);
             chart.data.datasets[0].data.push(gaFit);
             chart.data.datasets[1].data.push(psoFit);
-            chart.update();
+            chart.update('none');
         }
 
         function addMLHistoryRow(data) {
@@ -6031,7 +6078,7 @@ HTML_TEMPLATE = '''
                 if (charts[name]) {
                     charts[name].data.labels = [];
                     charts[name].data.datasets.forEach(ds => ds.data = []);
-                    charts[name].update();
+                    charts[name].update('none');
                 }
             });
             showToast('Charts cleared', 'success');
@@ -7266,7 +7313,7 @@ HTML_TEMPLATE = '''
                         }
                         charts.energy.data.labels.push(timeLabel);
                         charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
-                        charts.energy.update();
+                        charts.energy.update('none');
                     }
                     
                     // Energy Monitor (PZEM-016) data
@@ -7481,12 +7528,12 @@ HTML_TEMPLATE = '''
                 if (charts.temp && charts.temp.data.labels.length < 50) {
                     charts.temp.data.labels.push(timeStr);
                     charts.temp.data.datasets[0].data.push(data.data.temperature);
-                    charts.temp.update();
+                    charts.temp.update('none');
                 }
                 if (charts.hum && charts.hum.data.labels.length < 50) {
                     charts.hum.data.labels.push(timeStr);
                     charts.hum.data.datasets[0].data.push(data.data.humidity);
-                    charts.hum.update();
+                    charts.hum.update('none');
                 }
             }
             
@@ -7500,12 +7547,12 @@ HTML_TEMPLATE = '''
                 if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
                     charts.lampLux.data.labels.push(timeStr);
                     charts.lampLux.data.datasets[0].data.push(luxAvg);
-                    charts.lampLux.update();
+                    charts.lampLux.update('none');
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
-                    charts.lampBright.update();
+                    charts.lampBright.update('none');
                 }
             }
             
@@ -7570,7 +7617,7 @@ HTML_TEMPLATE = '''
                     }
                     charts.energyPower.data.labels.push(tStr);
                     charts.energyPower.data.datasets[0].data.push(pwr);
-                    charts.energyPower.update();
+                    charts.energyPower.update('none');
                 }
                 if (charts.energyVoltage && vlt >= 0) {
                     if (charts.energyVoltage.data.labels.length > 120) {
@@ -7579,7 +7626,7 @@ HTML_TEMPLATE = '''
                     }
                     charts.energyVoltage.data.labels.push(tStr);
                     charts.energyVoltage.data.datasets[0].data.push(vlt);
-                    charts.energyVoltage.update();
+                    charts.energyVoltage.update('none');
                 }
                 if (charts.energyCurrent && cur >= 0) {
                     if (charts.energyCurrent.data.labels.length > 120) {
@@ -7588,7 +7635,7 @@ HTML_TEMPLATE = '''
                     }
                     charts.energyCurrent.data.labels.push(tStr);
                     charts.energyCurrent.data.datasets[0].data.push(cur);
-                    charts.energyCurrent.update();
+                    charts.energyCurrent.update('none');
                 }
                 var kwhVal = parseFloat(e.energy || 0);
                 if (charts.energyKwh && kwhVal >= 0) {
@@ -7598,7 +7645,7 @@ HTML_TEMPLATE = '''
                     }
                     charts.energyKwh.data.labels.push(tStr);
                     charts.energyKwh.data.datasets[0].data.push(kwhVal);
-                    charts.energyKwh.update();
+                    charts.energyKwh.update('none');
                 }
             }
 
@@ -8050,4 +8097,4 @@ if __name__ == '__main__':
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
