@@ -11,6 +11,9 @@ import time
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import random
+import math
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -45,6 +48,395 @@ energy_recording = {
     'before': {'active': False, 'start': None, 'end': None},
     'after': {'active': False, 'start': None, 'end': None}
 }
+
+# Persist energy_recording to disk so it survives server restart
+ENERGY_RECORDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'energy_recording.json')
+
+def save_energy_recording():
+    """Save energy_recording state to JSON file"""
+    try:
+        with open(ENERGY_RECORDING_FILE, 'w') as f:
+            json.dump({'phase': energy_phase, 'recording': energy_recording}, f)
+    except Exception as e:
+        print(f"[WARN] Save energy recording failed: {e}")
+
+def load_energy_recording():
+    """Load energy_recording state from JSON file"""
+    global energy_phase, energy_recording
+    try:
+        if os.path.exists(ENERGY_RECORDING_FILE):
+            with open(ENERGY_RECORDING_FILE, 'r') as f:
+                data = json.load(f)
+            energy_phase = data.get('phase', 'idle')
+            rec = data.get('recording', {})
+            for phase in ['before', 'after']:
+                if phase in rec:
+                    energy_recording[phase] = rec[phase]
+            print(f"[OK] Loaded energy recording state: phase={energy_phase}")
+    except Exception as e:
+        print(f"[WARN] Load energy recording failed: {e}")
+
+load_energy_recording()
+
+# ==================== GA/PSO OPTIMIZATION ENGINE (embedded) ====================
+# Optimization bounds
+OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
+OPT_FAN_MIN, OPT_FAN_MAX = 1, 3
+OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
+
+# Live sensor data for fitness calculation
+opt_sensor_data = {
+    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False, 'lux': 200,
+    'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
+    'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default'
+}
+
+# Auto optimization config
+AUTO_OPT_INTERVAL = 600  # seconds between optimization cycles
+optimization_lock = threading.Lock()
+optimization_run_count = 0
+last_opt_results = {
+    'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
+    'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
+}
+
+ga_params = {'population_size': 20, 'generations': 30, 'mutation_rate': 0.25, 'crossover_rate': 0.8, 'elitism_ratio': 0.2}
+pso_params = {'swarm_size': 40, 'iterations': 120, 'w': 0.9, 'c1': 2.0, 'c2': 2.0}
+
+def _gaussian_score(value, target, sigma, max_score):
+    return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
+
+def _get_time_period():
+    hour = datetime.now().hour
+    if 6 <= hour < 12: return 'morning'
+    elif 12 <= hour < 17: return 'afternoon'
+    elif 17 <= hour < 22: return 'evening'
+    else: return 'night'
+
+def _get_temp_uniformity():
+    temps = [opt_sensor_data.get(k, 0) for k in ('temp1', 'temp2', 'temp3') if opt_sensor_data.get(k, 0) > 0]
+    if len(temps) < 2: return 1.0
+    return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
+
+def calculate_ac_fitness(temp_set, fan_speed):
+    temp_room = opt_sensor_data['temperature']
+    humidity = opt_sensor_data['humidity']
+    person_detected = opt_sensor_data['person_detected']
+    temp_trend = opt_sensor_data.get('temp_trend', 0.0)
+    time_period = _get_time_period()
+    fitness = 0.0
+    if person_detected:
+        target_map = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
+        sigma_map = {'morning': 2.0, 'afternoon': 1.5, 'evening': 2.0, 'night': 2.5}
+    else:
+        target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
+        sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
+    target_temp = target_map.get(time_period, 25.0)
+    sigma = sigma_map.get(time_period, 2.0)
+    trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
+    adjusted_target = target_temp + trend_offset
+    fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
+    if humidity > 60:
+        excess_factor = min(1.0, (humidity - 60) / 30.0)
+        dehumid_target_temp = 24.0 - excess_factor * 2.0
+        fitness += _gaussian_score(temp_set, dehumid_target_temp, 3.0, 10.0) + (fan_speed - 1) / 2.0 * 5.0 * excess_factor
+    elif humidity < 40:
+        dry_factor = min(1.0, (40 - humidity) / 20.0)
+        fitness += (15.0 * (1 - dry_factor * 0.3)) if temp_set >= 25 else _gaussian_score(temp_set, 26.0, 3.0, 15.0) * (1 - dry_factor)
+    else:
+        fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
+    temp_gap = abs(temp_room - temp_set)
+    ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
+    fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
+    ac_power = (30.0 - temp_set) * 50.0 + fan_speed * 30.0
+    max_power = (30.0 - 16.0) * 50.0 + 3 * 30.0
+    energy_ratio = 1.0 - (ac_power / max_power)
+    fitness += energy_ratio * (5.0 if person_detected else 15.0)
+    uniformity = _get_temp_uniformity()
+    if uniformity < 0.7 and fan_speed >= 2:
+        fitness += 8.0 * (1 - uniformity) * (fan_speed / 3.0)
+    elif uniformity >= 0.7:
+        fitness += 8.0 * uniformity
+    if temp_trend > 0.3 and temp_set <= target_temp - 1:
+        fitness += min(7.0, temp_trend * 5.0)
+    elif temp_trend < -0.3 and temp_set >= target_temp:
+        fitness += min(7.0, abs(temp_trend) * 5.0)
+    else:
+        fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
+    if not person_detected and temp_set < 24:
+        fitness -= (24.0 - temp_set) * 3.0
+    if temp_set < 18 and fan_speed == 3:
+        fitness -= 10.0
+    return max(0.0, round(fitness, 2))
+
+def calculate_lamp_fitness(brightness):
+    ambient_lux = opt_sensor_data['lux']
+    person_detected = opt_sensor_data['person_detected']
+    fitness = 0
+    lamp_lux = brightness * 5
+    total_lux = ambient_lux + lamp_lux
+    if person_detected:
+        if 300 <= total_lux <= 500: fitness += 50
+        elif 200 <= total_lux <= 600: fitness += 35
+        elif total_lux < 200: fitness += max(0, 50 - (200 - total_lux) * 0.2)
+        else: fitness += max(0, 50 - (total_lux - 600) * 0.1)
+    else:
+        if brightness <= 5: fitness += 50
+        elif brightness <= 20: fitness += 35
+        else: fitness += max(0, 50 - brightness * 0.5)
+    lamp_power = brightness * 0.5
+    energy_ratio = 1 - (lamp_power / 50.0)
+    fitness += energy_ratio * (10 if person_detected else 30)
+    if person_detected:
+        if ambient_lux >= 400: fitness += 20 if brightness <= 20 else (12 if brightness <= 40 else 0)
+        elif ambient_lux >= 200: fitness += 20 if 20 <= brightness <= 60 else 8
+        else: fitness += 20 if brightness >= 60 else (12 if brightness >= 40 else 5)
+    else:
+        if brightness <= 5: fitness += 20
+    return max(0, round(fitness, 2))
+
+def update_opt_sensor_data(**kwargs):
+    for k, v in kwargs.items():
+        if v is not None and k in opt_sensor_data:
+            opt_sensor_data[k] = v
+    if 'temperature' in kwargs and kwargs['temperature'] is not None:
+        opt_sensor_data['data_source'] = 'mqtt'
+        now = time.time()
+        opt_sensor_data['temp_history'].append((now, kwargs['temperature']))
+        if len(opt_sensor_data['temp_history']) > 10:
+            opt_sensor_data['temp_history'] = opt_sensor_data['temp_history'][-10:]
+        h = opt_sensor_data['temp_history']
+        if len(h) >= 3:
+            dt_min = (h[-1][0] - h[0][0]) / 60.0
+            if dt_min > 0.1:
+                opt_sensor_data['temp_trend'] = round((h[-1][1] - h[0][1]) / dt_min, 3)
+
+def fetch_sensor_data_from_db(time_range_minutes=30):
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
+        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux") |> mean()'
+        for table in query_api.query(ac_query):
+            for rec in table.records:
+                if rec.get_field() == 'temperature' and rec.get_value() is not None:
+                    opt_sensor_data['temperature'] = round(float(rec.get_value()), 1)
+                elif rec.get_field() == 'humidity' and rec.get_value() is not None:
+                    opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
+        for table in query_api.query(lamp_query):
+            for rec in table.records:
+                if rec.get_field() == 'lux' and rec.get_value() is not None:
+                    opt_sensor_data['lux'] = round(float(rec.get_value()), 1)
+        opt_sensor_data['data_source'] = 'influxdb'
+        client.close()
+    except Exception as e:
+        print(f"[OPT] InfluxDB fetch failed: {e}, using MQTT data")
+        opt_sensor_data['data_source'] = 'mqtt_fallback'
+
+def run_ga_optimization(verbose=False):
+    pop_size = ga_params['population_size']
+    generations = ga_params['generations']
+    mutation_rate = ga_params['mutation_rate']
+    crossover_rate = ga_params['crossover_rate']
+    elitism_ratio = ga_params.get('elitism_ratio', 0.2)
+    elite_count = max(2, int(pop_size * elitism_ratio))
+    seed_solutions = []
+    if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan']])
+
+    def create_ind():
+        return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1), random.randint(OPT_FAN_MIN, OPT_FAN_MAX)]
+
+    population = []
+    for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
+        population.append([float(s[0]), int(s[1])])
+        if len(population) < pop_size:
+            population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
+                               max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1])))])
+    while len(population) < pop_size:
+        population.append(create_ind())
+    population = population[:pop_size]
+
+    best_solution, best_fitness = None, 0
+    fitness_history = []
+    stagnation_counter, stagnation_limit = 0, max(5, generations // 4)
+    prev_best = 0
+
+    for gen in range(generations):
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+        paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
+        population = [p[0] for p in paired]
+        scores = [p[1] for p in paired]
+        if scores[0] > best_fitness:
+            best_fitness = scores[0]
+            best_solution = population[0][:]
+        fitness_history.append(best_fitness)
+        improvement = best_fitness - prev_best
+        stagnation_counter = stagnation_counter + 1 if improvement < 0.01 else 0
+        prev_best = best_fitness
+        boost = False
+        if stagnation_counter >= stagnation_limit:
+            for i in range(max(2, pop_size // 4)):
+                population[-(i + 1)] = create_ind()
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+            boost = True
+            stagnation_counter = 0
+        if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
+            break
+        next_pop = [ind[:] for ind in population[:elite_count]]
+        # tournament selection
+        selected = []
+        for _ in range(len(population)):
+            contestants = random.sample(range(len(population)), min(3, len(population)))
+            best_idx = max(contestants, key=lambda i: scores[i])
+            selected.append(population[best_idx][:])
+        while len(next_pop) < pop_size:
+            p1, p2 = random.sample(selected, 2)
+            # BLX-alpha crossover
+            if random.random() < crossover_rate:
+                alpha = 0.3
+                lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
+                span = hi - lo
+                c1t = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, random.uniform(lo - alpha * span, hi + alpha * span))), 1)
+                c2t = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, random.uniform(lo - alpha * span, hi + alpha * span))), 1)
+                c1f = p1[1] if random.random() < 0.5 else p2[1]
+                c2f = p2[1] if random.random() < 0.5 else p1[1]
+                child1, child2 = [c1t, c1f], [c2t, c2f]
+            else:
+                child1, child2 = p1[:], p2[:]
+            # mutate
+            progress = gen / max(1, generations)
+            adaptive_rate = mutation_rate * (1.0 - 0.7 * progress)
+            if boost: adaptive_rate = min(0.9, adaptive_rate * 2.5)
+            for child in [child1, child2]:
+                if random.random() < adaptive_rate:
+                    step = (2.0 * (1 - progress) + 0.5) * (2.0 if boost else 1.0)
+                    child[0] = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, child[0] + random.gauss(0, step))), 1)
+                if random.random() < adaptive_rate:
+                    child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
+            next_pop.append(child1)
+            if len(next_pop) < pop_size:
+                next_pop.append(child2)
+        population = next_pop[:pop_size]
+
+    # brute-force validation
+    bf_best_fit, bf_best_sol = -1, None
+    for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
+        for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
+            fit = calculate_ac_fitness(t, f)
+            if fit > bf_best_fit:
+                bf_best_fit, bf_best_sol = fit, [t, f]
+    if bf_best_fit > best_fitness:
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1]]
+        best_fitness = bf_best_fit
+    final = [int(round(best_solution[0])), best_solution[1]]
+    return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
+
+def run_pso_optimization(verbose=False):
+    swarm_size = pso_params['swarm_size']
+    iterations = pso_params['iterations']
+    w, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
+    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-10, 10)] for _ in range(swarm_size)]
+    pb_pos = [p[:] for p in positions]
+    pb_fit = [calculate_lamp_fitness(p[0]) for p in positions]
+    g_idx = pb_fit.index(max(pb_fit))
+    g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+    fitness_history = []
+    for it in range(iterations):
+        cur_w = w - (w - 0.4) * (it / iterations)
+        for i in range(swarm_size):
+            r1, r2 = random.random(), random.random()
+            velocities[i][0] = cur_w * velocities[i][0] + c1 * r1 * (pb_pos[i][0] - positions[i][0]) + c2 * r2 * (g_pos[0] - positions[i][0])
+            max_vel = 20
+            velocities[i][0] = max(-max_vel, min(max_vel, velocities[i][0]))
+            positions[i][0] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][0] + velocities[i][0]))))
+            fit = calculate_lamp_fitness(positions[i][0])
+            if fit > pb_fit[i]:
+                pb_fit[i], pb_pos[i] = fit, positions[i][:]
+            if fit > g_fit:
+                g_fit, g_pos = fit, positions[i][:]
+        fitness_history.append(g_fit)
+    return g_pos, g_fit, fitness_history
+
+def run_optimization_cycle(algo='both'):
+    global optimization_run_count
+    if not optimization_lock.acquire(blocking=False):
+        print("[OPT] Already running, skipping")
+        return False
+    try:
+        socketio.emit('ml_status', {'status': 'running', 'algorithm': algo})
+        fetch_sensor_data_from_db(30)
+        if algo in ('ga', 'both'):
+            sol, fit, hist, bf = run_ga_optimization()
+            last_opt_results['ga'] = {'fitness': fit, 'temp': sol[0], 'fan': sol[1], 'stats': hist, 'brute_force': bf}
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} fitness={fit:.2f}")
+        if algo in ('pso', 'both'):
+            sol, fit, hist = run_pso_optimization()
+            last_opt_results['pso'] = {'fitness': fit, 'brightness': sol[0], 'stats': hist}
+            print(f"[PSO] Done: {sol[0]}% fitness={fit:.2f}")
+        optimization_run_count += 1
+        # Update mqtt_data system
+        mqtt_data['system'].update({
+            'ga_fitness': last_opt_results['ga']['fitness'],
+            'pso_fitness': last_opt_results['pso']['fitness'],
+            'optimization_runs': optimization_run_count,
+            'ga_temp': last_opt_results['ga']['temp'],
+            'ga_fan': last_opt_results['ga']['fan'],
+            'pso_brightness': last_opt_results['pso']['brightness'],
+            'ga_history': last_opt_results['ga'].get('stats', []),
+            'pso_history': last_opt_results['pso'].get('stats', [])
+        })
+        socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+        # Write to InfluxDB
+        write_to_influxdb('optimization_result', {
+            'ga_fitness': float(last_opt_results['ga']['fitness']),
+            'pso_fitness': float(last_opt_results['pso']['fitness']),
+            'ga_temp': float(last_opt_results['ga']['temp']),
+            'ga_fan': float(last_opt_results['ga']['fan']),
+            'pso_brightness': float(last_opt_results['pso']['brightness']),
+            'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
+        })
+        # Auto-apply if ADAPTIVE mode
+        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_temp = last_opt_results['ga']['temp']
+            opt_fan = last_opt_results['ga']['fan']
+            if 16 <= opt_temp <= 30 and opt_fan >= 1:
+                ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            opt_b = last_opt_results['pso']['brightness']
+            if opt_b > 0:
+                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_b), 'source': 'adaptive'}))
+        socketio.emit('ml_status', {
+            'status': 'completed', 'algorithm': algo,
+            'ga_fitness': last_opt_results['ga']['fitness'],
+            'pso_fitness': last_opt_results['pso']['fitness'],
+            'optimization_count': optimization_run_count,
+            'ga_solution': {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']},
+            'pso_solution': {'brightness': last_opt_results['pso']['brightness']},
+            'ga_history': last_opt_results['ga'].get('stats', []),
+            'pso_history': last_opt_results['pso'].get('stats', [])
+        })
+        return True
+    except Exception as e:
+        print(f"[OPT] Error: {e}")
+        import traceback; traceback.print_exc()
+        socketio.emit('ml_status', {'status': 'error', 'message': str(e)})
+        return False
+    finally:
+        optimization_lock.release()
+
+def optimization_auto_loop():
+    """Background thread: auto-optimize every AUTO_OPT_INTERVAL seconds"""
+    time.sleep(10)  # wait for Flask + MQTT to start
+    print(f"[OPT] Auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    while True:
+        try:
+            run_optimization_cycle('both')
+        except Exception as e:
+            print(f"[OPT] Auto cycle error: {e}")
+        time.sleep(AUTO_OPT_INTERVAL)
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -636,6 +1028,13 @@ def on_message(client, userdata, msg):
             })
             save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
             save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
+            # Feed sensor data to optimization engine
+            update_opt_sensor_data(
+                temperature=payload.get('temperature'), humidity=payload.get('humidity'),
+                temp1=payload.get('temp1'), hum1=payload.get('hum1'),
+                temp2=payload.get('temp2'), hum2=payload.get('hum2'),
+                temp3=payload.get('temp3'), hum3=payload.get('hum3')
+            )
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
             device_last_seen['esp32_ac']['last_seen'] = datetime.now()
             device_last_seen['esp32_ac']['status'] = 'online'
@@ -659,6 +1058,7 @@ def on_message(client, userdata, msg):
             })
             # Save lamp data to InfluxDB
             save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
+            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1))
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -709,6 +1109,7 @@ def on_message(client, userdata, msg):
                 'confidence': payload.get('confidence', 0)
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            update_opt_sensor_data(person_detected=payload.get('person_detected', False))
             # Track device status
             device_last_seen['camera']['last_seen'] = datetime.now()
             device_last_seen['camera']['status'] = 'online'
@@ -1197,6 +1598,7 @@ def energy_record_api():
             energy_recording[phase]['end'] = datetime.utcnow().isoformat()
             energy_phase = 'idle'
 
+        save_energy_recording()
         socketio.emit('energy_recording', {'recording': energy_recording, 'phase': energy_phase})
         return jsonify({'recording': energy_recording, 'phase': energy_phase})
 
@@ -1206,6 +1608,7 @@ def energy_record_api():
 def energy_compare():
     """Compare energy data between recorded before and after adaptive AC periods"""
     field = request.args.get('field', 'power')
+    range_param = request.args.get('range', 'all')  # all, 7d, 30d
 
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field not in allowed_fields:
@@ -1230,6 +1633,16 @@ def energy_compare():
             else:
                 results[phase] = []
                 continue
+
+            # Apply range filter: clip start_dt so only last N days of data shown
+            if range_param == '7d':
+                clipped = end_dt - timedelta(days=7)
+                if clipped > start_dt:
+                    start_dt = clipped
+            elif range_param == '30d':
+                clipped = end_dt - timedelta(days=30)
+                if clipped > start_dt:
+                    start_dt = clipped
 
             dur_h = (end_dt - start_dt).total_seconds() / 3600
             if dur_h <= 1:
@@ -1283,6 +1696,18 @@ def energy_compare():
             for phase in ['before', 'after']:
                 phase_data = [r for r in energy_runtime_history if r.get('phase') == phase]
                 if phase_data:
+                    end_ts = phase_data[-1]['ts']
+                    start_ts = phase_data[0]['ts']
+                    # Apply range filter to runtime buffer
+                    if range_param == '7d':
+                        cutoff = end_ts - timedelta(days=7)
+                        phase_data = [r for r in phase_data if r['ts'] >= cutoff]
+                    elif range_param == '30d':
+                        cutoff = end_ts - timedelta(days=30)
+                        phase_data = [r for r in phase_data if r['ts'] >= cutoff]
+                    if not phase_data:
+                        results[phase] = []
+                        continue
                     start_ts = phase_data[0]['ts']
                     dur_h = max(0.01, (phase_data[-1]['ts'] - start_ts).total_seconds() / 3600)
                     step = max(1, len(phase_data) // 120)
@@ -1458,18 +1883,23 @@ def ml_status():
 
 @app.route('/api/ml/run', methods=['POST'])
 def ml_run():
-    """Trigger optimization run (GA, PSO, or both) via MQTT"""
+    """Trigger optimization run (GA, PSO, or both) — runs embedded engine"""
     try:
         data = request.json
-        algo = data.get('algorithm', 'both')  # 'ga', 'pso', or 'both'
+        algo = data.get('algorithm', 'both')
         params = data.get('params', {})
         
-        cmd = {
-            'action': 'run_optimization',
-            'algorithm': algo,
-            'params': params
-        }
-        mqtt_client.publish('smartroom/ml/command', json.dumps(cmd))
+        # Update params if provided
+        if algo == 'ga' and params:
+            ga_params.update({k: v for k, v in params.items() if k in ga_params})
+        elif algo == 'pso' and params:
+            pso_params.update({k: v for k, v in params.items() if k in pso_params})
+        elif algo == 'both' and params:
+            if 'ga' in params: ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
+            if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
+        
+        t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
+        t.start()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'ML Run triggered: {algo}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'{algo} optimization triggered'})
     except Exception as e:
@@ -3847,6 +4277,12 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <!-- Savings Summary Cards -->
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">
+                    <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Range:</span>
+                    <button class="chart-option-btn" id="compare-range-7d" onclick="setCompareRange('7d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">7 Days</button>
+                    <button class="chart-option-btn" id="compare-range-30d" onclick="setCompareRange('30d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">30 Days</button>
+                    <button class="chart-option-btn active" id="compare-range-all" onclick="setCompareRange('all', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">All</button>
+                </div>
                 <div style="display: grid; grid-template-columns: repeat(3, minmax(130px,1fr)); gap: 12px; margin-bottom: 20px;">
                     <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
@@ -4982,8 +5418,21 @@ HTML_TEMPLATE = '''
                         drawEnergyFallback(field, data);
                     }
 
-                    if (data.length === 0) {
-                        console.log('No energy data for ' + field + ' / ' + period);
+                    // Show "No Data" overlay on canvas if empty
+                    var canvasId = energyCanvasMap[field];
+                    var noDataId = 'nodata-' + canvasId;
+                    var existingOverlay = document.getElementById(noDataId);
+                    if (existingOverlay) existingOverlay.remove();
+                    if (data.length === 0 && canvasId) {
+                        var canvas = document.getElementById(canvasId);
+                        if (canvas && canvas.parentElement) {
+                            var overlay = document.createElement('div');
+                            overlay.id = noDataId;
+                            overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
+                            overlay.textContent = 'No data — waiting for PZEM-016';
+                            canvas.parentElement.style.position = 'relative';
+                            canvas.parentElement.appendChild(overlay);
+                        }
                     }
                 })
                 .catch(e => console.error('Energy history error:', e));
@@ -5071,7 +5520,9 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function loadEnergyCompare(field) {
+        var compareRange = 'all';  // current compare range selection
+        function loadEnergyCompare(field, range) {
+            if (range) compareRange = range;
             var beforeChart, afterChart;
             if (field === 'energy_kwh') {
                 beforeChart = charts.energyCompareKwhBefore;
@@ -5082,7 +5533,7 @@ HTML_TEMPLATE = '''
             }
             if (!beforeChart || !afterChart) return;
 
-            fetch('/api/energy/compare?field=' + field)
+            fetch('/api/energy/compare?field=' + field + '&range=' + compareRange)
                 .then(r => r.json())
                 .then(result => {
                     var beforeData = result.before || [];
@@ -5124,6 +5575,15 @@ HTML_TEMPLATE = '''
                     if (result.recording) updateRecordingUI(result.recording);
                 })
                 .catch(e => console.error('Energy compare error:', e));
+        }
+
+        function setCompareRange(range, btn) {
+            compareRange = range;
+            // Toggle active class on range buttons
+            document.querySelectorAll('#compare-range-7d,#compare-range-30d,#compare-range-all').forEach(function(b){ b.classList.remove('active'); });
+            if (btn) btn.classList.add('active');
+            loadEnergyCompare('power');
+            loadEnergyCompare('energy_kwh');
         }
 
         // Listen for recording state changes from server
@@ -7096,6 +7556,11 @@ HTML_TEMPLATE = '''
                 }
 
                 // Real-time push to energy charts (so charts work even without InfluxDB)
+                // Remove "No Data" overlays once data arrives
+                ['powerChart','voltageChart','currentChart','kwhChart'].forEach(function(cid){
+                    var ov = document.getElementById('nodata-' + cid);
+                    if (ov) ov.remove();
+                });
                 var now = new Date();
                 var tStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
                 if (charts.energyPower && pwr >= 0) {
@@ -7577,6 +8042,11 @@ if __name__ == '__main__':
     # Start background camera detection thread
     detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
     detection_thread.start()
+    
+    # Start GA/PSO auto-optimization background thread
+    opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
+    opt_thread.start()
+    print(f"  [OPT] GA/PSO auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
     
