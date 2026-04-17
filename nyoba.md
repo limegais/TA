@@ -4948,100 +4948,11 @@ HTML_TEMPLATE = '''
             return (unit ? n.toFixed(2) + ' ' + unit : n.toFixed(2));
         }
 
-        function styleLineChart(chart, unit, showLegend) {
-            if (!chart) return;
-            // In Chart.js 4.x, directly replacing options sub-objects after creation causes
-            // "Recursion detected: callback->callback" errors due to internal resolver chains.
-            // Use chart.options property merging carefully — only set leaf properties.
-            try {
-                chart.options.responsive = true;
-                chart.options.maintainAspectRatio = true;
-                chart.options.animation = false;
-                chart.options.interaction = { mode: 'index', intersect: false };
+        // styleLineChart removed — all styling moved into makeOpts/makeEnergyOpts at chart creation
+        // Mutating chart.options post-creation causes _scriptable recursion in Chart.js 4.x
 
-                // Plugins — safe to replace since Chart.js re-resolves them
-                chart.options.plugins = chart.options.plugins || {};
-                chart.options.plugins.legend = {
-                    display: !!showLegend,
-                    labels: {
-                        color: '#94a3b8',
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                        padding: 14,
-                        font: { size: 12, weight: '600' }
-                    }
-                };
-                chart.options.plugins.tooltip = {
-                    enabled: true,
-                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                    titleColor: '#f8fafc',
-                    bodyColor: '#e2e8f0',
-                    borderColor: 'rgba(148,163,184,0.35)',
-                    borderWidth: 1,
-                    displayColors: true,
-                    callbacks: {
-                        label: function(ctx) {
-                            const label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
-                            return label + ': ' + formatChartValue(ctx.parsed.y, unit);
-                        },
-                        title: function(items) {
-                            return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
-                        }
-                    }
-                };
-
-                // Scales — update leaf properties only, do NOT replace the scale objects
-                if (chart.options.scales && chart.options.scales.x) {
-                    chart.options.scales.x.grid = { color: 'rgba(148,163,184,0.12)' };
-                    chart.options.scales.x.ticks = { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 };
-                }
-                if (chart.options.scales && chart.options.scales.y) {
-                    chart.options.scales.y.grid = { color: 'rgba(148,163,184,0.14)' };
-                    chart.options.scales.y.ticks = {
-                        color: '#94a3b8',
-                        callback: function(value) {
-                            return unit ? (Number(value).toFixed(1) + ' ' + unit) : Number(value).toFixed(1);
-                        }
-                    };
-                }
-
-                if (chart.data && Array.isArray(chart.data.datasets)) {
-                    chart.data.datasets.forEach(function(ds) {
-                        ds.borderWidth = 2.8;
-                        ds.tension = 0.35;
-                        ds.pointRadius = 4.4;
-                        ds.pointHoverRadius = 7.5;
-                        ds.pointBorderWidth = 1.6;
-                        ds.pointBorderColor = '#ffffff';
-                        ds.hitRadius = 10;
-                        ds.hoverBorderWidth = 2;
-                    });
-                }
-                chart.update('none');  // 'none' mode skips animation to avoid callback recursion
-            } catch(e) {
-                console.warn('styleLineChart error (non-fatal):', e.message);
-            }
-        }
-
-        function applyChartGradients() {
-            const setGradient = function(chart, datasetIndex, top, bottom) {
-                if (!chart || !chart.ctx || !chart.chartArea || !chart.data || !chart.data.datasets || !chart.data.datasets[datasetIndex]) return;
-                const g = chart.ctx.createLinearGradient(0, chart.chartArea.top, 0, chart.chartArea.bottom);
-                g.addColorStop(0, top);
-                g.addColorStop(1, bottom);
-                chart.data.datasets[datasetIndex].backgroundColor = g;
-            };
-
-            setGradient(charts.energyPower, 0, 'rgba(239,68,68,0.34)', 'rgba(239,68,68,0.03)');
-            setGradient(charts.energyVoltage, 0, 'rgba(59,130,246,0.34)', 'rgba(59,130,246,0.03)');
-            setGradient(charts.energyCurrent, 0, 'rgba(245,158,11,0.34)', 'rgba(245,158,11,0.03)');
-            setGradient(charts.energyKwh, 0, 'rgba(16,185,129,0.34)', 'rgba(16,185,129,0.03)');
-            setGradient(charts.energy, 0, 'rgba(168,85,247,0.34)', 'rgba(168,85,247,0.03)');
-            setGradient(charts.energyCompareBefore, 0, 'rgba(245,158,11,0.30)', 'rgba(245,158,11,0.02)');
-            setGradient(charts.energyCompareAfter, 0, 'rgba(16,185,129,0.30)', 'rgba(16,185,129,0.02)');
-            setGradient(charts.energyCompareKwhBefore, 0, 'rgba(245,158,11,0.30)', 'rgba(245,158,11,0.02)');
-            setGradient(charts.energyCompareKwhAfter, 0, 'rgba(16,185,129,0.30)', 'rgba(16,185,129,0.02)');
-        }
+        // Gradients removed — CanvasGradient objects cause _scriptable recursion in Chart.js 4.x
+        // Static rgba() backgroundColor set at chart creation provides the fill effect
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
@@ -5110,6 +5021,41 @@ HTML_TEMPLATE = '''
                 return opts;
             }
 
+            // Energy-specific options with tooltip formatting and styled axes
+            function makeEnergyOpts(unit) {
+                return {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                            titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0',
+                            borderColor: 'rgba(148,163,184,0.35)',
+                            borderWidth: 1,
+                            displayColors: true,
+                            callbacks: {
+                                label: function(ctx) {
+                                    var label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                                    return label + ': ' + formatChartValue(ctx.parsed.y, unit);
+                                },
+                                title: function(items) {
+                                    return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.12)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' } }
+                    }
+                };
+            }
+
             charts.temp = new Chart(document.getElementById('tempChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Temperature (\u00b0C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
@@ -5136,27 +5082,27 @@ HTML_TEMPLATE = '''
             });
 
             charts.energy = new Chart(document.getElementById('energyChart'), {
-                type: 'line', options: makeOpts(false),
+                type: 'line', options: makeEnergyOpts('kWh/day'),
                 data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
-                type: 'line', options: makeOpts(false),
+                type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
-                type: 'line', options: makeOpts(false),
+                type: 'line', options: makeEnergyOpts('V'),
                 data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
-                type: 'line', options: makeOpts(false),
+                type: 'line', options: makeEnergyOpts('A'),
                 data: { labels: [], datasets: [{ label: 'Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                type: 'line', options: makeOpts(false),
+                type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
@@ -5217,31 +5163,7 @@ HTML_TEMPLATE = '''
                 }
             });
 
-            // Make energy charts visually richer and more informative.
-            styleLineChart(charts.energyPower, 'W', false);
-            styleLineChart(charts.energyVoltage, 'V', false);
-            styleLineChart(charts.energyKwh, 'kWh', false);
-            styleLineChart(charts.energy, 'kWh/day', false);
-            // Energy compare charts already styled in their init above
-
-            // Apply gradients after chart area is computed.
-            setTimeout(function() {
-                try {
-                    applyChartGradients();
-                    [
-                        charts.energyPower,
-                        charts.energyVoltage,
-                        charts.energyKwh,
-                        charts.energy,
-                        charts.energyCompareBefore,
-                        charts.energyCompareAfter,
-                        charts.energyCompareKwhBefore,
-                        charts.energyCompareKwhAfter
-                    ].forEach(function(c) { if (c) c.update('none'); });
-                } catch (e) {
-                    console.error('[CHART] gradient apply error:', e);
-                }
-            }, 60);
+            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -5458,7 +5380,6 @@ HTML_TEMPLATE = '''
                         chart.data.labels = data.map(d => d.time);
                         const values = data.map(d => parseFloat(d.value || 0));
                         chart.data.datasets[0].data = values;
-                        try { applyChartGradients(); } catch(e) {}
                         chart.update('none');
                         updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
                     } else {
@@ -5727,7 +5648,7 @@ HTML_TEMPLATE = '''
                 // Chart.js often needs a resize pass when canvas was initialized in a hidden page.
                 setTimeout(function() {
                     try {
-                        applyChartGradients();
+
                         Object.keys(charts).forEach(function(k) {
                             if (charts[k] && typeof charts[k].resize === 'function') {
                                 charts[k].resize();
