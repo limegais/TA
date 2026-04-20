@@ -11,6 +11,9 @@ import time
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import random
+import math
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -39,8 +42,401 @@ active_alerts = deque(maxlen=50)
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
 occupancy_feedback = deque(maxlen=200)
 
-# Energy Phase: 'before' = sebelum adaptive AC, 'after' = sesudah adaptive AC
-energy_phase = 'before'
+# Energy Phase: 'before' / 'after' / 'idle'
+energy_phase = 'idle'
+energy_recording = {
+    'before': {'active': False, 'start': None, 'end': None},
+    'after': {'active': False, 'start': None, 'end': None}
+}
+
+# Persist energy_recording to disk so it survives server restart
+ENERGY_RECORDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'energy_recording.json')
+
+def save_energy_recording():
+    """Save energy_recording state to JSON file"""
+    try:
+        with open(ENERGY_RECORDING_FILE, 'w') as f:
+            json.dump({'phase': energy_phase, 'recording': energy_recording}, f)
+    except Exception as e:
+        print(f"[WARN] Save energy recording failed: {e}")
+
+def load_energy_recording():
+    """Load energy_recording state from JSON file"""
+    global energy_phase, energy_recording
+    try:
+        if os.path.exists(ENERGY_RECORDING_FILE):
+            with open(ENERGY_RECORDING_FILE, 'r') as f:
+                data = json.load(f)
+            energy_phase = data.get('phase', 'idle')
+            rec = data.get('recording', {})
+            for phase in ['before', 'after']:
+                if phase in rec:
+                    energy_recording[phase] = rec[phase]
+            print(f"[OK] Loaded energy recording state: phase={energy_phase}")
+    except Exception as e:
+        print(f"[WARN] Load energy recording failed: {e}")
+
+load_energy_recording()
+
+# ==================== GA/PSO OPTIMIZATION ENGINE (embedded) ====================
+# Optimization bounds
+OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
+OPT_FAN_MIN, OPT_FAN_MAX = 1, 3
+OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
+
+# Live sensor data for fitness calculation
+opt_sensor_data = {
+    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False, 'lux': 200,
+    'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
+    'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default'
+}
+
+# Auto optimization config
+AUTO_OPT_INTERVAL = 600  # seconds between optimization cycles
+optimization_lock = threading.Lock()
+optimization_run_count = 0
+last_opt_results = {
+    'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
+    'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
+}
+
+ga_params = {'population_size': 20, 'generations': 30, 'mutation_rate': 0.25, 'crossover_rate': 0.8, 'elitism_ratio': 0.2}
+pso_params = {'swarm_size': 40, 'iterations': 120, 'w': 0.9, 'c1': 2.0, 'c2': 2.0}
+
+def _gaussian_score(value, target, sigma, max_score):
+    return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
+
+def _get_time_period():
+    hour = datetime.now().hour
+    if 6 <= hour < 12: return 'morning'
+    elif 12 <= hour < 17: return 'afternoon'
+    elif 17 <= hour < 22: return 'evening'
+    else: return 'night'
+
+def _get_temp_uniformity():
+    temps = [opt_sensor_data.get(k, 0) for k in ('temp1', 'temp2', 'temp3') if opt_sensor_data.get(k, 0) > 0]
+    if len(temps) < 2: return 1.0
+    return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
+
+def calculate_ac_fitness(temp_set, fan_speed):
+    temp_room = opt_sensor_data['temperature']
+    humidity = opt_sensor_data['humidity']
+    person_detected = opt_sensor_data['person_detected']
+    temp_trend = opt_sensor_data.get('temp_trend', 0.0)
+    time_period = _get_time_period()
+    fitness = 0.0
+    if person_detected:
+        target_map = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
+        sigma_map = {'morning': 2.0, 'afternoon': 1.5, 'evening': 2.0, 'night': 2.5}
+    else:
+        target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
+        sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
+    target_temp = target_map.get(time_period, 25.0)
+    sigma = sigma_map.get(time_period, 2.0)
+    trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
+    adjusted_target = target_temp + trend_offset
+    fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
+    if humidity > 60:
+        excess_factor = min(1.0, (humidity - 60) / 30.0)
+        dehumid_target_temp = 24.0 - excess_factor * 2.0
+        fitness += _gaussian_score(temp_set, dehumid_target_temp, 3.0, 10.0) + (fan_speed - 1) / 2.0 * 5.0 * excess_factor
+    elif humidity < 40:
+        dry_factor = min(1.0, (40 - humidity) / 20.0)
+        fitness += (15.0 * (1 - dry_factor * 0.3)) if temp_set >= 25 else _gaussian_score(temp_set, 26.0, 3.0, 15.0) * (1 - dry_factor)
+    else:
+        fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
+    temp_gap = abs(temp_room - temp_set)
+    ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
+    fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
+    ac_power = (30.0 - temp_set) * 50.0 + fan_speed * 30.0
+    max_power = (30.0 - 16.0) * 50.0 + 3 * 30.0
+    energy_ratio = 1.0 - (ac_power / max_power)
+    fitness += energy_ratio * (5.0 if person_detected else 15.0)
+    uniformity = _get_temp_uniformity()
+    if uniformity < 0.7 and fan_speed >= 2:
+        fitness += 8.0 * (1 - uniformity) * (fan_speed / 3.0)
+    elif uniformity >= 0.7:
+        fitness += 8.0 * uniformity
+    if temp_trend > 0.3 and temp_set <= target_temp - 1:
+        fitness += min(7.0, temp_trend * 5.0)
+    elif temp_trend < -0.3 and temp_set >= target_temp:
+        fitness += min(7.0, abs(temp_trend) * 5.0)
+    else:
+        fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
+    if not person_detected and temp_set < 24:
+        fitness -= (24.0 - temp_set) * 3.0
+    if temp_set < 18 and fan_speed == 3:
+        fitness -= 10.0
+    return max(0.0, round(fitness, 2))
+
+def calculate_lamp_fitness(brightness):
+    ambient_lux = opt_sensor_data['lux']
+    person_detected = opt_sensor_data['person_detected']
+    fitness = 0
+    lamp_lux = brightness * 5
+    total_lux = ambient_lux + lamp_lux
+    if person_detected:
+        if 300 <= total_lux <= 500: fitness += 50
+        elif 200 <= total_lux <= 600: fitness += 35
+        elif total_lux < 200: fitness += max(0, 50 - (200 - total_lux) * 0.2)
+        else: fitness += max(0, 50 - (total_lux - 600) * 0.1)
+    else:
+        if brightness <= 5: fitness += 50
+        elif brightness <= 20: fitness += 35
+        else: fitness += max(0, 50 - brightness * 0.5)
+    lamp_power = brightness * 0.5
+    energy_ratio = 1 - (lamp_power / 50.0)
+    fitness += energy_ratio * (10 if person_detected else 30)
+    if person_detected:
+        if ambient_lux >= 400: fitness += 20 if brightness <= 20 else (12 if brightness <= 40 else 0)
+        elif ambient_lux >= 200: fitness += 20 if 20 <= brightness <= 60 else 8
+        else: fitness += 20 if brightness >= 60 else (12 if brightness >= 40 else 5)
+    else:
+        if brightness <= 5: fitness += 20
+    return max(0, round(fitness, 2))
+
+def update_opt_sensor_data(**kwargs):
+    for k, v in kwargs.items():
+        if v is not None and k in opt_sensor_data:
+            opt_sensor_data[k] = v
+    if 'temperature' in kwargs and kwargs['temperature'] is not None:
+        opt_sensor_data['data_source'] = 'mqtt'
+        now = time.time()
+        opt_sensor_data['temp_history'].append((now, kwargs['temperature']))
+        if len(opt_sensor_data['temp_history']) > 10:
+            opt_sensor_data['temp_history'] = opt_sensor_data['temp_history'][-10:]
+        h = opt_sensor_data['temp_history']
+        if len(h) >= 3:
+            dt_min = (h[-1][0] - h[0][0]) / 60.0
+            if dt_min > 0.1:
+                opt_sensor_data['temp_trend'] = round((h[-1][1] - h[0][1]) / dt_min, 3)
+
+def fetch_sensor_data_from_db(time_range_minutes=30):
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+        ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
+        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux") |> mean()'
+        for table in query_api.query(ac_query):
+            for rec in table.records:
+                if rec.get_field() == 'temperature' and rec.get_value() is not None:
+                    opt_sensor_data['temperature'] = round(float(rec.get_value()), 1)
+                elif rec.get_field() == 'humidity' and rec.get_value() is not None:
+                    opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
+        for table in query_api.query(lamp_query):
+            for rec in table.records:
+                if rec.get_field() == 'lux' and rec.get_value() is not None:
+                    opt_sensor_data['lux'] = round(float(rec.get_value()), 1)
+        opt_sensor_data['data_source'] = 'influxdb'
+        client.close()
+    except Exception as e:
+        print(f"[OPT] InfluxDB fetch failed: {e}, using MQTT data")
+        opt_sensor_data['data_source'] = 'mqtt_fallback'
+
+def run_ga_optimization(verbose=False):
+    pop_size = ga_params['population_size']
+    generations = ga_params['generations']
+    mutation_rate = ga_params['mutation_rate']
+    crossover_rate = ga_params['crossover_rate']
+    elitism_ratio = ga_params.get('elitism_ratio', 0.2)
+    elite_count = max(2, int(pop_size * elitism_ratio))
+    seed_solutions = []
+    if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan']])
+
+    def create_ind():
+        return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1), random.randint(OPT_FAN_MIN, OPT_FAN_MAX)]
+
+    population = []
+    for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
+        population.append([float(s[0]), int(s[1])])
+        if len(population) < pop_size:
+            population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
+                               max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1])))])
+    while len(population) < pop_size:
+        population.append(create_ind())
+    population = population[:pop_size]
+
+    best_solution, best_fitness = None, 0
+    fitness_history = []
+    stagnation_counter, stagnation_limit = 0, max(5, generations // 4)
+    prev_best = 0
+
+    for gen in range(generations):
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+        paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
+        population = [p[0] for p in paired]
+        scores = [p[1] for p in paired]
+        if scores[0] > best_fitness:
+            best_fitness = scores[0]
+            best_solution = population[0][:]
+        fitness_history.append(best_fitness)
+        improvement = best_fitness - prev_best
+        stagnation_counter = stagnation_counter + 1 if improvement < 0.01 else 0
+        prev_best = best_fitness
+        boost = False
+        if stagnation_counter >= stagnation_limit:
+            for i in range(max(2, pop_size // 4)):
+                population[-(i + 1)] = create_ind()
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+            boost = True
+            stagnation_counter = 0
+        if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
+            break
+        next_pop = [ind[:] for ind in population[:elite_count]]
+        # tournament selection
+        selected = []
+        for _ in range(len(population)):
+            contestants = random.sample(range(len(population)), min(3, len(population)))
+            best_idx = max(contestants, key=lambda i: scores[i])
+            selected.append(population[best_idx][:])
+        while len(next_pop) < pop_size:
+            p1, p2 = random.sample(selected, 2)
+            # BLX-alpha crossover
+            if random.random() < crossover_rate:
+                alpha = 0.3
+                lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
+                span = hi - lo
+                c1t = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, random.uniform(lo - alpha * span, hi + alpha * span))), 1)
+                c2t = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, random.uniform(lo - alpha * span, hi + alpha * span))), 1)
+                c1f = p1[1] if random.random() < 0.5 else p2[1]
+                c2f = p2[1] if random.random() < 0.5 else p1[1]
+                child1, child2 = [c1t, c1f], [c2t, c2f]
+            else:
+                child1, child2 = p1[:], p2[:]
+            # mutate
+            progress = gen / max(1, generations)
+            adaptive_rate = mutation_rate * (1.0 - 0.7 * progress)
+            if boost: adaptive_rate = min(0.9, adaptive_rate * 2.5)
+            for child in [child1, child2]:
+                if random.random() < adaptive_rate:
+                    step = (2.0 * (1 - progress) + 0.5) * (2.0 if boost else 1.0)
+                    child[0] = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, child[0] + random.gauss(0, step))), 1)
+                if random.random() < adaptive_rate:
+                    child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
+            next_pop.append(child1)
+            if len(next_pop) < pop_size:
+                next_pop.append(child2)
+        population = next_pop[:pop_size]
+
+    # brute-force validation
+    bf_best_fit, bf_best_sol = -1, None
+    for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
+        for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
+            fit = calculate_ac_fitness(t, f)
+            if fit > bf_best_fit:
+                bf_best_fit, bf_best_sol = fit, [t, f]
+    if bf_best_fit > best_fitness:
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1]]
+        best_fitness = bf_best_fit
+    final = [int(round(best_solution[0])), best_solution[1]]
+    return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
+
+def run_pso_optimization(verbose=False):
+    swarm_size = pso_params['swarm_size']
+    iterations = pso_params['iterations']
+    w, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
+    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-10, 10)] for _ in range(swarm_size)]
+    pb_pos = [p[:] for p in positions]
+    pb_fit = [calculate_lamp_fitness(p[0]) for p in positions]
+    g_idx = pb_fit.index(max(pb_fit))
+    g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+    fitness_history = []
+    for it in range(iterations):
+        cur_w = w - (w - 0.4) * (it / iterations)
+        for i in range(swarm_size):
+            r1, r2 = random.random(), random.random()
+            velocities[i][0] = cur_w * velocities[i][0] + c1 * r1 * (pb_pos[i][0] - positions[i][0]) + c2 * r2 * (g_pos[0] - positions[i][0])
+            max_vel = 20
+            velocities[i][0] = max(-max_vel, min(max_vel, velocities[i][0]))
+            positions[i][0] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][0] + velocities[i][0]))))
+            fit = calculate_lamp_fitness(positions[i][0])
+            if fit > pb_fit[i]:
+                pb_fit[i], pb_pos[i] = fit, positions[i][:]
+            if fit > g_fit:
+                g_fit, g_pos = fit, positions[i][:]
+        fitness_history.append(g_fit)
+    return g_pos, g_fit, fitness_history
+
+def run_optimization_cycle(algo='both'):
+    global optimization_run_count
+    if not optimization_lock.acquire(blocking=False):
+        print("[OPT] Already running, skipping")
+        return False
+    try:
+        socketio.emit('ml_status', {'status': 'running', 'algorithm': algo})
+        fetch_sensor_data_from_db(30)
+        if algo in ('ga', 'both'):
+            sol, fit, hist, bf = run_ga_optimization()
+            last_opt_results['ga'] = {'fitness': fit, 'temp': sol[0], 'fan': sol[1], 'stats': hist, 'brute_force': bf}
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} fitness={fit:.2f}")
+        if algo in ('pso', 'both'):
+            sol, fit, hist = run_pso_optimization()
+            last_opt_results['pso'] = {'fitness': fit, 'brightness': sol[0], 'stats': hist}
+            print(f"[PSO] Done: {sol[0]}% fitness={fit:.2f}")
+        optimization_run_count += 1
+        # Update mqtt_data system
+        mqtt_data['system'].update({
+            'ga_fitness': last_opt_results['ga']['fitness'],
+            'pso_fitness': last_opt_results['pso']['fitness'],
+            'optimization_runs': optimization_run_count,
+            'ga_temp': last_opt_results['ga']['temp'],
+            'ga_fan': last_opt_results['ga']['fan'],
+            'pso_brightness': last_opt_results['pso']['brightness'],
+            'ga_history': last_opt_results['ga'].get('stats', []),
+            'pso_history': last_opt_results['pso'].get('stats', [])
+        })
+        socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+        # Write to InfluxDB
+        write_to_influxdb('optimization_result', {
+            'ga_fitness': float(last_opt_results['ga']['fitness']),
+            'pso_fitness': float(last_opt_results['pso']['fitness']),
+            'ga_temp': float(last_opt_results['ga']['temp']),
+            'ga_fan': float(last_opt_results['ga']['fan']),
+            'pso_brightness': float(last_opt_results['pso']['brightness']),
+            'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
+        })
+        # Auto-apply if ADAPTIVE mode
+        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_temp = last_opt_results['ga']['temp']
+            opt_fan = last_opt_results['ga']['fan']
+            if 16 <= opt_temp <= 30 and opt_fan >= 1:
+                ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            opt_b = last_opt_results['pso']['brightness']
+            if opt_b > 0:
+                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_b), 'source': 'adaptive'}))
+        socketio.emit('ml_status', {
+            'status': 'completed', 'algorithm': algo,
+            'ga_fitness': last_opt_results['ga']['fitness'],
+            'pso_fitness': last_opt_results['pso']['fitness'],
+            'optimization_count': optimization_run_count,
+            'ga_solution': {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']},
+            'pso_solution': {'brightness': last_opt_results['pso']['brightness']},
+            'ga_history': last_opt_results['ga'].get('stats', []),
+            'pso_history': last_opt_results['pso'].get('stats', [])
+        })
+        return True
+    except Exception as e:
+        print(f"[OPT] Error: {e}")
+        import traceback; traceback.print_exc()
+        socketio.emit('ml_status', {'status': 'error', 'message': str(e)})
+        return False
+    finally:
+        optimization_lock.release()
+
+def optimization_auto_loop():
+    """Background thread: auto-optimize every AUTO_OPT_INTERVAL seconds"""
+    time.sleep(10)  # wait for Flask + MQTT to start
+    print(f"[OPT] Auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    while True:
+        try:
+            run_optimization_cycle('both')
+        except Exception as e:
+            print(f"[OPT] Auto cycle error: {e}")
+        time.sleep(AUTO_OPT_INTERVAL)
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -108,24 +504,22 @@ mqtt_status = {
     'broker': 'localhost:1883'
 }
 
+# Runtime energy history fallback (used when Influx query returns no points)
+energy_runtime_history = deque(maxlen=5000)
+
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
     """Write data point to InfluxDB"""
     try:
-        print(f"[DB] Attempting to write to InfluxDB: {measurement}")
-        print(f"   URL: {INFLUX_URL}, ORG: {INFLUX_ORG}, BUCKET: {INFLUX_BUCKET}")
-        
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = client.write_api(write_options=SYNCHRONOUS)
         
         point = Point(measurement).time(datetime.utcnow(), WritePrecision.NS)
         
-        # Add tags if provided
         if tags:
             for key, value in tags.items():
                 point = point.tag(key, str(value))
         
-        # Add fields
         for key, value in fields.items():
             if isinstance(value, (int, float)):
                 point = point.field(key, float(value))
@@ -134,108 +528,57 @@ def write_to_influxdb(measurement, fields, tags=None):
             else:
                 point = point.field(key, str(value))
         
-        print(f"   Data: {fields}")
-        
-        # Write to InfluxDB
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
         write_api.close()
         client.close()
-        print(f"[OK] Successfully written to InfluxDB: {measurement}")
         return True
     except Exception as e:
         print(f"[ERROR] InfluxDB Write Error ({measurement}): {str(e)}")
-        import traceback
-        traceback.print_exc()
         return False
 
 def save_sensor_data(temperature, humidity, heat_index):
-    """Save temperature and humidity data to InfluxDB"""
     try:
-        result = write_to_influxdb(
-            measurement="ac_sensor",
-            fields={
-                "temperature": float(temperature),
-                "humidity": float(humidity),
-                "heat_index": float(heat_index)
-            },
-            tags={"device": "esp32_ac", "location": "room"}
-        )
-        if result:
-            print(f"[OK] Sensor data saved: {temperature}°C, {humidity}%")
+        write_to_influxdb('ac_sensor', {
+            'temperature': float(temperature), 'humidity': float(humidity), 'heat_index': float(heat_index)
+        }, tags={'device': 'esp32_ac', 'location': 'room'})
     except Exception as e:
-        print(f"[ERROR] Error saving sensor data: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f'[ERROR] save_sensor_data: {e}')
 
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
-    """Save lamp sensor data to InfluxDB (3 lamps)"""
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
-        result = write_to_influxdb(
-            measurement="lamp_sensor",
-            fields={
-                "lux1": float(lux1), "lux2": float(lux2), "lux3": float(lux3), "lux_avg": float(lux_avg),
-                "brightness1": float(brightness1), "brightness2": float(brightness2), "brightness3": float(brightness3), "brightness_avg": float(bright_avg),
-                "motion": bool(motion)
-            },
-            tags={"device": "esp32_lamp", "location": "room"}
-        )
-        if result:
-            print(f"[OK] Lamp data saved: lux=[{lux1},{lux2},{lux3}] avg={lux_avg:.1f}, bright=[{brightness1},{brightness2},{brightness3}]")
+        write_to_influxdb('lamp_sensor', {
+            'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
+            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
+            'motion': bool(motion)
+        }, tags={'device': 'esp32_lamp', 'location': 'room'})
     except Exception as e:
-        print(f"[ERROR] Error saving lamp data: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f'[ERROR] save_lamp_data: {e}')
 
 def save_person_detection(person_count, confidence):
-    """Save person detection data to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="camera_detection",
-            fields={
-                "person_count": int(person_count),
-                "confidence": float(confidence),
-                "person_detected": bool(person_count > 0)
-            },
-            tags={"device": "camera_yolo", "model": "yolov8n"}
-        )
-        if person_count > 0:
-            print(f"[OK] Detection saved: {person_count} person(s), {confidence:.2f} confidence")
+        write_to_influxdb('camera_detection', {
+            'person_count': int(person_count), 'confidence': float(confidence), 'person_detected': bool(person_count > 0)
+        }, tags={'device': 'camera_yolo', 'model': 'yolov8n'})
     except Exception as e:
-        print(f"[ERROR] Error saving detection data: {e}")
+        print(f'[ERROR] save_person_detection: {e}')
 
 def save_ir_command(device, command, signal_length):
-    """Save IR remote command to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="ir_remote",
-            fields={
-                "command": str(command),
-                "signal_length": int(signal_length),
-                "learned": True
-            },
-            tags={"device": str(device), "type": "ir_code"}
-        )
-        print(f"[OK] IR command saved: {device} - {command}")
+        write_to_influxdb('ir_remote', {
+            'command': str(command), 'signal_length': int(signal_length), 'learned': True
+        }, tags={'device': str(device), 'type': 'ir_code'})
     except Exception as e:
-        print(f"[ERROR] Error saving IR command: {e}")
+        print(f'[ERROR] save_ir_command: {e}')
 
 def save_ac_control(ac_temp, fan_speed, ac_state):
-    """Save AC control settings to InfluxDB"""
     try:
-        write_to_influxdb(
-            measurement="ac_sensor",
-            fields={
-                "ac_temp": float(ac_temp),
-                "fan_speed": int(fan_speed),
-                "ac_state": str(ac_state)
-            },
-            tags={"device": "esp32_ac", "type": "control"}
-        )
-        print(f"[OK] AC control saved: {ac_temp}°C, Fan: {fan_speed}, State: {ac_state}")
+        write_to_influxdb('ac_sensor', {
+            'ac_temp': float(ac_temp), 'fan_speed': int(fan_speed), 'ac_state': str(ac_state)
+        }, tags={'device': 'esp32_ac', 'type': 'control'})
     except Exception as e:
-        print(f"[ERROR] Error saving AC control: {e}")
+        print(f'[ERROR] save_ac_control: {e}')
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -266,8 +609,6 @@ def load_yolo_model():
         
     except Exception as e:
         print(f"[ERROR] YOLO loading error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                            'msg': f'YOLO error: {str(e)}', 'level': 'error'})
         return False
@@ -308,8 +649,6 @@ def detect_persons(frame):
             
     except Exception as e:
         print(f"[ERROR] YOLO detection error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return frame, 0, 0.0, []
 
 def _person_present_recently():
@@ -344,17 +683,13 @@ def handle_person_based_control(person_count):
             _last_person_confirmed_time = time.time()  # Record time person was confirmed
             _no_person_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
-            _auto_off_time = 0.0  # Clear cooldown
-            print(f"[OK] Person RE-CONFIRMED after {_person_consecutive_frames} frames (cooldown cleared)")
+            _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
-            if int(_person_consecutive_frames) % 30 == 0:  # Print every ~20s
-                print(f"[WAIT] Person detected but cooldown active ({int(cooldown_left)}s left) — need sustained presence")
         
         # Auto ON: person confirmed AND cooldown elapsed
         if _person_consecutive_frames >= required_frames and not in_cooldown and not _auto_off_triggered:
             if mqtt_data['ac'].get('ac_state') == 'OFF':
-                print(f"[ON] Person confirmed ({_person_consecutive_frames} frames, req={required_frames}) -> Auto turning ON AC")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_ON",
@@ -381,10 +716,9 @@ def handle_person_based_control(person_count):
         # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
         elapsed = time.time() - _no_person_start_time
         if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
-            _auto_off_triggered = True  # Always set flag to block adaptive SET
-            _auto_off_time = time.time()  # Start cooldown timer
+            _auto_off_triggered = True
+            _auto_off_time = time.time()
             if mqtt_data['ac'].get('ac_state') != 'OFF':
-                print(f"[OFF] No person for {int(elapsed)}s -> Auto turning OFF AC (cooldown {AUTO_OFF_COOLDOWN}s starts)")
                 try:
                     mqtt_client.publish("smartroom/ac/control", json.dumps({
                         "action": "POWER_OFF",
@@ -405,23 +739,38 @@ def handle_person_based_control(person_count):
 def get_camera():
     global camera
     if camera is None:
-        # Auto-detect camera: try index 0-4
+        # Auto-detect camera: try index 0-4, skip non-capture V4L2 devices
         for idx in range(5):
-            print(f"[CAM] Trying camera index {idx}...")
-            cam = cv2.VideoCapture(idx)
-            if cam.isOpened():
-                # Verify it can actually capture a frame
+            dev_path = f'/dev/video{idx}'
+            # On Linux, check if device exists and is a real capture device
+            if os.path.exists('/dev'):
+                if not os.path.exists(dev_path):
+                    continue
+                # Use v4l2-ctl to verify it's a capture device (skip IR/metadata devices)
+                try:
+                    import subprocess
+                    result = subprocess.run(['v4l2-ctl', '-d', dev_path, '--all'],
+                                          capture_output=True, text=True, timeout=3)
+                    if 'Video Capture' not in result.stdout:
+                        print(f"[CAM] Skipping {dev_path} (not a video capture device)")
+                        continue
+                except Exception:
+                    pass  # v4l2-ctl not available, try anyway
+            try:
+                cam = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            except Exception:
+                cam = cv2.VideoCapture(idx)
+            if cam is not None and cam.isOpened():
                 ret, test_frame = cam.read()
                 if ret and test_frame is not None:
                     camera = cam
-                    print(f"[OK] Camera found at index {idx}")
+                    print(f"[CAM] Opened /dev/video{idx} successfully")
                     break
                 else:
                     cam.release()
-                    print(f"   Index {idx}: opened but can't read frames")
             else:
-                cam.release()
-                print(f"   Index {idx}: not available")
+                if cam is not None:
+                    cam.release()
         
         if camera is not None and camera.isOpened():
             # 720p for best FPS — YOLO only uses 640px input anyway
@@ -448,7 +797,6 @@ def get_camera():
             actual_fps = int(camera.get(cv2.CAP_PROP_FPS))
             
             mqtt_data['camera']['status'] = 'active'
-            print(f"[OK] Camera initialized: {actual_w}x{actual_h} @ {actual_fps}fps")
             log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 
                                'msg': f'Camera: {actual_w}x{actual_h} @ {actual_fps}fps', 
                                'level': 'success'})
@@ -464,7 +812,9 @@ def camera_detection_loop():
     _detection_thread_running = True
     last_save_time = time.time()
     save_interval = 5
-    retry_delay = 2
+    retry_delay = 5
+    camera_fail_count = 0
+    MAX_CAMERA_RETRIES = 10
     frame_count = 0
     YOLO_EVERY_N = 4  # Run YOLO every 4th frame — other frames just capture+encode
     last_person_count = 0
@@ -473,7 +823,6 @@ def camera_detection_loop():
     fps_counter = 0
     fps_timer = time.time()
     
-    print("[CAM] Camera detection background thread started (runs 24/7)")
     last_camera_status_publish = 0  # Track last MQTT publish of camera status to ESP32
     CAMERA_STATUS_INTERVAL = 10     # Publish every 10 seconds
     
@@ -496,14 +845,21 @@ def camera_detection_loop():
                             camera.release()
                             camera = None
                         mqtt_data['camera']['status'] = 'reconnecting'
-                        print("[WARN] Camera read failed, will retry...")
             
-            # If no frame captured, wait and retry (lock is released)
+            # If no frame captured, wait and retry with increasing backoff
             if frame is None:
-                time.sleep(retry_delay)
+                camera_fail_count += 1
+                if camera_fail_count >= MAX_CAMERA_RETRIES:
+                    print(f"[CAM] No valid camera after {MAX_CAMERA_RETRIES} retries, pausing detection (retry in 60s)")
+                    mqtt_data['camera']['status'] = 'no_camera'
+                    time.sleep(60)
+                    camera_fail_count = 0  # Reset to try again
+                else:
+                    time.sleep(retry_delay)
                 continue
             
             mqtt_data['camera']['status'] = 'active'
+            camera_fail_count = 0  # Reset on successful frame
             frame_count += 1
             
             # Run YOLO only every Nth frame — other frames reuse last detection
@@ -585,12 +941,6 @@ def camera_detection_loop():
                 cv2.putText(frame, f'Persons Detected: {last_person_count}', (20, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             
-            # Debug: print timer status every 60 seconds
-            if _no_person_start_time is not None:
-                elapsed = time.time() - _no_person_start_time
-                if int(elapsed) % 60 < 1:
-                    print(f"[TIMER] No person timer: {int(elapsed)}s / {NO_PERSON_TIMEOUT_SECONDS}s | AC: {mqtt_data['ac'].get('ac_state')} | Mode: {mqtt_data['ac'].get('mode')}")
-            
             # Encode frame and store for video_feed consumers
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if ret:
@@ -607,11 +957,7 @@ def camera_detection_loop():
             
         except Exception as e:
             print(f"[ERROR] Detection loop error: {e}")
-            import traceback
-            traceback.print_exc()
             time.sleep(retry_delay)
-    
-    print("[STOP] Camera detection background thread stopped")
 
 def generate_frames():
     """Stream latest frames to /video_feed — reads from background thread"""
@@ -645,10 +991,6 @@ mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW I
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     global mqtt_status
-    print("\n" + "="*70)
-    print("  [MQTT] FLASK MQTT CONNECTION EVENT")
-    print("="*70)
-    
     is_success = False
     if hasattr(reason_code, 'is_failure'):
         is_success = not reason_code.is_failure
@@ -659,21 +1001,16 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         mqtt_status['connected'] = True
         mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
         mqtt_status['error'] = None
-        print("[OK] MQTT CONNECTED SUCCESSFULLY!")
-        
+        print("[OK] MQTT connected")
         client.subscribe("smartroom/#")
         client.subscribe("ir/#")
         client.subscribe("IR/#")
         client.subscribe("+/ir/#")
-        print("[OK] Subscribed to: smartroom/#, ir/#, IR/#, +/ir/#")
-        print("="*70 + "\n")
-        
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Connected!', 'level': 'success'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'MQTT Connected!', 'level': 'success'})
     else:
         mqtt_status['connected'] = False
         mqtt_status['error'] = f'Connection failed: {reason_code}'
         print(f"[ERROR] MQTT CONNECTION FAILED! RC={reason_code}")
-        print("="*70 + "\n")
 
 def on_message(client, userdata, msg):
     global ir_learning_mode, ir_learning_button, ir_learning_device, mqtt_status
@@ -683,61 +1020,24 @@ def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         
-        # Debug: Print ALL incoming MQTT messages with timestamp
-        print("\n" + "─"*70)
-        print(f"[MSG] [{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] MQTT Message Received")
-        print(f"Topic: {topic}")
-        print(f"Payload Length: {len(msg.payload)} bytes")
-        print(f"QoS: {msg.qos} | Retain: {msg.retain}")
-        
         # Broadcast to frontend for debugging
         try:
-            payload_str = msg.payload.decode()[:100]
             socketio.emit('mqtt_debug', {
                 'topic': topic,
-                'payload': payload_str,
+                'payload': msg.payload.decode()[:100],
                 'time': datetime.now().strftime('%H:%M:%S')
             })
-        except Exception as e:
+        except Exception:
             pass
         
-        # Try to parse as JSON first
+        # Parse JSON payload
         try:
-            full_payload_str = msg.payload.decode()  # Decode ONCE, use full string
+            full_payload_str = msg.payload.decode()
             payload = json.loads(full_payload_str)
-            # Don't print full payload (RAW IR codes are 1000+ chars), show summary
-            if isinstance(payload, dict) and 'code' in payload:
-                code_val = payload['code']
-                code_len = len(code_val) if isinstance(code_val, str) else 0
-                raw_count = code_val.count(',') + 1 if isinstance(code_val, str) and code_val.startswith('RAW:') else 0
-                print(f"   Data (JSON): code length={code_len} chars, RAW values={raw_count}")
-                print(f"   Code preview: {code_val[:80]}..." if code_len > 80 else f"   Code: {code_val}")
-            else:
-                print(f"   Data (JSON): {payload}")
-        except:
-            # If not JSON, treat as plain text
-            payload_text = msg.payload.decode()
-            print(f"   Data (Text): {payload_text[:200]}..." if len(payload_text) > 200 else f"   Data (Text): {payload_text}")
-            payload = {'raw': payload_text}
-        
-        # DEBUG: Check which condition will match
-        print(f"\n[ROUTE] Topic Routing Check:")
-        print(f"   'ac/sensors' in topic: {'ac/sensors' in topic}")
-        print(f"   'lamp/sensors' in topic: {'lamp/sensors' in topic}")
-        print(f"   'camera/detection' in topic: {'camera/detection' in topic}")
-        print(f"   'dashboard/state' in topic: {'dashboard/state' in topic}")
-        print(f"   'ml/result' in topic: {'ml/result' in topic}")
-        print(f"   'ac/mode' in topic: {'ac/mode' in topic}")
-        print(f"   'lamp/mode' in topic: {'lamp/mode' in topic}")
-        print(f"   'ir/learned' in topic: {'ir/learned' in topic}")
-        print(f"   'IR/learned' in topic.lower(): {'IR/learned' in topic.lower()}")
+        except Exception:
+            payload = {'raw': msg.payload.decode()}
         
         if 'ac/sensors' in topic:
-            print("[SENSOR] Processing AC Sensor Data:")
-            print(f"   Temperature: {payload.get('temperature', 0)}°C")
-            print(f"   Humidity: {payload.get('humidity', 0)}%")
-            print(f"   Heat Index: {payload.get('heat_index', 0)}°C")
-            
             mqtt_data['ac'].update({
                 'temperature': payload.get('temperature', 0),
                 'humidity': payload.get('humidity', 0),
@@ -756,23 +1056,16 @@ def on_message(client, userdata, msg):
                 'temp3': payload.get('temp3', 0),
                 'hum3': payload.get('hum3', 0),
             })
-            # Save sensor data to InfluxDB
-            print("   [DB] Saving to InfluxDB...")
-            save_sensor_data(
-                mqtt_data['ac']['temperature'],
-                mqtt_data['ac']['humidity'],
-                mqtt_data['ac']['heat_index']
+            save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
+            save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
+            # Feed sensor data to optimization engine
+            update_opt_sensor_data(
+                temperature=payload.get('temperature'), humidity=payload.get('humidity'),
+                temp1=payload.get('temp1'), hum1=payload.get('hum1'),
+                temp2=payload.get('temp2'), hum2=payload.get('hum2'),
+                temp3=payload.get('temp3'), hum3=payload.get('hum3')
             )
-            # Save AC control state
-            save_ac_control(
-                mqtt_data['ac']['ac_temp'],
-                mqtt_data['ac']['fan_speed'],
-                mqtt_data['ac']['ac_state']
-            )
-            print("   [OK] AC data updated in memory & InfluxDB")
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
-            print("   [WS] Sent to frontend via WebSocket")
-            # Track device status & check alerts
             device_last_seen['esp32_ac']['last_seen'] = datetime.now()
             device_last_seen['esp32_ac']['status'] = 'online'
             check_alert_rules()
@@ -795,6 +1088,7 @@ def on_message(client, userdata, msg):
             })
             # Save lamp data to InfluxDB
             save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
+            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1))
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -810,8 +1104,6 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            print(f"   [ENERGY] Energy: {mqtt_data['energy']['voltage']}V {mqtt_data['energy']['current']}A {mqtt_data['energy']['power']}W {mqtt_data['energy']['energy']}kWh")
-            # Save to InfluxDB for historical data (30 day retention)
             write_to_influxdb('energy_monitor', {
                 'voltage': float(mqtt_data['energy']['voltage']),
                 'current': float(mqtt_data['energy']['current']),
@@ -820,6 +1112,22 @@ def on_message(client, userdata, msg):
                 'frequency': float(mqtt_data['energy']['frequency']),
                 'power_factor': float(mqtt_data['energy']['pf'])
             }, tags={'device': 'pzem016', 'phase': energy_phase})
+
+            # Keep runtime ring-buffer so charts still work even if Influx has no data yet.
+            try:
+                energy_runtime_history.append({
+                    'ts': datetime.now(),
+                    'phase': energy_phase,
+                    'voltage': float(mqtt_data['energy']['voltage']),
+                    'current': float(mqtt_data['energy']['current']),
+                    'power': float(mqtt_data['energy']['power']),
+                    'energy_kwh': float(mqtt_data['energy']['energy']),
+                    'frequency': float(mqtt_data['energy']['frequency']),
+                    'power_factor': float(mqtt_data['energy']['pf'])
+                })
+            except Exception:
+                pass
+
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
             # Track device status
             device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
@@ -831,6 +1139,7 @@ def on_message(client, userdata, msg):
                 'confidence': payload.get('confidence', 0)
             })
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
+            update_opt_sensor_data(person_detected=payload.get('person_detected', False))
             # Track device status
             device_last_seen['camera']['last_seen'] = datetime.now()
             device_last_seen['camera']['status'] = 'online'
@@ -849,7 +1158,6 @@ def on_message(client, userdata, msg):
                 'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                 'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
             })
-            print(f"[ML] Optimization Update: GA={mqtt_data['system']['ga_fitness']:.2f} (AC: {mqtt_data['system']['ga_temp']}°C Fan:{mqtt_data['system']['ga_fan']}), PSO={mqtt_data['system']['pso_fitness']:.2f} (Lamp: {mqtt_data['system']['pso_brightness']}%)")
             socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
             # Write optimization history to InfluxDB
             write_to_influxdb('optimization_result', {
@@ -872,11 +1180,8 @@ def on_message(client, userdata, msg):
                         _last_adaptive_ac_apply = now
                         ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                        print(f"[ADAPTIVE] -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
-                    else:
-                        print(f"[ADAPTIVE] -> AC apply debounced ({5 - (now - _last_adaptive_ac_apply):.1f}s remaining)")
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                print(f"[ADAPTIVE] -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
+                pass
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
@@ -886,13 +1191,8 @@ def on_message(client, userdata, msg):
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
                         client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
-                        print(f"[ADAPTIVE] -> Applied to All Lamps: {opt_brightness}%")
-                    else:
-                        print(f"[ADAPTIVE] -> Lamp apply debounced")
         
         elif 'ml/status' in topic:
-            # ML optimization status from main.py (running/completed/error/busy)
-            print(f"[ML] ML Status: {payload.get('status', 'unknown')} ({payload.get('algorithm', '')})")
             socketio.emit('ml_status', payload)
             log_messages.append({
                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -916,9 +1216,7 @@ def on_message(client, userdata, msg):
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
-                    print(f"[ML] ML Completed -> Updated: GA={mqtt_data['system']['ga_fitness']:.2f}, PSO={mqtt_data['system']['pso_fitness']:.2f}")
-                    socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
-        
+                    
         elif 'ac/mode' in topic:
             mqtt_data['ac']['mode'] = payload.get('mode', 'ADAPTIVE')
             socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
@@ -928,115 +1226,42 @@ def on_message(client, userdata, msg):
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
         
         elif 'ir/learned' in topic or 'IR/learned' in topic.lower():
-            print("\n" + "="*70)
-            print("[IR] IR SIGNAL RECEIVED FROM ESP32!")
-            print("="*70)
-            print(f"Topic received: {topic}")
-            print(f"ir_learning_mode: {ir_learning_mode}")
-            print(f"ir_learning_button: {ir_learning_button}")
-            print(f"ir_learning_device: {ir_learning_device}")
-            
-            # Determine if this is a forwarded signal (ESP32 not in learn mode)
             esp32_status = payload.get('status', '') if isinstance(payload, dict) else ''
-            esp32_learning = payload.get('learning_mode', True) if isinstance(payload, dict) else True
-            print(f"ESP32 status: {esp32_status}")
-            print(f"ESP32 learning_mode: {esp32_learning}")
-            print("="*70)
             
-            # Handle different payload formats
             ir_code = ''
             device = ir_learning_device or 'remote'
+            button_name = ir_learning_button
             
-            # CRITICAL: Always use Flask's ir_learning_button (not ESP32's)
-            # because ESP32 might send "auto_captured" when not in its own learn mode
-            button_name = ir_learning_button  # Flask always knows the correct button
-            
-            # Format 1: {"button": "...", "code": "..."}
             if isinstance(payload, dict):
-                # Only use ESP32's button name if Flask doesn't have one set
                 if not button_name:
                     button_name = payload.get('button', '')
                 ir_code = payload.get('code', payload.get('ir_code', payload.get('raw', '')))
                 if not ir_learning_device:
                     device = payload.get('device', device)
-            # Format 2: Plain text IR code
             elif isinstance(payload, str):
                 ir_code = payload
-            # Format 3: Raw data
             else:
                 ir_code = str(payload)
             
-            # Count actual RAW values to verify completeness
-            raw_value_count = 0
-            if ir_code.startswith('RAW:'):
-                raw_part = ir_code[4:]  # Skip 'RAW:'
-                raw_value_count = raw_part.count(',') + 1 if raw_part else 0
-            print(f"   Parsed - Button: {button_name}, Device: {device}")
-            print(f"   Code length: {len(ir_code)} chars")
-            if raw_value_count > 0:
-                print(f"   [OK] RAW values count: {raw_value_count} (need 200+ for Mitsubishi AC)")
-                if raw_value_count < 100:
-                    print(f"   [WARN] Only {raw_value_count} values! Signal mungkin tidak lengkap!")
-                    print(f"   [WARN] Mitsubishi SRK AC butuh ~200+ values (2 frame)")
-            
-            # CHECK: Is Flask in learning mode?
             if not ir_learning_mode:
-                print(f"[WARN] Flask NOT in learning mode — ignoring signal")
-                print(f"   (Signal has {len(ir_code)} chars, {raw_value_count} RAW values)")
-                print(f"   To capture: click Learn button on dashboard first")
-                print("="*70)
+                pass  # Not in learning mode, ignore
             elif button_name and ir_code and len(ir_code) > 0:
-                print(f"[OK] Flask IS in learning mode — SAVING signal!")
-                
-                # Check if this is a power toggle (same code for ON/OFF)
                 is_power_toggle = False
                 if 'power' in button_name.lower():
-                    # Check if we already have a power code for this device
-                    existing_power_codes = {
-                        k: v for k, v in mqtt_data['ir_codes'].items() 
-                        if 'power' in k.lower() and device in k
-                    }
-                    
+                    existing_power_codes = {k: v for k, v in mqtt_data['ir_codes'].items() if 'power' in k.lower() and device in k}
                     if existing_power_codes and ir_code in existing_power_codes.values():
-                        # Same code detected - this is a toggle button
                         is_power_toggle = True
                         button_name = f"{device}_power_toggle"
-                        mqtt_data['ir_states'][button_name] = 'OFF'  # Initialize state
-                        print(f"[WARN] Power toggle detected for {device}: Same code for ON/OFF")
+                        mqtt_data['ir_states'][button_name] = 'OFF'
                 
-                # Save to memory
                 mqtt_data['ir_codes'][button_name] = ir_code
-                print(f"[OK] IR code saved to memory: {button_name}")
-                
-                # Verify code integrity
-                if ir_code.startswith('RAW:'):
-                    raw_cnt = ir_code[4:].count(',') + 1
-                    print(f"   [OK] Verified RAW signal: {raw_cnt} values stored for {button_name}")
-                else:
-                    print(f"   [OK] Non-RAW code stored: {len(ir_code)} chars")
-                
-                # Auto-save to InfluxDB immediately
                 save_ir_command(device, button_name, len(ir_code))
                 
-                # Save to file for persistence
                 try:
                     import os
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
-                    print(f"[SAVE] IR codes saved to file: {ir_file}")
-                    
-                    # Verify file write
-                    with open(ir_file, 'r') as f:
-                        verify = json.load(f)
-                    if button_name in verify:
-                        saved_code = verify[button_name]
-                        if saved_code == ir_code:
-                            print(f"   [OK] File verified: {button_name} saved correctly ({len(saved_code)} chars)")
-                        else:
-                            print(f"   [WARN] File mismatch! Memory={len(ir_code)} vs File={len(saved_code)}")
-                    else:
-                        print(f"   [WARN] Button {button_name} NOT found in saved file!")
                 except Exception as e:
                     print(f"[ERROR] Error saving IR codes to file: {e}")
                 
@@ -1046,46 +1271,22 @@ def on_message(client, userdata, msg):
                     'level': 'success'
                 })
                 
-                # Emit to frontend
-                print("\n[WS] Emitting 'ir_learned' event to frontend via WebSocket...")
-                print(f"   Event data: button={button_name}, device={device}, is_toggle={is_power_toggle}")
-                
                 socketio.emit('ir_learned', {
-                    'button': button_name, 
-                    'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,  # Truncate for display
+                    'button': button_name,
+                    'code': ir_code[:50] + '...' if len(ir_code) > 50 else ir_code,
                     'device': device,
                     'is_toggle': is_power_toggle,
                     'status': 'success'
                 })
                 
-                print("[OK] WebSocket event emitted successfully!")
-                print("   Frontend should update NOW!")
-                print("="*70)
-                
-                print(f"[OK] IR learning completed for: {button_name}")
-                
                 ir_learning_mode = False
                 ir_learning_button = ""
                 ir_learning_device = ""
             else:
-                print(f"[ERROR] IR learning failed: Missing button name or code")
-                socketio.emit('ir_learned', {
-                    'status': 'error',
-                    'message': 'Invalid IR data received'
-                })
-        
-        else:
-            # No handler matched this topic
-            print(f"[WARN] UNHANDLED TOPIC: {topic}")
-            print(f"   No matching handler found for this topic!")
-            print(f"   Available handlers: ac/sensors, lamp/sensors, camera/detection, ir/learned, etc.")
-            
-        print("─"*70 + "\n")
+                socketio.emit('ir_learned', {'status': 'error', 'message': 'Invalid IR data received'})
         
     except Exception as e:
         print(f"[ERROR] MQTT Message Handler Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
 
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
@@ -1101,10 +1302,7 @@ mqtt_client.on_disconnect = on_disconnect
 # Enable auto-reconnect with 5 second delay
 mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-print(f"[INIT] MQTT Client connecting to {MQTT_BROKER}:{MQTT_PORT}...")
-
 def start_mqtt():
-    """Start MQTT connection in background thread with retry"""
     global mqtt_status
     mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
     retries = 0
@@ -1112,23 +1310,15 @@ def start_mqtt():
         try:
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
             mqtt_client.loop_start()
-            print(f"[OK] MQTT loop started (attempt {retries + 1})")
             time.sleep(2)
-            if mqtt_client.is_connected():
-                print("[OK] MQTT Connected!")
-            else:
-                print("[WARN] MQTT loop started, waiting for connection...")
             return
         except Exception as e:
             retries += 1
             mqtt_status['error'] = str(e)
-            print(f"[WARN] MQTT connect attempt {retries}/5 failed: {e}")
             if retries < 5:
                 time.sleep(3)
-    print("[ERROR] MQTT: All connection attempts failed. Dashboard will run without MQTT.")
-    print("[ERROR] Make sure mosquitto/MQTT broker is running: sudo systemctl start mosquitto")
+    print("[ERROR] MQTT: All connection attempts failed.")
 
-# Start MQTT in a background thread so it doesn't block app startup
 mqtt_thread = threading.Thread(target=start_mqtt, daemon=True)
 mqtt_thread.start()
 
@@ -1256,7 +1446,11 @@ def toggle_camera():
 
 @app.route('/api/data')
 def get_data():
-    return jsonify(mqtt_data)
+    response = jsonify(mqtt_data)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/api/mqtt/status')
 def get_mqtt_status():
@@ -1277,6 +1471,35 @@ def mqtt_reconnect():
         return jsonify({'status': 'success', 'message': 'Reconnect initiated'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/mqtt/config', methods=['POST'])
+def mqtt_config():
+    """Change MQTT broker IP at runtime and reconnect"""
+    global MQTT_BROKER, MQTT_PORT
+    data = request.json or {}
+    new_broker = data.get('broker', '').strip()
+    new_port = int(data.get('port', 1883))
+    if not new_broker:
+        return jsonify({'status': 'error', 'message': 'Broker IP tidak boleh kosong'}), 400
+    old_broker = MQTT_BROKER
+    MQTT_BROKER = new_broker
+    MQTT_PORT = new_port
+    mqtt_status['broker'] = f'{MQTT_BROKER}:{MQTT_PORT}'
+    try:
+        mqtt_client.disconnect()
+    except Exception:
+        pass
+    import threading
+    def reconnect_thread():
+        import time
+        time.sleep(1)
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+        except Exception as e:
+            mqtt_status['error'] = str(e)
+    threading.Thread(target=reconnect_thread, daemon=True).start()
+    return jsonify({'status': 'ok', 'message': f'Mencoba connect ke {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
 
 @app.route('/api/simulate', methods=['POST'])
 def simulate_data():
@@ -1312,7 +1535,6 @@ def simulate_data():
     })
     socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
     socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
-    print(f"[SIMULATE] Dummy data injected into mqtt_data successfully")
     return jsonify({'status': 'ok', 'message': 'Dummy data injected', 'ac_temp': mqtt_data['ac']['temperature'], 'lamp_lux': mqtt_data['lamp']['lux1']})
 
 @app.route('/api/mqtt/selftest', methods=['POST'])
@@ -1324,7 +1546,6 @@ def mqtt_selftest():
         test_payload = json.dumps({'temperature': 28.5, 'humidity': 65.0, 'heat_index': 30.0, 'ac_state': 'ON', 'ac_temp': 24, 'fan_speed': 2, 'rssi': -55, 'uptime': 100, 'temp1': 28.0, 'temp2': 28.5, 'temp3': 29.0, 'hum1': 64.0, 'hum2': 65.0, 'hum3': 66.0})
         result = mqtt_client.publish('smartroom/ac/sensors', test_payload, qos=1)
         result.wait_for_publish(timeout=3)
-        print(f"[SELFTEST] Published test AC message to smartroom/ac/sensors")
         return jsonify({'status': 'ok', 'message': 'Test message published to smartroom/ac/sensors. Check if data appears in dashboard.'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1374,82 +1595,191 @@ def energy_phase_api():
     global energy_phase
     if request.method == 'POST':
         new_phase = request.json.get('phase', '').lower()
-        if new_phase not in ('before', 'after'):
-            return jsonify({'error': 'Phase must be before or after'}), 400
+        if new_phase not in ('before', 'after', 'idle'):
+            return jsonify({'error': 'Phase must be before, after, or idle'}), 400
         energy_phase = new_phase
-        print(f"[ENERGY] Energy phase changed to: {energy_phase}")
-        socketio.emit('energy_phase', {'phase': energy_phase})
-        return jsonify({'phase': energy_phase, 'message': f'Phase set to {energy_phase}'})
+        return jsonify({'phase': energy_phase})
     return jsonify({'phase': energy_phase})
+
+@app.route('/api/energy/record', methods=['GET', 'POST'])
+def energy_record_api():
+    """Start/stop recording for before/after energy comparison phases"""
+    global energy_phase, energy_recording
+    if request.method == 'POST':
+        phase = request.json.get('phase', '').lower()
+        action = request.json.get('action', '').lower()
+        if phase not in ('before', 'after'):
+            return jsonify({'error': 'Phase must be before or after'}), 400
+        if action not in ('start', 'stop'):
+            return jsonify({'error': 'Action must be start or stop'}), 400
+
+        if action == 'start':
+            # Stop the other phase if it is recording
+            other = 'after' if phase == 'before' else 'before'
+            if energy_recording[other]['active']:
+                energy_recording[other]['active'] = False
+                energy_recording[other]['end'] = datetime.utcnow().isoformat()
+            energy_recording[phase]['active'] = True
+            energy_recording[phase]['start'] = datetime.utcnow().isoformat()
+            energy_recording[phase]['end'] = None
+            energy_phase = phase
+        else:
+            energy_recording[phase]['active'] = False
+            energy_recording[phase]['end'] = datetime.utcnow().isoformat()
+            energy_phase = 'idle'
+
+        save_energy_recording()
+        socketio.emit('energy_recording', {'recording': energy_recording, 'phase': energy_phase})
+        return jsonify({'recording': energy_recording, 'phase': energy_phase})
+
+    return jsonify({'recording': energy_recording, 'phase': energy_phase})
 
 @app.route('/api/energy/compare')
 def energy_compare():
-    """Compare energy data between before and after adaptive AC phases"""
-    period = request.args.get('period', '7d')
+    """Compare energy data between recorded before and after adaptive AC periods"""
     field = request.args.get('field', 'power')
-    
-    period_map = {
-        '30m': {'range': '-30m', 'window': '30s'},
-        '24h': {'range': '-24h', 'window': '15m'},
-        '7d':  {'range': '-7d',  'window': '1h'},
-        '30d': {'range': '-30d', 'window': '6h'}
-    }
-    
-    if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 30m, 24h, 7d, 30d'}), 400
-    
+    range_param = request.args.get('range', 'all')  # all, 7d, 30d
+
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
-    
-    p = period_map[period]
-    time_format = '%H:%M:%S' if period == '30m' else ('%H:%M' if period == '24h' else '%m/%d %H:%M')
-    
+
     try:
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
-        
+
         results = {}
         for phase in ['before', 'after']:
+            rec = energy_recording[phase]
+            if not rec['start']:
+                results[phase] = []
+                continue
+
+            start_dt = datetime.fromisoformat(rec['start'])
+            if rec['end']:
+                end_dt = datetime.fromisoformat(rec['end'])
+            elif rec['active']:
+                end_dt = datetime.utcnow()
+            else:
+                results[phase] = []
+                continue
+
+            # Apply range filter: clip start_dt so only last N days of data shown
+            if range_param == '7d':
+                clipped = end_dt - timedelta(days=7)
+                if clipped > start_dt:
+                    start_dt = clipped
+            elif range_param == '30d':
+                clipped = end_dt - timedelta(days=30)
+                if clipped > start_dt:
+                    start_dt = clipped
+
+            dur_h = (end_dt - start_dt).total_seconds() / 3600
+            if dur_h <= 1:
+                window = '30s'
+            elif dur_h <= 24:
+                window = '10m'
+            elif dur_h <= 168:
+                window = '1h'
+            else:
+                window = '6h'
+
+            start_iso = start_dt.isoformat() + 'Z'
+            end_iso = end_dt.isoformat() + 'Z'
+
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
-              |> range(start: {p['range']})
+              |> range(start: {start_iso}, stop: {end_iso})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field}")
               |> filter(fn: (r) => r["phase"] == "{phase}")
-              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
               |> yield(name: "mean")
             '''
+
             result = query_api.query(query=query)
             data_points = []
             for table in result:
                 for record in table.records:
+                    rec_time = record.get_time().replace(tzinfo=None)
+                    offset_h = (rec_time - start_dt).total_seconds() / 3600
+                    if dur_h <= 1:
+                        label = f"{int(offset_h * 60)}m"
+                    elif dur_h <= 24:
+                        label = f"{int(offset_h)}:{int((offset_h % 1) * 60):02d}"
+                    elif dur_h <= 168:
+                        day = int(offset_h / 24) + 1
+                        hr = int(offset_h % 24)
+                        label = f"Day {day} {hr:02d}:00"
+                    else:
+                        day = int(offset_h / 24) + 1
+                        label = f"Day {day}"
                     data_points.append({
-                        'time': record.get_time().strftime(time_format),
+                        'offset': round(offset_h, 2),
+                        'label': label,
                         'value': round(float(record.get_value()), 2)
                     })
             results[phase] = data_points
-        
+
+        # Fallback to runtime buffer when InfluxDB has no data yet
+        if not results['before'] and not results['after']:
+            for phase in ['before', 'after']:
+                phase_data = [r for r in energy_runtime_history if r.get('phase') == phase]
+                if phase_data:
+                    end_ts = phase_data[-1]['ts']
+                    start_ts = phase_data[0]['ts']
+                    # Apply range filter to runtime buffer
+                    if range_param == '7d':
+                        cutoff = end_ts - timedelta(days=7)
+                        phase_data = [r for r in phase_data if r['ts'] >= cutoff]
+                    elif range_param == '30d':
+                        cutoff = end_ts - timedelta(days=30)
+                        phase_data = [r for r in phase_data if r['ts'] >= cutoff]
+                    if not phase_data:
+                        results[phase] = []
+                        continue
+                    start_ts = phase_data[0]['ts']
+                    dur_h = max(0.01, (phase_data[-1]['ts'] - start_ts).total_seconds() / 3600)
+                    step = max(1, len(phase_data) // 120)
+                    sampled = phase_data[::step]
+                    pts = []
+                    for r in sampled:
+                        off = (r['ts'] - start_ts).total_seconds() / 3600
+                        if dur_h <= 1:
+                            label = f"{int(off * 60)}m"
+                        elif dur_h <= 24:
+                            label = f"{int(off)}:{int((off % 1) * 60):02d}"
+                        else:
+                            day = int(off / 24) + 1
+                            hr = int(off % 24)
+                            label = f"Day {day} {hr:02d}:00"
+                        pts.append({
+                            'offset': round(off, 2),
+                            'label': label,
+                            'value': round(float(r.get(field, 0)), 2)
+                        })
+                    results[phase] = pts
+
         # Calculate averages for summary
         before_vals = [d['value'] for d in results['before']] if results['before'] else []
         after_vals = [d['value'] for d in results['after']] if results['after'] else []
         avg_before = round(sum(before_vals) / len(before_vals), 2) if before_vals else 0
         avg_after = round(sum(after_vals) / len(after_vals), 2) if after_vals else 0
         savings_pct = round((1 - avg_after / avg_before) * 100, 1) if avg_before > 0 else 0
-        
+
         client.close()
         return jsonify({
-            'period': period,
             'field': field,
             'before': results['before'],
             'after': results['after'],
+            'recording': energy_recording,
             'summary': {
                 'avg_before': avg_before,
                 'avg_after': avg_after,
                 'savings_percent': savings_pct
             }
         })
-        
+
     except Exception as e:
         print(f"[ERROR] Energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
@@ -1458,7 +1788,7 @@ def energy_compare():
 def energy_history():
     """Get PZEM energy history from InfluxDB — supports 1h to 30 days"""
     period = request.args.get('period', '24h')  # 1h, 6h, 24h, 7d, 30d
-    field = request.args.get('field', 'power')  # voltage, current, power, energy_kwh, frequency, power_factor
+    field = request.args.get('field')  # voltage, current, power, energy_kwh, frequency, power_factor
     
     # Map period to InfluxDB range and aggregation window
     period_map = {
@@ -1473,7 +1803,7 @@ def energy_history():
         return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
     
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
-    if field not in allowed_fields:
+    if field and field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
     
     p = period_map[period]
@@ -1485,31 +1815,87 @@ def energy_history():
         # Use different time format based on period
         time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
         
-        query = f'''
-        from(bucket: "{INFLUX_BUCKET}")
-          |> range(start: {p['range']})
-          |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
-          |> filter(fn: (r) => r["_field"] == "{field}")
-          |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
-          |> yield(name: "mean")
-        '''
-        
-        result = query_api.query(query=query)
-        
-        data_points = []
-        for table in result:
-            for record in table.records:
-                data_points.append({
-                    'time': record.get_time().strftime(time_format),
-                    'value': round(float(record.get_value()), 2)
-                })
-        
+        def query_field_points(field_name):
+            query = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {p['range']})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["_field"] == "{field_name}")
+              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+              |> yield(name: "mean")
+            '''
+            result = query_api.query(query=query)
+            points = []
+            for table in result:
+                for record in table.records:
+                    points.append({
+                        'time': record.get_time().strftime(time_format),
+                        'value': round(float(record.get_value()), 2)
+                    })
+            return points
+
+        # Support both modes:
+        # 1) /api/energy/history?field=power&period=1h -> {data:[...]}
+        # 2) /api/energy/history?period=24h -> {power:[...], voltage:[...], energy_kwh:[...]}
+        if field:
+            data_points = query_field_points(field)
+            if not data_points:
+                now = datetime.now()
+                lookback = {
+                    '1h': timedelta(hours=1),
+                    '6h': timedelta(hours=6),
+                    '24h': timedelta(hours=24),
+                    '7d': timedelta(days=7),
+                    '30d': timedelta(days=30),
+                }[period]
+                cutoff = now - lookback
+                runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+                if runtime:
+                    step = max(1, len(runtime) // 120)
+                    data_points = [
+                        {'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)}
+                        for r in runtime[::step]
+                    ]
+
+            client.close()
+            return jsonify({'period': period, 'field': field, 'data': data_points})
+
+        power_points = query_field_points('power')
+        voltage_points = query_field_points('voltage')
+        kwh_points = query_field_points('energy_kwh')
+
+        if not power_points and not voltage_points and not kwh_points:
+            now = datetime.now()
+            lookback = {
+                '1h': timedelta(hours=1),
+                '6h': timedelta(hours=6),
+                '24h': timedelta(hours=24),
+                '7d': timedelta(days=7),
+                '30d': timedelta(days=30),
+            }[period]
+            cutoff = now - lookback
+            runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+            if runtime:
+                step = max(1, len(runtime) // 120)
+                sampled = runtime[::step]
+                power_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sampled]
+                voltage_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sampled]
+                kwh_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
+
         client.close()
-        return jsonify({'period': period, 'field': field, 'data': data_points})
+        return jsonify({
+            'period': period,
+            'power': power_points,
+            'voltage': voltage_points,
+            'energy_kwh': kwh_points
+        })
         
     except Exception as e:
         print(f"[ERROR] Energy history query error: {e}")
-        return jsonify({'error': str(e), 'data': []}), 500
+        # Keep response shape compatible with frontend callers.
+        if field:
+            return jsonify({'error': str(e), 'period': period, 'field': field, 'data': []}), 500
+        return jsonify({'error': str(e), 'period': period, 'power': [], 'voltage': [], 'energy_kwh': []}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
@@ -1527,18 +1913,23 @@ def ml_status():
 
 @app.route('/api/ml/run', methods=['POST'])
 def ml_run():
-    """Trigger optimization run (GA, PSO, or both) via MQTT"""
+    """Trigger optimization run (GA, PSO, or both) — runs embedded engine"""
     try:
         data = request.json
-        algo = data.get('algorithm', 'both')  # 'ga', 'pso', or 'both'
+        algo = data.get('algorithm', 'both')
         params = data.get('params', {})
         
-        cmd = {
-            'action': 'run_optimization',
-            'algorithm': algo,
-            'params': params
-        }
-        mqtt_client.publish('smartroom/ml/command', json.dumps(cmd))
+        # Update params if provided
+        if algo == 'ga' and params:
+            ga_params.update({k: v for k, v in params.items() if k in ga_params})
+        elif algo == 'pso' and params:
+            pso_params.update({k: v for k, v in params.items() if k in pso_params})
+        elif algo == 'both' and params:
+            if 'ga' in params: ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
+            if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
+        
+        t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
+        t.start()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'ML Run triggered: {algo}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'{algo} optimization triggered'})
     except Exception as e:
@@ -1547,22 +1938,58 @@ def ml_run():
 @app.route('/api/ac/control', methods=['POST'])
 def control_ac():
     try:
-        data = request.json
-        command = data.get('command', data.get('action', ''))
+        data = request.json or {}
+        command = str(data.get('command', data.get('action', '')) or '').strip().upper()
+        current_temp = int(mqtt_data['ac'].get('ac_temp', 24) or 24)
+        current_fan = int(mqtt_data['ac'].get('fan_speed', 1) or 1)
+        current_mode = str(mqtt_data['ac'].get('ac_fan_mode', 'COOL') or 'COOL').upper()
+        current_state = str(mqtt_data['ac'].get('ac_state', 'OFF') or 'OFF').upper()
+        payload = dict(data)
+        payload['command'] = command
+        payload['action'] = command
+        payload['temperature'] = int(payload.get('temperature', current_temp) or current_temp)
+        payload['fan_speed'] = int(payload.get('fan_speed', current_fan) or current_fan)
+        payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
+        payload['ac_state'] = str(payload.get('ac_state', current_state) or current_state).upper()
+        payload['power'] = payload['ac_state']
 
-        # Send command to ESP32 — ESP32 now uses IRMitsubishiAC library
-        # to construct and send proper Mitsubishi protocol frames directly.
-        # No need to send RAW IR codes from Flask anymore!
-        mqtt_client.publish('smartroom/ac/control', json.dumps(data))
-        print(f"[AC Control] Sent command '{command}' to ESP32 (Mitsubishi AC library handles IR)")
-
-        # Track AC operating mode locally for instant dashboard update
+        # Mitsubishi Heavy frames are stateful, so always publish a complete state snapshot.
         mode_map = {'MODE_COOL': 'COOL', 'MODE_HEAT': 'HEAT', 'MODE_DRY': 'DRY', 'MODE_FAN': 'FAN', 'MODE_AUTO': 'AUTO'}
-        if command in mode_map:
-            mqtt_data['ac']['ac_fan_mode'] = mode_map[command]
+        if command == 'POWER_ON':
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'POWER_OFF':
+            payload['ac_state'] = 'OFF'
+            payload['power'] = 'OFF'
+        elif command == 'TEMP_UP':
+            payload['temperature'] = min(30, current_temp + 1)
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'TEMP_DOWN':
+            payload['temperature'] = max(16, current_temp - 1)
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command in mode_map:
+            payload['mode'] = mode_map[command]
+            payload['ac_state'] = 'ON'
+            payload['power'] = 'ON'
+        elif command == 'SET':
+            payload['temperature'] = max(16, min(30, int(payload.get('temperature', current_temp) or current_temp)))
+            payload['fan_speed'] = max(1, min(4, int(payload.get('fan_speed', current_fan) or current_fan)))
+            payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
+            payload['ac_state'] = str(payload.get('ac_state', 'ON') or 'ON').upper()
+            payload['power'] = payload['ac_state']
+
+        mqtt_client.publish('smartroom/ac/control', json.dumps(payload))
+
+        mqtt_data['ac']['ac_temp'] = payload['temperature']
+        mqtt_data['ac']['fan_speed'] = payload['fan_speed']
+        mqtt_data['ac']['ac_state'] = payload['ac_state']
+        mqtt_data['ac']['ac_fan_mode'] = payload['mode']
+        socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': f'AC command sent: {command}'})
+        return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ac': mqtt_data['ac'], 'payload': payload, 'ir_sent': True})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1623,10 +2050,7 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        print(f"[ML] Optimization Update: GA={data.get('ga_fitness', 0):.2f} (AC:{mqtt_data['system']['ga_temp']}°C), PSO={data.get('pso_fitness', 0):.2f} (Lamp:{mqtt_data['system']['pso_brightness']}%)")
-        
         # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-        # Skip if camera auto-OFF is active (no person detected)
         if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = mqtt_data['system'].get('ga_temp', 0)
             opt_fan = mqtt_data['system'].get('ga_fan', 0)
@@ -1637,12 +2061,7 @@ def update_optimization():
                     _last_adaptive_ac_apply = now
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    print(f"[ADAPTIVE] (HTTP) -> Applied to AC: {opt_temp}°C Fan:{opt_fan}")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
-                else:
-                    print(f"[ADAPTIVE] (HTTP) -> AC apply debounced (MQTT already handled it)")
-        elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            print(f"[ADAPTIVE] (HTTP) -> BLOCKED: No person confirmed in last {NO_PERSON_TIMEOUT_SECONDS//60} min")
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
@@ -1654,10 +2073,7 @@ def update_optimization():
                     _last_adaptive_lamp_apply = now
                     lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    print(f"[ADAPTIVE] (HTTP) -> Applied to Lamp: {opt_brightness}%")
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
-                else:
-                    print(f"[ADAPTIVE] (HTTP) -> Lamp apply debounced")
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -1688,26 +2104,7 @@ def learn_ir():
         mqtt_payload_str = json.dumps(mqtt_payload)
         
         # DEBUG LOGGING - SEE WHAT WE'RE SENDING!
-        print("\n" + "="*60)
-        print("[IR] FLASK: PUBLISHING IR LEARN COMMAND")
-        print("="*60)
-        print(f"Topic    : smartroom/ir/learn")
-        print(f"Button   : {button_name}")
-        print(f"Device   : {device_name}")
-        print(f"Payload  : {mqtt_payload_str}")
-        print(f"Length   : {len(mqtt_payload_str)} bytes")
-        print(f"MQTT Connected: {mqtt_client.is_connected()}")
-        print("="*60)
-        
-        # PUBLISH WITH RESULT CHECK
         result = mqtt_client.publish('smartroom/ir/learn', mqtt_payload_str)
-        
-        print(f"Publish Result: {result.rc}")
-        if result.rc == 0:
-            print("[OK] MQTT PUBLISH SUCCESS!")
-        else:
-            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
-        print("="*60 + "\n")
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
@@ -1721,9 +2118,7 @@ def learn_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"[ERROR] EXCEPTION in learn_ir(): {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] learn_ir: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/send', methods=['POST'])
@@ -1732,73 +2127,21 @@ def send_ir():
         data = request.json
         button_name = data.get('button', '')
         
-        print("\n" + "="*70)
-        print("[IR] IR SEND REQUEST RECEIVED")
-        print("="*70)
-        print(f"Button requested: {button_name}")
-        print(f"Available codes: {list(mqtt_data['ir_codes'].keys())}")
-        
         if button_name not in mqtt_data['ir_codes']:
-            print(f"[ERROR] Button '{button_name}' not found in learned codes!")
-            print("="*70 + "\n")
             return jsonify({'status': 'error', 'message': 'IR code not learned yet'}), 400
         
         ir_code = mqtt_data['ir_codes'][button_name]
         
-        # Verify code completeness before sending
-        raw_value_count = 0
-        if isinstance(ir_code, str) and ir_code.startswith('RAW:'):
-            raw_part = ir_code[4:]
-            raw_value_count = raw_part.count(',') + 1 if raw_part else 0
-        
-        print(f"[OK] IR code found!")
-        print(f"Code length: {len(ir_code)} chars")
-        if raw_value_count > 0:
-            print(f"RAW values: {raw_value_count} values")
-            if raw_value_count < 100:
-                print(f"[WARN] Only {raw_value_count} RAW values - signal mungkin tidak lengkap!")
-        print(f"Code preview: {ir_code[:100]}..." if len(ir_code) > 100 else f"Code: {ir_code}")
-        
         # Handle toggle buttons (power ON/OFF with same code)
         action_suffix = ''
         if 'toggle' in button_name.lower() or button_name in mqtt_data['ir_states']:
-            # Toggle the state
             current_state = mqtt_data['ir_states'].get(button_name, 'OFF')
             new_state = 'ON' if current_state == 'OFF' else 'OFF'
             mqtt_data['ir_states'][button_name] = new_state
             action_suffix = f' ({new_state})'
-            print(f"[IR] Toggle button: {current_state} -> {new_state}")
         
-        # MQTT Payload - send COMPLETE code, no truncation!
-        mqtt_payload = {
-            'button': button_name, 
-            'code': ir_code  # FULL code, no slicing!
-        }
-        mqtt_payload_str = json.dumps(mqtt_payload)
-        
-        # Verify the JSON payload still contains the full code
-        verify_payload = json.loads(mqtt_payload_str)
-        verify_code = verify_payload.get('code', '')
-        verify_raw_count = 0
-        if verify_code.startswith('RAW:'):
-            verify_raw_count = verify_code[4:].count(',') + 1
-        
-        print(f"\n[PUB] Publishing to MQTT...")
-        print(f"Topic: smartroom/ir/send")
-        print(f"Payload size: {len(mqtt_payload_str)} bytes")
-        if verify_raw_count > 0:
-            print(f"RAW values in payload: {verify_raw_count} (verified after JSON encode)")
-        print(f"MQTT Connected: {mqtt_client.is_connected()}")
-        
-        result = mqtt_client.publish('smartroom/ir/send', mqtt_payload_str)
-        
-        print(f"Publish Result: {result.rc}")
-        if result.rc == 0:
-            print("[OK] MQTT PUBLISH SUCCESS!")
-            print("ESP32 should transmit IR signal NOW!")
-        else:
-            print(f"[ERROR] MQTT PUBLISH FAILED! RC={result.rc}")
-        print("="*70 + "\n")
+        mqtt_payload = json.dumps({'button': button_name, 'code': ir_code})
+        result = mqtt_client.publish('smartroom/ir/send', mqtt_payload)
         
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
@@ -1813,9 +2156,7 @@ def send_ir():
             'mqtt_published': result.rc == 0
         })
     except Exception as e:
-        print(f"[ERROR] EXCEPTION in send_ir(): {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] send_ir: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/ir/codes')
@@ -2006,23 +2347,22 @@ LOGIN_TEMPLATE = '''
 <body>
     <div class="login-box">
         <div class="login-logo">
-            <i class="fas fa-brain"></i>
             <h1>Smart Room IoT</h1>
             <p>Login to access dashboard</p>
         </div>
         {% if error %}
-        <div class="error-msg"><i class="fas fa-exclamation-circle"></i> {{ error }}</div>
+        <div class="error-msg">{{ error }}</div>
         {% endif %}
         <form method="POST">
             <div class="form-group">
-                <label><i class="fas fa-user"></i> Username</label>
+                <label>Username</label>
                 <input type="text" name="username" required autocomplete="username" placeholder="Enter username">
             </div>
             <div class="form-group">
-                <label><i class="fas fa-lock"></i> Password</label>
+                <label>Password</label>
                 <input type="password" name="password" required autocomplete="current-password" placeholder="Enter password">
             </div>
-            <button type="submit" class="login-btn"><i class="fas fa-sign-in-alt"></i> Login</button>
+            <button type="submit" class="login-btn">Login</button>
         </form>
     </div>
 </body>
@@ -2376,6 +2716,69 @@ HTML_TEMPLATE = '''
             background: var(--primary);
             color: white;
             border-color: var(--primary);
+        }
+
+        /* Energy page premium chart styling */
+        #energy .power-card {
+            border-radius: 16px;
+            border: 1px solid rgba(99, 102, 241, 0.16);
+            background: linear-gradient(150deg, rgba(99,102,241,0.08), rgba(15,23,42,0.03));
+            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+        }
+
+        #energy .chart-container {
+            border-radius: 16px;
+            border: 1px solid rgba(99, 102, 241, 0.18);
+            background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.9));
+            box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08);
+            padding: 18px 20px 16px;
+            margin-bottom: 22px;
+        }
+
+        #energy .chart-header {
+            margin-bottom: 14px;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        #energy .chart-title {
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            color: var(--text-primary);
+        }
+
+        #energy .chart-options {
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        #energy .chart-option-btn {
+            border-radius: 999px;
+            padding: 6px 13px;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid rgba(99, 102, 241, 0.22);
+            background: rgba(99, 102, 241, 0.06);
+            color: #475569;
+        }
+
+        #energy .chart-option-btn:hover {
+            transform: translateY(-1px);
+            background: rgba(99, 102, 241, 0.12);
+            color: #1e293b;
+        }
+
+        #energy .chart-option-btn.active {
+            background: linear-gradient(135deg, #4f46e5, #6366f1);
+            color: #ffffff;
+            border-color: transparent;
+            box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
+        }
+
+        #energy canvas {
+            height: 250px !important;
+            max-height: 250px;
         }
 
         /* ML Optimization Page Styles */
@@ -2924,8 +3327,6 @@ HTML_TEMPLATE = '''
             .feedback-grid { grid-template-columns: 1fr; }
             .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
-            .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999; }
-            .sidebar-overlay.active { display: block; }
         }
 
         @media (min-width: 769px) and (max-width: 1200px) {
@@ -2958,6 +3359,23 @@ HTML_TEMPLATE = '''
             font-size: 20px;
             cursor: pointer;
             box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+        }
+
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1999;
+            pointer-events: none;
+        }
+
+        .sidebar-overlay.active {
+            display: block;
+            pointer-events: auto;
         }
 
         /* Device Status Indicators */
@@ -3074,51 +3492,39 @@ HTML_TEMPLATE = '''
     <!-- Sidebar -->
     <div class="sidebar" id="sidebar">
         <div class="logo">
-            <i class="fas fa-brain"></i>
             Smart Room
         </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
-            <i class="fas fa-snowflake"></i>
             <span>AC Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('dashboard-lamp')">
-            <i class="fas fa-lightbulb"></i>
             <span>Lamp Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('ac-analytics')">
-            <i class="fas fa-chart-line"></i>
             <span>AC Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('lamp-analytics')">
-            <i class="fas fa-chart-bar"></i>
             <span>Lamp Analytics</span>
         </div>
         <div class="nav-item" onclick="showPage('camera')">
-            <i class="fas fa-video"></i>
             <span>Camera</span>
         </div>
         <div class="nav-item" onclick="showPage('energy')">
-            <i class="fas fa-bolt"></i>
             <span>Energy Usage</span>
         </div>
         <div class="nav-item" onclick="showPage('control-ac')">
-            <i class="fas fa-sliders-h"></i>
             <span>AC Control</span>
         </div>
         <div class="nav-item" onclick="showPage('control-lamp')">
-            <i class="fas fa-adjust"></i>
             <span>Lamp Control</span>
         </div>
         <div class="nav-item" onclick="showPage('ml-optimization')">
-            <i class="fas fa-brain"></i>
             <span>ML Optimization</span>
         </div>
         <div class="nav-item" onclick="showPage('logs')">
-            <i class="fas fa-file-alt"></i>
             <span>System Logs</span>
         </div>
         <div class="nav-item" onclick="showPage('occupancy-feedback')">
-            <i class="fas fa-clipboard-check"></i>
             <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
@@ -3127,7 +3533,6 @@ HTML_TEMPLATE = '''
             <span id="theme-label">Dark Mode</span>
         </button>
         <a href="/logout" class="theme-toggle" style="text-decoration: none; color: var(--danger); border-color: var(--danger);">
-            <i class="fas fa-sign-out-alt"></i>
             <span>Logout</span>
         </a>
     </div>
@@ -3137,8 +3542,8 @@ HTML_TEMPLATE = '''
         <!-- AC Dashboard Page -->
         <div id="dashboard-ac" class="page active">
             <div class="header">
-                <h1><i class="fas fa-snowflake"></i> AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;"><i class="fas fa-stethoscope"></i> Diagnostik</button></p>
+                <h1>AC Dashboard</h1>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostik</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -3161,23 +3566,23 @@ HTML_TEMPLATE = '''
             <!-- DIAGNOSTIC PANEL -->
             <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #f59e0b; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
-                    <i class="fas fa-stethoscope" style="color: #f59e0b; font-size: 18px;"></i>
+                    <div style="font-size: 18px; color: #f59e0b; font-weight: 800;">D</div>
                     <strong style="color: #f59e0b;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
                 <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
-                        <i class="fas fa-vial"></i> Test Frontend (Inject Data Dummy)
+                        Test Frontend (Inject Data Dummy)
                     </button>
                     <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-satellite-dish"></i> Test MQTT Broker (Self-Test)
+                        Test MQTT Broker (Self-Test)
                     </button>
                     <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #8b5cf6; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-sync"></i> Reconnect MQTT
+                        Reconnect MQTT
                     </button>
                     <button onclick="checkMqttStatus(true)" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #6b7280; border: none; color: white; border-radius: 8px;">
-                        <i class="fas fa-info-circle"></i> MQTT Status Detail
+                        MQTT Status Detail
                     </button>
                 </div>
             </div>
@@ -3187,12 +3592,11 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Room Temperature</span>
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
-                            <i class="fas fa-temperature-high"></i>
+                            T
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-temp">0</span>°C</div>
                     <div class="stat-change up">
-                        <i class="fas fa-robot"></i>
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
@@ -3206,12 +3610,11 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Humidity</span>
                         <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">
-                            <i class="fas fa-tint"></i>
+                            H
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-hum">0</span>%</div>
                     <div class="stat-change">
-                        <i class="fas fa-robot"></i>
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
@@ -3225,7 +3628,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Heat Index</span>
                         <div class="stat-icon" style="background: rgba(249, 115, 22, 0.2); color: #f97316;">
-                            <i class="fas fa-sun"></i>
+                            HI
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-heat-index">0</span>°C</div>
@@ -3238,7 +3641,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">ESP32 Signal</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-wifi"></i>
+                            dB
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-rssi">0</span> dBm</div>
@@ -3252,8 +3655,8 @@ HTML_TEMPLATE = '''
                     <!-- Header Bar -->
                     <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-snowflake" style="font-size: 18px; color: #6366f1;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 14px;">
+                                AC
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">AC Status</div>
@@ -3270,7 +3673,7 @@ HTML_TEMPLATE = '''
                         <!-- Set Temperature -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-thermometer-half"></i> Set Temperature
+                                Set Temperature
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-temp">24</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
@@ -3278,7 +3681,7 @@ HTML_TEMPLATE = '''
                         <!-- Fan Speed -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(139, 92, 246, 0.06); border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-fan"></i> Fan Speed
+                                Fan Speed
                             </div>
                             <div style="font-size: 28px; font-weight: 800; color: #8b5cf6;" id="dash-ac-fan">1</div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="dash-ac-fan-label">Low</div>
@@ -3286,31 +3689,31 @@ HTML_TEMPLATE = '''
                         <!-- AC Mode (COOL/HEAT/DRY/FAN/AUTO) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(14, 165, 233, 0.06); border-radius: 12px; border: 1px solid rgba(14, 165, 233, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-cog"></i> Mode AC
+                                Mode AC
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon"><i class="fas fa-snowflake"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #0ea5e9;" id="dash-ac-mode-icon">❄</div>
                             <div style="font-size: 14px; font-weight: 700; color: #0ea5e9; margin-top: 2px;" id="dash-ac-mode">COOL</div>
                         </div>
                         <!-- Operating Mode (ADAPTIVE/MANUAL) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-sliders-h"></i> Kontrol
+                                Kontrol
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon"><i class="fas fa-robot"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon">A</div>
                             <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
                         </div>
                     </div>
                     <!-- Footer: Room Environment + extra info -->
                     <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                            <span><i class="fas fa-temperature-high" style="color: #f97316;"></i> Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
+                            <span>Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
                             <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
-                            <span><i class="fas fa-tint" style="color: #3b82f6;"></i> Avg: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
+                            <span>Hum: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
                         <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
-                            <i class="fas fa-robot"></i> AI Controlled
+                            AI Controlled
                         </div>
                     </div>
                 </div>
@@ -3319,8 +3722,8 @@ HTML_TEMPLATE = '''
                 <div class="stat-card" id="energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-bolt" style="font-size: 18px; color: #f59e0b;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 14px;">
+                                E
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Monitor</div>
@@ -3334,33 +3737,33 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px;">
                         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-plug" style="color: #f59e0b;"></i> Voltage</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Voltage</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-voltage">0</span><span style="font-size: 12px; color: var(--text-secondary);"> V</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-wave-square" style="color: #ef4444;"></i> Current</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Current</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-current">0</span><span style="font-size: 12px; color: var(--text-secondary);"> A</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-fire" style="color: #f97316;"></i> Power</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power</div>
                                 <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="energy-power">0</span><span style="font-size: 12px; color: var(--text-secondary);"> W</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-battery-half" style="color: #10b981;"></i> Energy</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Energy</div>
                                 <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="energy-kwh">0</span><span style="font-size: 12px; color: var(--text-secondary);"> kWh</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-signal" style="color: #6366f1;"></i> Frequency</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Frequency</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-freq">0</span><span style="font-size: 12px; color: var(--text-secondary);"> Hz</span></div>
                             </div>
                             <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;"><i class="fas fa-tachometer-alt" style="color: #8b5cf6;"></i> Power Factor</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power Factor</div>
                                 <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-pf">0</span></div>
                             </div>
                         </div>
                         <!-- Estimasi biaya harian -->
                         <div style="margin-top: 12px; padding: 10px 14px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(217, 119, 6, 0.05)); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
-                            <div style="font-size: 12px; color: var(--text-secondary);"><i class="fas fa-coins" style="color: #f59e0b;"></i> Cost Estimate (Rp 1.444,70/kWh)</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);">Cost Estimate (Rp 1.444,70/kWh)</div>
                             <div style="font-size: 14px; font-weight: 700; color: #f59e0b;">Rp <span id="energy-cost">0</span></div>
                         </div>
                     </div>
@@ -3370,8 +3773,8 @@ HTML_TEMPLATE = '''
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-user-friends" style="font-size: 18px; color: #ef4444;"></i>
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #ef4444; font-size: 14px;">
+                                PD
                             </div>
                             <div>
                                 <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
@@ -3385,23 +3788,23 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
                         <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-users"></i> Person Count
+                                Person Count
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-crosshairs"></i> Confidence
+                                Confidence
                             </div>
                             <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
                             <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
                         </div>
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                <i class="fas fa-bolt"></i> Auto Control
+                                Auto Control
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status"><i class="fas fa-check-circle"></i></div>
+                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status">ON</div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
                         </div>
                     </div>
@@ -3409,14 +3812,14 @@ HTML_TEMPLATE = '''
                     <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                         <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
                             <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
-                                <i class="fas fa-clock"></i> Last Person Detection
+                                Last Person Detection
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
                             <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
                         </div>
                         <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
                             <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
-                                <i class="fas fa-power-off"></i> Auto-OFF AC
+                                Auto-OFF AC
                             </div>
                             <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
                             <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
@@ -3427,8 +3830,8 @@ HTML_TEMPLATE = '''
                 <!-- GA + PSO Optimization - Full Width -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center;">
-                            <i class="fas fa-brain" style="font-size: 18px; color: #10b981;"></i>
+                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #10b981; font-size: 14px;">
+                                ML
                         </div>
                         <div>
                             <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
@@ -3439,7 +3842,7 @@ HTML_TEMPLATE = '''
                         <!-- GA Section -->
                         <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-dna"></i> GA -> AC Control
+                                GA -> AC Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3461,7 +3864,7 @@ HTML_TEMPLATE = '''
                         <!-- PSO Section -->
                         <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
                             <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                <i class="fas fa-lightbulb"></i> PSO -> Lamp Control
+                                PSO -> Lamp Control
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
                                 <div>
@@ -3488,7 +3891,7 @@ HTML_TEMPLATE = '''
         <!-- Lamp Dashboard Page -->
         <div id="dashboard-lamp" class="page">
             <div class="header">
-                <h1><i class="fas fa-lightbulb"></i> Lamp Dashboard</h1>
+                <h1>Lamp Dashboard</h1>
                 <p>Lighting monitoring & status — 3 Lamps</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
@@ -3505,7 +3908,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-sun"></i>
+                            L1
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
@@ -3519,7 +3922,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            <i class="fas fa-sun"></i>
+                            L2
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
@@ -3533,7 +3936,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Lamp 3 — Lux</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            <i class="fas fa-sun"></i>
+                            L3
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
@@ -3547,7 +3950,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Average (3 Lamps)</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-chart-bar"></i>
+                            AVG
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
@@ -3561,7 +3964,7 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">Motion Detection</span>
                         <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
-                            <i class="fas fa-walking"></i>
+                            PIR
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-motion">NO MOTION</span></div>
@@ -3575,13 +3978,13 @@ HTML_TEMPLATE = '''
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp Control</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            <i class="fas fa-chart-line"></i>
+                            PSO
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span id="pso-fitness">0.00</span></div>
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;"><i class="fas fa-lightbulb"></i> Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
+                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
             </div>
@@ -3671,7 +4074,7 @@ HTML_TEMPLATE = '''
         <!-- Camera Page -->
         <div id="camera" class="page">
             <div class="header">
-                <h1><i class="fas fa-video"></i> Live Camera Feed - YOLOv8 Detection</h1>
+                <h1>Live Camera Feed - YOLOv8 Detection</h1>
                 <p>Real-time person detection using YOLOv8n</p>
             </div>
 
@@ -3681,7 +4084,7 @@ HTML_TEMPLATE = '''
                         <div style="display: flex; gap: 10px; align-items: center;">
                             <span class="camera-rec-badge"><i class="fas fa-circle"></i> LIVE</span>
                             <span class="person-badge not-detected" id="overlay-person-badge">
-                                <i class="fas fa-user-slash"></i> No Person
+                                No Person
                             </span>
                         </div>
                         <span class="camera-time-badge" id="camera-time">00:00:00</span>
@@ -3689,53 +4092,52 @@ HTML_TEMPLATE = '''
                     <img id="camera-img" src="/video_feed" alt="Camera Feed"
                          onerror="this.style.display='none'; document.getElementById('camera-error').style.display='flex';">
                     <div id="camera-error" class="camera-error" style="display:none; flex-direction:column; align-items:center;">
-                        <i class="fas fa-video-slash"></i>
                         <h3>Camera Not Available</h3>
                         <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
                             Make sure USB camera is properly connected
                         </p>
                         <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
-                            <i class="fas fa-sync"></i> Retry Connection
+                            Retry Connection
                         </button>
                     </div>
                 </div>
 
                 <div class="camera-info-grid">
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-circle" style="color: var(--success);"></i> Status</div>
+                        <div class="camera-info-label">Status</div>
                         <div class="camera-info-value" id="cam-status">Connecting...</div>
                     </div>
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-expand"></i> Resolution</div>
+                        <div class="camera-info-label">Resolution</div>
                         <div class="camera-info-value" id="cam-resolution">Loading...</div>
                     </div>
                     <div class="camera-info-card">
-                        <div class="camera-info-label"><i class="fas fa-tachometer-alt"></i> Frame Rate</div>
+                        <div class="camera-info-label">Frame Rate</div>
                         <div class="camera-info-value" id="cam-fps">Loading...</div>
                     </div>
                     <div class="camera-info-card" id="person-detected-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-walking"></i> Person Detected</div>
+                        <div class="camera-info-label">Person Detected</div>
                         <div class="camera-info-value" id="cam-person" style="color: var(--danger);">No</div>
                     </div>
                     <div class="camera-info-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-users"></i> Person Count</div>
+                        <div class="camera-info-label">Person Count</div>
                         <div class="camera-info-value" id="cam-count-display">0</div>
                     </div>
                     <div class="camera-info-card" style="transition: all 0.3s;">
-                        <div class="camera-info-label"><i class="fas fa-percentage"></i> Confidence</div>
+                        <div class="camera-info-label">Confidence</div>
                         <div class="camera-info-value" id="cam-confidence-display">0%</div>
                     </div>
                 </div>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
                     <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
-                        <i class="fas fa-video" id="camera-toggle-icon"></i> <span id="camera-toggle-text">Camera ON</span>
+                        <span id="camera-toggle-text">Camera ON</span>
                     </button>
                     <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
-                        <i class="fas fa-volume-up" id="sound-toggle-icon"></i> <span id="sound-toggle-text">Sound ON</span>
+                        <span id="sound-toggle-text">Sound ON</span>
                     </button>
                     <button class="btn btn-success" onclick="retryCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600;">
-                        <i class="fas fa-sync"></i> Refresh Feed
+                        Refresh Feed
                     </button>
                 </div>
             </div>
@@ -3744,11 +4146,8 @@ HTML_TEMPLATE = '''
         <!-- Energy Usage Page -->
         <div id="energy" class="page">
             <div class="header">
-                <h1><i class="fas fa-bolt"></i> Energy Usage</h1>
+                <h1>Energy Usage</h1>
                 <p>Real-time & historical energy monitoring from PZEM-016</p>
-                <button class="chart-option-btn" onclick="exportEnergyHistory()" style="margin-top: 8px;">
-                    <i class="fas fa-download"></i> Export Energy Data CSV
-                </button>
             </div>
 
             <!-- Real-time summary cards -->
@@ -3768,7 +4167,7 @@ HTML_TEMPLATE = '''
                 <div class="power-card">
                     <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
                     <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W</div>
+                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W | Current: <span id="total-current">0</span> A</div>
                 </div>
 
                 <div class="power-card">
@@ -3781,9 +4180,8 @@ HTML_TEMPLATE = '''
             <!-- Historical Power Chart -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-area"></i> Power Consumption (W)</div>
+                    <div class="chart-title">Power Consumption (W)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyPower', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
@@ -3792,14 +4190,19 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyPowerChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-power-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-power-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-power-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-power-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Historical Voltage Chart -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-bolt"></i> Voltage (V)</div>
+                    <div class="chart-title">Voltage (V)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyVoltage', 'Voltage (V)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
@@ -3808,99 +4211,169 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyVoltageChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-voltage-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-voltage-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-voltage-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
+            </div>
+
+            <!-- Historical Current Chart -->
+            <div class="chart-container" style="margin-top: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title">Current (A)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '24h', this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '30d', this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="energyCurrentChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-current-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-current-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-current-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-current-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Historical Energy kWh Chart -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-battery-half"></i> Cumulative Energy (kWh)</div>
+                    <div class="chart-title">Cumulative Energy (kWh)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energyKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
                     </div>
                 </div>
                 <canvas id="energyKwhChart" height="80"></canvas>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
+                    <span>Latest: <strong id="energy-kwh-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span>Min: <strong id="energy-kwh-min" style="color:var(--text-primary);">--</strong></span>
+                    <span>Max: <strong id="energy-kwh-max" style="color:var(--text-primary);">--</strong></span>
+                    <span>Avg: <strong id="energy-kwh-avg" style="color:var(--text-primary);">--</strong></span>
+                </div>
             </div>
 
             <!-- Estimated daily energy (real-time) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-line"></i> Real-time Energy Trend (kWh/day estimate)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('energy', 'Energy (kWh/day)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                    </div>
+                    <div class="chart-title">Real-time Energy Trend (kWh/day estimate)</div>
                 </div>
                 <canvas id="energyChart" height="80"></canvas>
             </div>
 
             <!-- ===== BEFORE vs AFTER Adaptive AC Comparison ===== -->
-            <div style="margin-top: 40px; padding: 24px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+            <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
                 <div style="text-align: center; margin-bottom: 20px;">
                     <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
-                        <i class="fas fa-exchange-alt"></i> Before vs After Adaptive AC
+                        Before vs After Adaptive AC
                     </h2>
                     <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
                 </div>
 
-                <!-- Phase Selector -->
-                <div style="display: flex; justify-content: center; gap: 12px; margin-bottom: 20px;">
-                    <button id="btn-phase-before" onclick="setEnergyPhase('before')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px;">
-                        <i class="fas fa-clock"></i> BEFORE (Recording)
-                    </button>
-                    <button id="btn-phase-after" onclick="setEnergyPhase('after')" style="padding: 14px 28px; border-radius: 12px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 8px; opacity: 0.6;">
-                        <i class="fas fa-robot"></i> AFTER (Recording)
-                    </button>
-                </div>
-                <div id="phase-indicator" style="text-align: center; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 600; margin-bottom: 20px; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
-                    <i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC
+                <!-- Recording Controls -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
+                    <!-- BEFORE Panel -->
+                    <div id="panel-before" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">
+                            BEFORE Adaptive AC
+                        </div>
+                        <div id="status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
+                            &#9675; Not started
+                        </div>
+                        <button id="btn-record-before" onclick="toggleRecording('before')"
+                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
+                            START RECORDING
+                        </button>
+                    </div>
+                    <!-- AFTER Panel -->
+                    <div id="panel-after" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">
+                            AFTER Adaptive AC
+                        </div>
+                        <div id="status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
+                            &#9675; Not started
+                        </div>
+                        <button id="btn-record-after" onclick="toggleRecording('after')"
+                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
+                            START RECORDING
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Savings Summary Cards -->
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px;">
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2);">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">
+                    <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Range:</span>
+                    <button class="chart-option-btn" id="compare-range-7d" onclick="setCompareRange('7d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">7 Days</button>
+                    <button class="chart-option-btn" id="compare-range-30d" onclick="setCompareRange('30d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">30 Days</button>
+                    <button class="chart-option-btn active" id="compare-range-all" onclick="setCompareRange('all', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">All</button>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(3, minmax(130px,1fr)); gap: 12px; margin-bottom: 20px;">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
                         <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="compare-avg-before">--</span> W</div>
                     </div>
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2);">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(16, 185, 129, 0.10); border: 1px solid rgba(16, 185, 129, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg After</div>
                         <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="compare-avg-after">--</span> W</div>
                     </div>
-                    <div style="padding: 16px; border-radius: 12px; text-align: center; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.2);">
+                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(99, 102, 241, 0.10); border: 1px solid rgba(99, 102, 241, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
                         <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Energy Savings</div>
                         <div style="font-size: 22px; font-weight: 700; color: #6366f1;"><span id="compare-savings">--</span>%</div>
                     </div>
                 </div>
 
-                <!-- Comparison Chart -->
-                <div class="chart-container" style="border: none; padding: 0;">
-                    <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-chart-bar"></i> Power Comparison (W)</div>
-                        <div class="chart-options">
-                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompare', 'Power (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('power', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('power', '30d', this)">30d</button>
+                <!-- Power Comparison - 2 Charts Side by Side -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+                    <div class="chart-container" style="border: none; padding: 0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Power (W)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('energyCompareBefore', 'Power Before (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
                         </div>
+                        <canvas id="energyCompareBeforeChart" height="120"></canvas>
                     </div>
-                    <canvas id="energyCompareChart" height="100"></canvas>
+                    <div class="chart-container" style="border: none; padding: 0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color: #10b981;">AFTER — Power (W)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('energyCompareAfter', 'Power After (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="energyCompareAfterChart" height="120"></canvas>
+                    </div>
                 </div>
 
-                <!-- Energy kWh Comparison -->
-                <div class="chart-container" style="border: none; padding: 0; margin-top: 16px;">
-                    <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-battery-half"></i> Energy (kWh) Comparison</div>
-                        <div class="chart-options">
-                            <button class="chart-option-btn" onclick="exportCompareChart('energyCompareKwh', 'Energy (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            <button class="chart-option-btn active" onclick="loadEnergyCompare('energy_kwh', '30m', this)" title="Test: 5 menit before + 5 menit after">TEST 30m</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyCompare('energy_kwh', '30d', this)">30d</button>
+                <!-- Energy kWh Comparison - 2 Charts Side by Side -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px;">
+                    <div class="chart-container" style="border: none; padding: 0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Energy (kWh)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhBefore', 'Energy Before (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
                         </div>
+                        <canvas id="energyCompareKwhBeforeChart" height="120"></canvas>
                     </div>
-                    <canvas id="energyCompareKwhChart" height="100"></canvas>
+                    <div class="chart-container" style="border: none; padding: 0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color: #10b981;">AFTER — Energy (kWh)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhAfter', 'Energy After (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="energyCompareKwhAfterChart" height="120"></canvas>
+                    </div>
                 </div>
             </div>
         </div>
@@ -3909,60 +4382,60 @@ HTML_TEMPLATE = '''
         <!-- AC Control Page -->
         <div id="control-ac" class="page">
             <div class="header">
-                <h1><i class="fas fa-snowflake"></i> AC Control Panel</h1>
-                <p>AC Control using IRMitsubishiHeavy library</p>
+                <h1>AC Control Panel</h1>
+                <p>Mitsubishi Heavy — IRMitsubishiHeavy library</p>
             </div>
 
             <!-- ========== MODE SELECTOR (PROMINENT) ========== -->
             <div id="ac-mode-selector" style="margin-bottom: 20px; padding: 20px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
                 <div style="text-align: center; margin-bottom: 14px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">
-                    <i class="fas fa-cog"></i> Control Mode
+                    Control Mode
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                     <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
-                        <i class="fas fa-robot" style="font-size: 28px;"></i>
+                        <span style="font-size: 24px; font-weight: 800;">A</span>
                         <span>ADAPTIVE</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically</span>
                     </button>
                     <button id="btn-mode-manual" onclick="setACMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
-                        <i class="fas fa-hand-paper" style="font-size: 28px;"></i>
+                        <span style="font-size: 24px; font-weight: 800;">M</span>
                         <span>MANUAL</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control AC manually</span>
                     </button>
                 </div>
                 <!-- Current mode indicator -->
                 <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
-                    <i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)
+                    Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization
                 </div>
             </div>
 
             <!-- ========== ADAPTIVE INFO BANNER (shown when ADAPTIVE) ========== -->
             <div id="adaptive-info-banner" style="margin-bottom: 20px; padding: 20px; border-radius: 14px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.12)); border: 2px solid rgba(16, 185, 129, 0.3);">
                 <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
-                    <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center;">
-                        <i class="fas fa-brain" style="color: white; font-size: 22px;"></i>
+                    <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; font-weight: 800;">
+                        GA
                     </div>
                     <div>
                         <div style="font-size: 16px; font-weight: 700; color: #10b981;">Adaptive Mode Active</div>
-                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed automatically</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Temp</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Temp</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-temp">--</div>
                     </div>
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fan</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Fan</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fan">--</div>
                     </div>
                     <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 11px;">GA Fitness</div>
+                        <div style="color: var(--text-secondary); font-size: 11px;">Fitness</div>
                         <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fitness">--</div>
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
-                    <i class="fas fa-lock"></i> Manual control is disabled in Adaptive mode. Switch to Manual to control AC manually.
+                    Manual control disabled in Adaptive mode. Switch to Manual to control AC.
                 </div>
             </div>
 
@@ -3970,7 +4443,7 @@ HTML_TEMPLATE = '''
                 <!-- OVERLAY: blocks manual controls when ADAPTIVE -->
                 <div id="ac-manual-overlay" style="display: block; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); backdrop-filter: blur(3px); border-radius: 12px; z-index: 10; display: flex; align-items: center; justify-content: center; cursor: not-allowed;">
                     <div style="text-align: center; color: white;">
-                        <i class="fas fa-lock" style="font-size: 36px; margin-bottom: 10px; opacity: 0.8;"></i>
+                        <div style="font-size: 28px; margin-bottom: 10px; opacity: 0.8;">🔒</div>
                         <div style="font-size: 14px; font-weight: 600;">Adaptive Mode Active</div>
                         <div style="font-size: 12px; opacity: 0.7;">Switch to Manual to use these controls</div>
                     </div>
@@ -3988,44 +4461,44 @@ HTML_TEMPLATE = '''
                         <span style="font-weight: 600; color: var(--text);">AC <span id="ac-live-state">OFF</span></span>
                     </div>
                     <div style="display: flex; gap: 16px; color: var(--text-secondary);">
-                        <span><i class="fas fa-thermometer-half"></i> <span id="ac-live-temp">24</span>°C</span>
-                        <span><i class="fas fa-fan"></i> Fan <span id="ac-live-fan">1</span></span>
-                        <span><i class="fas fa-cog"></i> <span id="ac-live-mode">COOL</span></span>
+                        <span><span id="ac-live-temp">24</span>°C</span>
+                        <span>Fan <span id="ac-live-fan">1</span></span>
+                        <span><span id="ac-live-mode">COOL</span></span>
                     </div>
                 </div>
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
                     <button class="btn btn-success" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_ON')">
-                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC ON
+                        AC ON
                     </button>
                     <button class="btn btn-danger" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('POWER_OFF')">
-                        <i class="fas fa-power-off" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> AC OFF
+                        AC OFF
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_UP')">
-                        <i class="fas fa-temperature-high" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP +
+                        TEMP +
                     </button>
                     <button class="btn btn-primary" style="padding: 20px; font-size: 16px; border-radius: 12px;" onclick="sendACCommand('TEMP_DOWN')">
-                        <i class="fas fa-temperature-low" style="font-size: 24px; display: block; margin-bottom: 8px;"></i> TEMP -
+                        TEMP −
                     </button>
                 </div>
 
                 <!-- AC Mode Buttons -->
                 <div style="margin-top: 20px;">
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
-                        <i class="fas fa-cog"></i> AC Mode
+                        AC Mode
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
                         <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white; flex-direction: column;" onclick="sendACMode('MODE_AUTO', this)">
-                            <i class="fas fa-magic" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Auto
+                            Auto
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white; flex-direction: column;" onclick="sendACMode('MODE_COOL', this)">
-                            <i class="fas fa-snowflake" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Cool
+                            Cool
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white; flex-direction: column;" onclick="sendACMode('MODE_FAN', this)">
-                            <i class="fas fa-fan" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Fan
+                            Fan
                         </button>
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white; flex-direction: column;" onclick="sendACMode('MODE_DRY', this)">
-                            <i class="fas fa-tint-slash" style="font-size: 20px; display: block; margin-bottom: 6px;"></i> Dry
+                            Dry
                         </button>
                     </div>
                 </div>
@@ -4033,7 +4506,7 @@ HTML_TEMPLATE = '''
                 <!-- AC Temperature & Fan Speed Sliders -->
                 <div style="margin-top: 20px; padding: 20px; background: rgba(99, 102, 241, 0.05); border-radius: 12px; border: 1px solid var(--border);">
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 15px; font-weight: 600;">
-                        <i class="fas fa-sliders-h"></i> AC Settings (Direct MQTT)
+                        AC Settings (Direct MQTT)
                     </div>
                     <div class="control-group" style="margin-bottom: 15px;">
                         <label class="control-label">Temperature: <span id="ac-temp-display" style="color: var(--primary); font-weight: bold;">24</span>°C</label>
@@ -4053,29 +4526,29 @@ HTML_TEMPLATE = '''
                         <label class="control-label">AC Mode:</label>
                         <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 8px;">
                             <button class="btn ac-set-mode-btn" data-mode="AUTO" onclick="selectACSetMode('AUTO', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-magic"></i><br>Auto
+                                Auto
                             </button>
                             <button class="btn ac-set-mode-btn active" data-mode="COOL" onclick="selectACSetMode('COOL', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--primary); border: 2px solid var(--primary); color: white; cursor: pointer;">
-                                <i class="fas fa-snowflake"></i><br>Cool
+                                Cool
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="HEAT" onclick="selectACSetMode('HEAT', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-fire"></i><br>Heat
+                                Heat
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="DRY" onclick="selectACSetMode('DRY', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-tint-slash"></i><br>Dry
+                                Dry
                             </button>
                             <button class="btn ac-set-mode-btn" data-mode="FAN" onclick="selectACSetMode('FAN', this)" style="padding: 8px; font-size: 11px; border-radius: 8px; background: var(--card-bg); border: 2px solid var(--border); color: var(--text); cursor: pointer;">
-                                <i class="fas fa-fan"></i><br>Fan
+                                Fan
                             </button>
                         </div>
                     </div>
                     <button class="btn btn-primary" onclick="applyACSettings()" style="width: 100%; padding: 12px; border-radius: 10px; font-weight: 600;">
-                        <i class="fas fa-paper-plane"></i> Apply AC Settings
+                        Apply AC Settings
                     </button>
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    <i class="fas fa-info-circle"></i> Using IRMitsubishiHeavy library — no manual learning needed.
+                    IRMitsubishiHeavy library — no manual learning needed.
                 </div>
             </div>
         </div>
@@ -4083,7 +4556,7 @@ HTML_TEMPLATE = '''
         <!-- Lamp Control Page -->
         <div id="control-lamp" class="page">
             <div class="header">
-                <h1><i class="fas fa-lightbulb"></i> Lamp Control Panel</h1>
+                <h1>Lamp Control Panel</h1>
                 <p>Manual lamp control and brightness settings — 3 Lamps</p>
             </div>
 
@@ -4094,26 +4567,26 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #f59e0b;"></i> Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
+                    <label class="control-label">Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #10b981;"></i> Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
+                    <label class="control-label">Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label"><i class="fas fa-lightbulb" style="color: #6366f1;"></i> Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
+                    <label class="control-label">Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
                 </div>
 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-primary" onclick="applyLampSettings()">
-                        <i class="fas fa-check"></i> Apply All
+                        Apply All
                     </button>
                     <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
-                        <i class="fas fa-sync"></i> Sync All to Lamp 1
+                        Sync All to Lamp 1
                     </button>
                 </div>
             </div>
@@ -4122,7 +4595,7 @@ HTML_TEMPLATE = '''
         <!-- ML Optimization Page -->
         <div id="ml-optimization" class="page">
             <div class="header">
-                <h1><i class="fas fa-brain"></i> Machine Learning Optimization</h1>
+                <h1>Machine Learning Optimization</h1>
                 <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
             </div>
 
@@ -4131,7 +4604,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">GA -> AC</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;"><i class="fas fa-dna"></i></div>
+                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">GA</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #10b981;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
@@ -4140,7 +4613,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimized Temp</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;"><i class="fas fa-thermometer-half"></i></div>
+                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
                     <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span></span></div>
@@ -4149,7 +4622,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;"><i class="fas fa-chart-line"></i></div>
+                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
@@ -4158,7 +4631,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimized Brightness</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-lightbulb"></i></div>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-brightness" style="color: #6366f1;">--</span>%</div>
                     <div class="stat-change"><span>Lamp Level</span></div>
@@ -4167,7 +4640,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Current Conditions</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;"><i class="fas fa-database"></i></div>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">DB</div>
                     </div>
                     <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
                         Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
@@ -4179,7 +4652,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimization Runs</span>
-                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;"><i class="fas fa-sync-alt"></i></div>
+                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">#</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #a855f7;">0</span></div>
                     <div class="stat-change"><span>Total Cycles</span></div>
@@ -4189,11 +4662,11 @@ HTML_TEMPLATE = '''
             <!-- GA Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-dna" style="color: #10b981;"></i> GA Fitness Convergence (AC Optimization)</div>
+                    <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run GA
+                            Run GA
                         </button>
                     </div>
                 </div>
@@ -4203,11 +4676,11 @@ HTML_TEMPLATE = '''
             <!-- PSO Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-chart-line" style="color: #f59e0b;"></i> PSO Fitness Convergence (Lamp Optimization)</div>
+                    <div class="chart-title">PSO Fitness Convergence (Lamp Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run PSO
+                            Run PSO
                         </button>
                     </div>
                 </div>
@@ -4217,14 +4690,14 @@ HTML_TEMPLATE = '''
             <!-- GA vs PSO Comparison Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-balance-scale" style="color: #6366f1;"></i> GA vs PSO — Fitness Comparison</div>
+                    <div class="chart-title">GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
-                            <i class="fas fa-play"></i> Run Both
+                            Run Both
                         </button>
                         <button class="chart-option-btn" onclick="clearMLCharts()">
-                            <i class="fas fa-eraser"></i> Clear
+                            Clear
                         </button>
                     </div>
                 </div>
@@ -4234,13 +4707,13 @@ HTML_TEMPLATE = '''
             <!-- Optimization History Table -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title"><i class="fas fa-history" style="color: #a855f7;"></i> Optimization History</div>
+                    <div class="chart-title">Optimization History</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportMLHistory()">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
                         <button class="chart-option-btn" onclick="refreshMLHistory()">
-                            <i class="fas fa-sync"></i> Refresh
+                            Refresh
                         </button>
                     </div>
                 </div>
@@ -4269,7 +4742,7 @@ HTML_TEMPLATE = '''
             <div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
                 <div class="chart-container" style="margin-bottom: 0;">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-cog" style="color: #10b981;"></i> GA Parameters</div>
+                        <div class="chart-title">GA Parameters</div>
                     </div>
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
@@ -4293,7 +4766,7 @@ HTML_TEMPLATE = '''
 
                 <div class="chart-container" style="margin-bottom: 0;">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-cog" style="color: #f59e0b;"></i> PSO Parameters</div>
+                        <div class="chart-title">PSO Parameters</div>
                     </div>
                     <div class="ml-param-grid">
                         <div class="ml-param-item">
@@ -4334,7 +4807,7 @@ HTML_TEMPLATE = '''
         <!-- Occupancy Trend & Feedback Page -->
         <div id="occupancy-feedback" class="page">
             <div class="header">
-                <h1><i class="fas fa-users"></i> Occupancy Trend & Feedback</h1>
+                <h1>Occupancy Trend & Feedback</h1>
                 <p>Monitor occupancy trends and submit room comfort ratings (1-5)</p>
             </div>
 
@@ -4363,7 +4836,7 @@ HTML_TEMPLATE = '''
             <div class="feedback-grid">
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-star"></i> Comfort Feedback</div>
+                        <div class="chart-title">Comfort Feedback</div>
                     </div>
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
                         Scale: 1 = Not Satisfied, 5 = Very Satisfied
@@ -4384,20 +4857,20 @@ HTML_TEMPLATE = '''
 
                     <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
                         <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
-                            <i class="fas fa-save"></i> Save Form Link
+                            Save Form Link
                         </button>
                         <button class="btn btn-success" onclick="openGoogleForm()">
-                            <i class="fas fa-external-link-alt"></i> Open Google Form
+                            Open Google Form
                         </button>
                         <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
-                            <i class="fas fa-paper-plane"></i> Submit Feedback
+                            Submit Feedback
                         </button>
                     </div>
                 </div>
 
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title"><i class="fas fa-history"></i> Recent Feedback</div>
+                        <div class="chart-title">Recent Feedback</div>
                         <div class="chart-options">
                             <button class="chart-option-btn" onclick="exportFeedback()">
                                 <i class="fas fa-download"></i> Export CSV
@@ -4424,17 +4897,17 @@ HTML_TEMPLATE = '''
     <!-- Detection Alert -->
     <div id="detection-alert" class="detection-alert">
         <button class="detection-close" onclick="closeDetectionAlert()">
-            <i class="fas fa-times"></i>
+            &times;
         </button>
         <div class="detection-alert-header">
-            <i class="fas fa-exclamation-triangle detection-alert-icon"></i>
+            <span style="font-size: 24px;">!</span>
             <span>Person Detected!</span>
         </div>
         <div class="detection-alert-body">
             <div><strong id="alert-person-count">0</strong> person(s) detected</div>
             <div>Confidence: <strong id="alert-person-confidence">0%</strong></div>
             <div style="margin-top: 8px; font-size: 12px; opacity: 0.8;">
-                <i class="fas fa-clock"></i> <span id="alert-time">--:--:--</span>
+                <span id="alert-time">--:--:--</span>
             </div>
         </div>
     </div>
@@ -4469,14 +4942,30 @@ HTML_TEMPLATE = '''
 
         var learnedCodes = {};
 
+        function formatChartValue(v, unit) {
+            const n = parseFloat(v || 0);
+            if (!Number.isFinite(n)) return '--';
+            return (unit ? n.toFixed(2) + ' ' + unit : n.toFixed(2));
+        }
+
+        // styleLineChart removed — all styling moved into makeOpts/makeEnergyOpts at chart creation
+        // Mutating chart.options post-creation causes _scriptable recursion in Chart.js 4.x
+
+        // Gradients removed — CanvasGradient objects cause _scriptable recursion in Chart.js 4.x
+        // Static rgba() backgroundColor set at chart creation provides the fill effect
+
         // ==================== LOCALSTORAGE PERSISTENCE ====================
         function saveSettings() {
+            const getVal = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? el.value : fallback;
+            };
             const settings = {
-                acTemp: document.getElementById('ac-temp-slider')?.value || 24,
-                fanSpeed: document.getElementById('fan-speed-slider')?.value || 1,
-                lampBrightness1: document.getElementById('brightness-slider-1')?.value || 0,
-                lampBrightness2: document.getElementById('brightness-slider-2')?.value || 0,
-                lampBrightness3: document.getElementById('brightness-slider-3')?.value || 0
+                acTemp: getVal('ac-temp-slider', 24) || 24,
+                fanSpeed: getVal('fan-speed-slider', 1) || 1,
+                lampBrightness1: getVal('brightness-slider-1', 0) || 0,
+                lampBrightness2: getVal('brightness-slider-2', 0) || 0,
+                lampBrightness3: getVal('brightness-slider-3', 0) || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -4515,118 +5004,156 @@ HTML_TEMPLATE = '''
 
         // ==================== CHARTS ====================
         function initCharts() {
-            const chartConfig = {
-                type: 'line',
-                options: {
+            function makeOpts(showLegend) {
+                var opts = {
                     responsive: true,
                     maintainAspectRatio: true,
-                    plugins: { legend: { display: false } },
+                    animation: false,
+                    plugins: { legend: { display: !!showLegend } },
                     scales: {
                         y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
                         x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
                     }
+                };
+                if (showLegend) {
+                    opts.plugins.legend.labels = { color: '#94a3b8', font: { size: 12 } };
                 }
-            };
+                return opts;
+            }
+
+            // Energy-specific options with tooltip formatting and styled axes
+            function makeEnergyOpts(unit) {
+                return {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                            titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0',
+                            borderColor: 'rgba(148,163,184,0.35)',
+                            borderWidth: 1,
+                            displayColors: true,
+                            callbacks: {
+                                label: function(ctx) {
+                                    var label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                                    return label + ': ' + formatChartValue(ctx.parsed.y, unit);
+                                },
+                                title: function(items) {
+                                    return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.12)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' } }
+                    }
+                };
+            }
 
             charts.temp = new Chart(document.getElementById('tempChart'), {
-                ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'Temperature (°C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Temperature (\u00b0C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.hum = new Chart(document.getElementById('humChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Humidity (%)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
-                ...chartConfig,
-                data: { labels: [], datasets: [{ label: 'AC Target Temp (°C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'AC Target Temp (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Light Intensity (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.energy = new Chart(document.getElementById('energyChart'), {
-                ...chartConfig,
+                type: 'line', options: makeEnergyOpts('kWh/day'),
                 data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
-            // Historical Energy Charts (PZEM-016 from InfluxDB)
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
-                ...chartConfig,
+                type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
-                ...chartConfig,
+                type: 'line', options: makeEnergyOpts('V'),
                 data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
+            charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
+                type: 'line', options: makeEnergyOpts('A'),
+                data: { labels: [], datasets: [{ label: 'Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+            });
+
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                ...chartConfig,
+                type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
-            // Before vs After Comparison Charts
-            charts.energyCompare = new Chart(document.getElementById('energyCompareChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
-                },
-                data: {
-                    labels: [],
-                    datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
-                    ]
-                }
-            });
+            // Energy Comparison: 4 separate charts (Before/After x Power/kWh) for side-by-side view
+            var compareLineOpts = function(unit) {
+                return {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 }, maxRotation: 45, maxTicksLimit: 12 } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#94a3b8', font: { size: 10 } }, title: { display: true, text: unit, color: '#94a3b8', font: { size: 11 } } }
+                    }
+                };
+            };
 
-            charts.energyCompareKwh = new Chart(document.getElementById('energyCompareKwhChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8', font: { size: 12 } } } }
-                },
-                data: {
-                    labels: [],
-                    datasets: [
-                        { label: 'Before Adaptive AC', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 },
-                        { label: 'After Adaptive AC', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }
-                    ]
-                }
+            charts.energyCompareBefore = new Chart(document.getElementById('energyCompareBeforeChart'), {
+                type: 'line', options: compareLineOpts('W'),
+                data: { labels: [], datasets: [{ label: 'Before — Power', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.energyCompareAfter = new Chart(document.getElementById('energyCompareAfterChart'), {
+                type: 'line', options: compareLineOpts('W'),
+                data: { labels: [], datasets: [{ label: 'After — Power', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.energyCompareKwhBefore = new Chart(document.getElementById('energyCompareKwhBeforeChart'), {
+                type: 'line', options: compareLineOpts('kWh'),
+                data: { labels: [], datasets: [{ label: 'Before — Energy', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.energyCompareKwhAfter = new Chart(document.getElementById('energyCompareKwhAfterChart'), {
+                type: 'line', options: compareLineOpts('kWh'),
+                data: { labels: [], datasets: [{ label: 'After — Energy', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
-            // ML Optimization Charts
             charts.gaFitness = new Chart(document.getElementById('gaFitnessChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
-                ...chartConfig,
+                type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'PSO Best Fitness', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
-                ...chartConfig,
-                options: {
-                    ...chartConfig.options,
-                    plugins: { legend: { display: true, labels: { color: '#94a3b8' } } }
-                },
+                type: 'line', options: makeOpts(true),
                 data: {
                     labels: [],
                     datasets: [
@@ -4635,6 +5162,45 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
+
+            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
+        }
+
+        // Ensure charts are available even if init runs before library/page is fully ready.
+        function ensureChartsReady() {
+            if (typeof Chart === 'undefined') {
+                console.warn('[CHART] Chart.js not loaded yet');
+                if (!window.__chartFallbackRequested) {
+                    window.__chartFallbackRequested = true;
+                    try {
+                        var s = document.createElement('script');
+                        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
+                        s.onload = function() {
+                            console.log('[CHART] Fallback Chart.js loaded');
+                            try { initCharts(); } catch(e) { console.error('[CHART] init after fallback failed:', e); }
+                            try { loadAllEnergyCharts(); } catch(e) { console.error('[CHART] load after fallback failed:', e); }
+                        };
+                        s.onerror = function() {
+                            console.error('[CHART] Fallback Chart.js failed to load');
+                        };
+                        document.head.appendChild(s);
+                    } catch (e) {
+                        console.error('[CHART] Fallback loader error:', e);
+                    }
+                }
+                return false;
+            }
+
+            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) {
+                try {
+                    initCharts();
+                } catch (e) {
+                    console.error('[CHART] initCharts retry failed:', e);
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         function updateChartData(chartName, hours) {
@@ -4649,15 +5215,15 @@ HTML_TEMPLATE = '''
             }
 
             fetch(endpoint)
-                .then(r => r.json())
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
                 .then(data => {
                     if (data && data.length > 0) {
                         charts[chartName].data.labels = data.map(d => d.time);
                         charts[chartName].data.datasets[0].data = data.map(d => d.value);
-                        charts[chartName].update();
+                        charts[chartName].update('none');
                     }
                 })
-                .catch(e => console.error('Chart error:', e));
+                .catch(e => console.warn('Chart data unavailable (' + chartName + '):', e.message));
         }
 
         function changeChartRange(chartName, hours) {
@@ -4675,8 +5241,120 @@ HTML_TEMPLATE = '''
         var energyChartMap = {
             'power': 'energyPower',
             'voltage': 'energyVoltage',
+            'current': 'energyCurrent',
             'energy_kwh': 'energyKwh'
         };
+
+        var energyCanvasMap = {
+            'power': 'energyPowerChart',
+            'voltage': 'energyVoltageChart',
+            'current': 'energyCurrentChart',
+            'energy_kwh': 'energyKwhChart'
+        };
+
+        var energyColorMap = {
+            'power': '#ef4444',
+            'voltage': '#3b82f6',
+            'current': '#f59e0b',
+            'energy_kwh': '#10b981'
+        };
+
+        function updateEnergyStats(field, values) {
+            if (!values || values.length === 0) return;
+            var prefixMap = {'power': 'energy-power', 'voltage': 'energy-voltage', 'current': 'energy-current', 'energy_kwh': 'energy-kwh'};
+            const prefix = prefixMap[field] || ('energy-' + field);
+            const minV = Math.min(...values);
+            const maxV = Math.max(...values);
+            const avgV = values.reduce((a, b) => a + b, 0) / values.length;
+            const lastV = values[values.length - 1];
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+            set(prefix + '-latest', lastV.toFixed(2));
+            set(prefix + '-min', minV.toFixed(2));
+            set(prefix + '-max', maxV.toFixed(2));
+            set(prefix + '-avg', avgV.toFixed(2));
+        }
+
+        function drawEnergyFallback(field, points) {
+            const canvasId = energyCanvasMap[field];
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const width = Math.max(320, Math.floor(rect.width || canvas.width || 640));
+            const height = Math.max(160, Math.floor(rect.height || canvas.height || 220));
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+            ctx.lineWidth = 1;
+            for (let i = 1; i <= 4; i++) {
+                const y = (height / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            if (!points || points.length === 0) {
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '13px sans-serif';
+                ctx.fillText('Waiting energy data...', 16, Math.floor(height / 2));
+                return;
+            }
+
+            const values = points.map(p => parseFloat(p.value || 0)).filter(v => Number.isFinite(v));
+            if (values.length === 0) return;
+
+            let minV = Math.min(...values);
+            let maxV = Math.max(...values);
+            if (minV === maxV) {
+                minV -= 1;
+                maxV += 1;
+            }
+
+            const padX = 26;
+            const padY = 18;
+            const plotW = width - padX * 2;
+            const plotH = height - padY * 2;
+
+            ctx.strokeStyle = energyColorMap[field] || '#a855f7';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const dotColor = energyColorMap[field] || '#a855f7';
+            values.forEach((v, i) => {
+                const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
+                const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Point markers for each incoming sample
+            values.forEach((v, i) => {
+                const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
+                const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
+                ctx.beginPath();
+                ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+                ctx.fillStyle = dotColor;
+                ctx.fill();
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+            });
+
+            const last = values[values.length - 1];
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Latest: ' + last.toFixed(2), 12, 14);
+            updateEnergyStats(field, values);
+        }
 
         function loadEnergyHistory(field, period, btnElement) {
             // Update button active state
@@ -4687,20 +5365,42 @@ HTML_TEMPLATE = '''
             }
 
             const chartName = energyChartMap[field];
-            if (!chartName || !charts[chartName]) return;
+            if (!chartName) return;
 
             fetch('/api/energy/history?field=' + field + '&period=' + period)
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(result => {
                     const data = result.data || [];
                     const chart = charts[chartName];
 
-                    chart.data.labels = data.map(d => d.time);
-                    chart.data.datasets[0].data = data.map(d => d.value);
-                    chart.update();
+                    if (chart && chart.data && chart.data.datasets && chart.data.datasets[0]) {
+                        chart.data.labels = data.map(d => d.time);
+                        const values = data.map(d => parseFloat(d.value || 0));
+                        chart.data.datasets[0].data = values;
+                        chart.update('none');
+                        updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
+                    } else {
+                        drawEnergyFallback(field, data);
+                    }
 
-                    if (data.length === 0) {
-                        console.log('No energy data for ' + field + ' / ' + period);
+                    // Show "No Data" overlay on canvas if empty
+                    var canvasId = energyCanvasMap[field];
+                    var noDataId = 'nodata-' + canvasId;
+                    var existingOverlay = document.getElementById(noDataId);
+                    if (existingOverlay) existingOverlay.remove();
+                    if (data.length === 0 && canvasId) {
+                        var canvas = document.getElementById(canvasId);
+                        if (canvas && canvas.parentElement) {
+                            var overlay = document.createElement('div');
+                            overlay.id = noDataId;
+                            overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
+                            overlay.textContent = 'No data — waiting for PZEM-016';
+                            canvas.parentElement.style.position = 'relative';
+                            canvas.parentElement.appendChild(overlay);
+                        }
                     }
                 })
                 .catch(e => console.error('Energy history error:', e));
@@ -4709,113 +5409,129 @@ HTML_TEMPLATE = '''
         function loadAllEnergyCharts() {
             loadEnergyHistory('power', '1h', null);
             loadEnergyHistory('voltage', '1h', null);
+            loadEnergyHistory('current', '1h', null);
             loadEnergyHistory('energy_kwh', '24h', null);
-            loadEnergyCompare('power', '30m', null);
-            loadEnergyCompare('energy_kwh', '30m', null);
-            loadCurrentPhase();
+            loadEnergyCompare('power');
+            loadEnergyCompare('energy_kwh');
+            loadRecordingState();
         }
 
-        // ==================== BEFORE vs AFTER COMPARISON ====================
-        var currentEnergyPhase = 'before';
+        // ==================== BEFORE vs AFTER RECORDING ====================
+        var energyRecording = {
+            before: {active: false, start: null, end: null},
+            after: {active: false, start: null, end: null}
+        };
 
-        function loadCurrentPhase() {
-            fetch('/api/energy/phase')
+        function loadRecordingState() {
+            fetch('/api/energy/record')
                 .then(r => r.json())
                 .then(data => {
-                    currentEnergyPhase = data.phase;
-                    updatePhaseUI(data.phase);
+                    updateRecordingUI(data.recording);
                 })
-                .catch(e => console.error('Phase load error:', e));
+                .catch(e => console.error('Load recording state error:', e));
         }
 
-        function setEnergyPhase(phase) {
-            fetch('/api/energy/phase', {
+        function toggleRecording(phase) {
+            var rec = energyRecording[phase];
+            var action = rec.active ? 'stop' : 'start';
+            fetch('/api/energy/record', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({phase: phase})
+                body: JSON.stringify({phase: phase, action: action})
             })
             .then(r => r.json())
             .then(data => {
-                currentEnergyPhase = data.phase;
-                updatePhaseUI(data.phase);
+                updateRecordingUI(data.recording);
+                loadEnergyCompare('power');
+                loadEnergyCompare('energy_kwh');
+                showToast(action === 'start'
+                    ? 'Recording ' + phase.toUpperCase() + ' started'
+                    : 'Recording ' + phase.toUpperCase() + ' stopped', 'success');
             })
-            .catch(e => console.error('Phase set error:', e));
+            .catch(e => console.error('Record error:', e));
         }
 
-        function updatePhaseUI(phase) {
-            const btnBefore = document.getElementById('btn-phase-before');
-            const btnAfter = document.getElementById('btn-phase-after');
-            const indicator = document.getElementById('phase-indicator');
+        function updateRecordingUI(rec) {
+            if (!rec) return;
+            energyRecording = rec;
+            ['before', 'after'].forEach(function(phase) {
+                var r = rec[phase];
+                var statusEl = document.getElementById('status-' + phase);
+                var btnEl = document.getElementById('btn-record-' + phase);
+                if (!statusEl || !btnEl) return;
 
-            if (phase === 'before') {
-                btnBefore.style.border = '3px solid #f59e0b';
-                btnBefore.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-                btnBefore.style.color = 'white';
-                btnBefore.style.opacity = '1';
-                btnAfter.style.border = '3px solid var(--border)';
-                btnAfter.style.background = 'var(--bg-card)';
-                btnAfter.style.color = 'var(--text-secondary)';
-                btnAfter.style.opacity = '0.6';
-                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>BEFORE</strong> adaptive AC';
-                indicator.style.background = 'rgba(245, 158, 11, 0.1)';
-                indicator.style.color = '#f59e0b';
-                indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                var baseColor = phase === 'before' ? '#f59e0b' : '#10b981';
+                var darkColor = phase === 'before' ? '#d97706' : '#059669';
+
+                if (r.active) {
+                    var start = new Date(r.start + 'Z');
+                    var elapsed = Math.round((Date.now() - start.getTime()) / 3600000);
+                    var days = Math.floor(elapsed / 24);
+                    var hours = elapsed % 24;
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color: #ef4444; font-size: 8px; animation: blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleDateString() + ' ' + start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    btnEl.innerHTML = 'STOP RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                } else if (r.start && r.end) {
+                    var start = new Date(r.start + 'Z');
+                    var end = new Date(r.end + 'Z');
+                    var dur = Math.round((end - start) / 3600000);
+                    var days = Math.floor(dur / 24);
+                    var hours = dur % 24;
+                    statusEl.innerHTML = '<strong>Completed</strong><br>' + start.toLocaleDateString() + ' &rarr; ' + end.toLocaleDateString() + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    btnEl.innerHTML = 'RESET & RE-RECORD';
+                    btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
+                } else {
+                    statusEl.innerHTML = '&#9675; Not started';
+                    btnEl.innerHTML = 'START RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg, ' + baseColor + ', ' + darkColor + ')';
+                }
+            });
+        }
+
+        var compareRange = 'all';  // current compare range selection
+        function loadEnergyCompare(field, range) {
+            if (range) compareRange = range;
+            var beforeChart, afterChart;
+            if (field === 'energy_kwh') {
+                beforeChart = charts.energyCompareKwhBefore;
+                afterChart = charts.energyCompareKwhAfter;
             } else {
-                btnAfter.style.border = '3px solid #10b981';
-                btnAfter.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                btnAfter.style.color = 'white';
-                btnAfter.style.opacity = '1';
-                btnBefore.style.border = '3px solid var(--border)';
-                btnBefore.style.background = 'var(--bg-card)';
-                btnBefore.style.color = 'var(--text-secondary)';
-                btnBefore.style.opacity = '0.6';
-                indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; animation: blink 1s infinite;"></i> Currently recording: <strong>AFTER</strong> adaptive AC';
-                indicator.style.background = 'rgba(16, 185, 129, 0.1)';
-                indicator.style.color = '#10b981';
-                indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                beforeChart = charts.energyCompareBefore;
+                afterChart = charts.energyCompareAfter;
             }
-        }
+            if (!beforeChart || !afterChart) return;
 
-        function loadEnergyCompare(field, period, btnElement) {
-            if (btnElement) {
-                const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
-                buttons.forEach(btn => btn.classList.remove('active'));
-                btnElement.classList.add('active');
-            }
-
-            const chartName = field === 'energy_kwh' ? 'energyCompareKwh' : 'energyCompare';
-            if (!charts[chartName]) return;
-
-            fetch('/api/energy/compare?field=' + field + '&period=' + period)
+            fetch('/api/energy/compare?field=' + field + '&range=' + compareRange)
                 .then(r => r.json())
                 .then(result => {
-                    const beforeData = result.before || [];
-                    const afterData = result.after || [];
-                    const summary = result.summary || {};
+                    var beforeData = result.before || [];
+                    var afterData = result.after || [];
+                    var summary = result.summary || {};
 
-                    // Use the longer dataset's time labels
-                    const allTimes = [...new Set([
-                        ...beforeData.map(d => d.time),
-                        ...afterData.map(d => d.time)
-                    ])].sort();
+                    // BEFORE chart — its own labels & data
+                    beforeChart.data.labels = beforeData.map(function(d) { return d.label; });
+                    beforeChart.data.datasets[0].data = beforeData.map(function(d) { return d.value; });
+                    beforeChart.update('none');
 
-                    const beforeMap = {};
-                    beforeData.forEach(d => beforeMap[d.time] = d.value);
-                    const afterMap = {};
-                    afterData.forEach(d => afterMap[d.time] = d.value);
+                    // AFTER chart — its own labels & data
+                    afterChart.data.labels = afterData.map(function(d) { return d.label; });
+                    afterChart.data.datasets[0].data = afterData.map(function(d) { return d.value; });
+                    afterChart.update('none');
 
-                    const chart = charts[chartName];
-                    chart.data.labels = allTimes;
-                    chart.data.datasets[0].data = allTimes.map(t => beforeMap[t] !== undefined ? beforeMap[t] : null);
-                    chart.data.datasets[1].data = allTimes.map(t => afterMap[t] !== undefined ? afterMap[t] : null);
-                    chart.options.spanGaps = true;
-                    chart.update();
+                    // Sync Y-axis scale so both charts have same max for fair visual comparison
+                    var allVals = beforeData.map(function(d){return d.value;}).concat(afterData.map(function(d){return d.value;}));
+                    if (allVals.length > 0) {
+                        var maxVal = Math.max.apply(null, allVals) * 1.1;
+                        beforeChart.options.scales.y.max = maxVal;
+                        afterChart.options.scales.y.max = maxVal;
+                        beforeChart.update('none');
+                        afterChart.update('none');
+                    }
 
-                    // Update summary cards (only for power comparison)
                     if (field === 'power') {
                         document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
                         document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
-                        const savingsEl = document.getElementById('compare-savings');
+                        var savingsEl = document.getElementById('compare-savings');
                         savingsEl.textContent = summary.savings_percent || '--';
                         if (summary.savings_percent > 0) {
                             savingsEl.style.color = '#10b981';
@@ -4823,14 +5539,24 @@ HTML_TEMPLATE = '''
                             savingsEl.style.color = '#ef4444';
                         }
                     }
+
+                    if (result.recording) updateRecordingUI(result.recording);
                 })
                 .catch(e => console.error('Energy compare error:', e));
         }
 
-        // Listen for phase changes from server
-        socket.on('energy_phase', function(data) {
-            currentEnergyPhase = data.phase;
-            updatePhaseUI(data.phase);
+        function setCompareRange(range, btn) {
+            compareRange = range;
+            // Toggle active class on range buttons
+            document.querySelectorAll('#compare-range-7d,#compare-range-30d,#compare-range-all').forEach(function(b){ b.classList.remove('active'); });
+            if (btn) btn.classList.add('active');
+            loadEnergyCompare('power');
+            loadEnergyCompare('energy_kwh');
+        }
+
+        // Listen for recording state changes from server
+        socket.on('energy_recording', function(data) {
+            updateRecordingUI(data.recording);
         });
 
         // ==================== THEME TOGGLE ====================
@@ -4917,7 +5643,22 @@ HTML_TEMPLATE = '''
                 try { loadFeedbackHistory(); } catch(e) {}
             }
             if (pageId === 'energy') {
+                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ensureChartsReady error:', e); }
                 try { loadAllEnergyCharts(); } catch(e) { console.error('[NAV] energy init error:', e); }
+                // Chart.js often needs a resize pass when canvas was initialized in a hidden page.
+                setTimeout(function() {
+                    try {
+
+                        Object.keys(charts).forEach(function(k) {
+                            if (charts[k] && typeof charts[k].resize === 'function') {
+                                charts[k].resize();
+                                charts[k].update('none');
+                            }
+                        });
+                    } catch(e) {
+                        console.error('[NAV] chart resize error:', e);
+                    }
+                }, 120);
             }
         }
 
@@ -4936,10 +5677,19 @@ HTML_TEMPLATE = '''
                         const humEl = document.getElementById('ml-cur-hum');
                         const luxEl = document.getElementById('ml-cur-lux');
                         const personEl = document.getElementById('ml-cur-person');
-                        if (tempEl) tempEl.textContent = d.ac?.temperature?.toFixed(1) || '--';
-                        if (humEl) humEl.textContent = d.ac?.humidity?.toFixed(1) || '--';
-                        if (luxEl) luxEl.textContent = d.lamp?.lux || '--';
-                        if (personEl) personEl.textContent = d.camera?.person_detected ? 'Yes' : 'No';
+                        if (tempEl) {
+                            const t = d && d.ac ? parseFloat(d.ac.temperature || 0) : NaN;
+                            tempEl.textContent = Number.isFinite(t) ? t.toFixed(1) : '--';
+                        }
+                        if (humEl) {
+                            const h = d && d.ac ? parseFloat(d.ac.humidity || 0) : NaN;
+                            humEl.textContent = Number.isFinite(h) ? h.toFixed(1) : '--';
+                        }
+                        if (luxEl) {
+                            const lux = d && d.lamp ? (d.lamp.lux_avg || d.lamp.lux1 || d.lamp.lux || '--') : '--';
+                            luxEl.textContent = lux;
+                        }
+                        if (personEl) personEl.textContent = (d && d.camera && d.camera.person_detected) ? 'Yes' : 'No';
                     }).catch(() => {});
                 })
                 .catch(err => console.error('ML refresh error:', err));
@@ -4968,9 +5718,9 @@ HTML_TEMPLATE = '''
             const chart = charts[chartName];
             if (!chart) return;
 
-            chart.data.labels = history.map((_, i) => algo === 'GA' ? `Gen ${i+1}` : `Iter ${i+1}`);
+            chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
             chart.data.datasets[0].data = history;
-            chart.update();
+            chart.update('none');
         }
 
         function addToComparisonChart(gaFit, psoFit) {
@@ -4989,7 +5739,7 @@ HTML_TEMPLATE = '''
             chart.data.labels.push(label);
             chart.data.datasets[0].data.push(gaFit);
             chart.data.datasets[1].data.push(psoFit);
-            chart.update();
+            chart.update('none');
         }
 
         function addMLHistoryRow(data) {
@@ -5021,16 +5771,16 @@ HTML_TEMPLATE = '''
 
             tbody.innerHTML = mlHistory.map(e => {
                 const getBadge = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
-                return `<tr>
-                    <td>${e.run}</td>
-                    <td>${e.time}</td>
-                    <td><span class="ml-badge ${getBadge(e.ga_fitness)}">${e.ga_fitness.toFixed(2)}</span></td>
-                    <td>${e.ga_temp}\u00b0C</td>
-                    <td>${e.ga_fan}</td>
-                    <td><span class="ml-badge ${getBadge(e.pso_fitness)}">${e.pso_fitness.toFixed(2)}</span></td>
-                    <td>${e.pso_brightness}%</td>
-                    <td><span class="ml-badge ${getBadge(e.combined)}">${e.combined.toFixed(2)}</span></td>
-                </tr>`;
+                return '<tr>' +
+                    '<td>' + e.run + '</td>' +
+                    '<td>' + e.time + '</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
+                    '<td>' + e.ga_temp + '\u00b0C</td>' +
+                    '<td>' + e.ga_fan + '</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
+                    '<td>' + e.pso_brightness + '%</td>' +
+                    '<td><span class="ml-badge ' + getBadge(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
+                '</tr>';
             }).join('');
         }
 
@@ -5054,9 +5804,9 @@ HTML_TEMPLATE = '''
                 showToast('No optimization data to export', 'error');
                 return;
             }
-            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\\n';
             mlHistory.forEach(e => {
-                csv += `${e.run},"${e.time}",${e.ga_fitness.toFixed(2)},${e.ga_temp},${e.ga_fan},${e.pso_fitness.toFixed(2)},${e.pso_brightness},${e.combined.toFixed(2)}\n`;
+                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
@@ -5068,14 +5818,14 @@ HTML_TEMPLATE = '''
                 showToast('No logs to export', 'error');
                 return;
             }
-            let csv = 'Time,Level,Message\n';
+            let csv = 'Time,Level,Message\\n';
             Array.from(container.children).forEach(entry => {
                 const text = entry.textContent || '';
                 const timeMatch = text.match(/\\[(.+?)\\]/);
                 const time = timeMatch ? timeMatch[1] : '';
                 const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
-                csv += `"${time}","${level}","${msg}"\n`;
+                csv += '"' + time + '","' + level + '","' + msg + '"\\n';
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
@@ -5090,10 +5840,10 @@ HTML_TEMPLATE = '''
                         showToast('No feedback data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
+                    let csv = 'Time,Rating,Occupancy Count,Comment\\n';
                     rows.forEach(item => {
                         const comment = (item.comment || '').replace(/"/g, '""');
-                        csv += `"${item.time}",${item.rating},${item.occupancy_count},"${comment}"\n`;
+                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\\n';
                     });
                     downloadCSV('occupancy_feedback.csv', csv);
                     showToast('Feedback exported', 'success');
@@ -5110,7 +5860,7 @@ HTML_TEMPLATE = '''
                         showToast('No energy data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\\n';
                     const times = data.power.map(p => p.time);
                     const powers = data.power || [];
                     const voltages = data.voltage || [];
@@ -5119,7 +5869,7 @@ HTML_TEMPLATE = '''
                         const pw = powers[i] ? powers[i].value : '';
                         const vl = voltages[i] ? voltages[i].value : '';
                         const en = energies[i] ? energies[i].value : '';
-                        csv += `"${t}",${pw},${vl},${en}\n`;
+                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\\n';
                     });
                     downloadCSV('energy_history_' + period + '.csv', csv);
                     showToast('Energy data exported (' + period + ')', 'success');
@@ -5134,10 +5884,10 @@ HTML_TEMPLATE = '''
                 showToast('No data to export for ' + chartName, 'error');
                 return;
             }
-            let csv = 'Time,' + valueLabel + '\n';
+            let csv = 'Time,' + valueLabel + '\\n';
             chart.data.labels.forEach((label, i) => {
                 const val = chart.data.datasets[0].data[i];
-                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\\n';
             });
             downloadCSV(chartName + '_data.csv', csv);
             showToast(chartName + ' data exported', 'success');
@@ -5151,34 +5901,38 @@ HTML_TEMPLATE = '''
                 return;
             }
             const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
-            let csv = 'Time,' + dsNames.join(',') + '\n';
+            let csv = 'Time,' + dsNames.join(',') + '\\n';
             chart.data.labels.forEach((label, i) => {
                 let row = '"' + label + '"';
                 chart.data.datasets.forEach(ds => {
                     const val = ds.data[i];
                     row += ',' + (val !== null && val !== undefined ? val : '');
                 });
-                csv += row + '\n';
+                csv += row + '\\n';
             });
             downloadCSV(chartName + '_compare.csv', csv);
             showToast(chartName + ' comparison exported', 'success');
         }
 
         function getMLParams(algo) {
+            const getInput = (id, fallback) => {
+                const el = document.getElementById(id);
+                return el ? el.value : fallback;
+            };
             if (algo === 'ga') {
                 return {
-                    population_size: parseInt(document.getElementById('ml-ga-pop')?.value) || 15,
-                    generations: parseInt(document.getElementById('ml-ga-gen')?.value) || 30,
-                    mutation_rate: parseFloat(document.getElementById('ml-ga-mut')?.value) || 0.25,
-                    crossover_rate: parseFloat(document.getElementById('ml-ga-cross')?.value) || 0.8,
+                    population_size: parseInt(getInput('ml-ga-pop', 15), 10) || 15,
+                    generations: parseInt(getInput('ml-ga-gen', 30), 10) || 30,
+                    mutation_rate: parseFloat(getInput('ml-ga-mut', 0.25)) || 0.25,
+                    crossover_rate: parseFloat(getInput('ml-ga-cross', 0.8)) || 0.8,
                     elitism_ratio: 0.2
                 };
             } else {
                 return {
-                    swarm_size: parseInt(document.getElementById('ml-pso-swarm')?.value) || 30,
-                    iterations: parseInt(document.getElementById('ml-pso-iter')?.value) || 100,
-                    w: parseFloat(document.getElementById('ml-pso-w')?.value) || 0.7,
-                    c: parseFloat(document.getElementById('ml-pso-c')?.value) || 1.5
+                    swarm_size: parseInt(getInput('ml-pso-swarm', 30), 10) || 30,
+                    iterations: parseInt(getInput('ml-pso-iter', 100), 10) || 100,
+                    w: parseFloat(getInput('ml-pso-w', 0.7)) || 0.7,
+                    c: parseFloat(getInput('ml-pso-c', 1.5)) || 1.5
                 };
             }
         }
@@ -5245,7 +5999,7 @@ HTML_TEMPLATE = '''
                 if (charts[name]) {
                     charts[name].data.labels = [];
                     charts[name].data.datasets.forEach(ds => ds.data = []);
-                    charts[name].update();
+                    charts[name].update('none');
                 }
             });
             showToast('Charts cleared', 'success');
@@ -5281,16 +6035,13 @@ HTML_TEMPLATE = '''
 
         function updateCameraToggleUI() {
             const btn = document.getElementById('camera-toggle-btn');
-            const icon = document.getElementById('camera-toggle-icon');
             const text = document.getElementById('camera-toggle-text');
             if (!btn) return;
             if (cameraEnabled) {
                 btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                icon.className = 'fas fa-video';
                 text.textContent = 'Camera ON';
             } else {
                 btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
-                icon.className = 'fas fa-video-slash';
                 text.textContent = 'Camera OFF';
             }
         }
@@ -5355,6 +6106,36 @@ HTML_TEMPLATE = '''
             saveSettings();
         }
 
+        function applyACSnapshot(ac) {
+            if (!ac) return;
+            if (ac.ac_temp !== undefined && ac.ac_temp !== null) {
+                var tempValue = parseInt(ac.ac_temp, 10);
+                var tempSlider = document.getElementById('ac-temp-slider');
+                var tempDisplay = document.getElementById('ac-temp-display');
+                if (tempSlider && Number.isFinite(tempValue)) tempSlider.value = tempValue;
+                if (tempDisplay && Number.isFinite(tempValue)) tempDisplay.textContent = tempValue;
+            }
+            if (ac.fan_speed !== undefined && ac.fan_speed !== null) {
+                var fanValue = parseInt(ac.fan_speed, 10);
+                var fanSlider = document.getElementById('fan-speed-slider');
+                var fanDisplay = document.getElementById('fan-speed-display');
+                if (fanSlider && Number.isFinite(fanValue)) fanSlider.value = fanValue;
+                if (fanDisplay && Number.isFinite(fanValue)) fanDisplay.textContent = fanValue;
+            }
+            if (ac.ac_fan_mode) {
+                selectedACMode = String(ac.ac_fan_mode).toUpperCase();
+                document.querySelectorAll('.ac-set-mode-btn').forEach(function(btn) {
+                    var active = btn.getAttribute('data-mode') === selectedACMode;
+                    btn.style.background = active ? 'var(--primary)' : 'var(--card-bg)';
+                    btn.style.border = active ? '2px solid var(--primary)' : '2px solid var(--border)';
+                    btn.style.color = active ? 'white' : 'var(--text)';
+                });
+            }
+            if (typeof updateDashboard === 'function') {
+                try { updateDashboard(); } catch (e) {}
+            }
+        }
+
         function sendACCommand(command) {
             // Block manual commands when in ADAPTIVE mode
             fetch('/api/data').then(r => r.json()).then(data => {
@@ -5369,8 +6150,9 @@ HTML_TEMPLATE = '''
                 })
                 .then(r => r.json())
                 .then(result => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
                     const label = command.replace('_', ' ');
-                    showToast('AC: ' + label, result.ir_sent ? 'success' : 'info');
+                    showToast('AC: ' + label, result && result.status === 'success' ? 'success' : 'info');
                 })
                 .catch(e => showToast('Error: ' + (e.message || e), 'error'));
             });
@@ -5411,7 +6193,10 @@ HTML_TEMPLATE = '''
                     })
                 })
                 .then(r => r.json())
-                .then(result => showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode))
+                .then(result => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
+                    showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode);
+                })
                 .catch(e => showToast('Error: ' + e, 'error'));
             });
         }
@@ -5477,7 +6262,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(16, 185, 129, 0.1)';
                     indicator.style.color = '#10b981';
                     indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-robot"></i> Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by AI (GA optimization)';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization';
                 }
                 // Button styles
                 if (btnAdaptive) {
@@ -5501,7 +6286,7 @@ HTML_TEMPLATE = '''
                     indicator.style.background = 'rgba(245, 158, 11, 0.1)';
                     indicator.style.color = '#f59e0b';
                     indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
-                    indicator.innerHTML = '<i class="fas fa-hand-paper"></i> Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
@@ -5706,26 +6491,27 @@ HTML_TEMPLATE = '''
                 })
                 .then(r => r.json())
                 .then(result => {
-                const modeLabel = modeName.replace('MODE_', '');
-                showToast('AC Mode: ' + modeLabel, result.ir_sent ? 'success' : 'info');
-                setTimeout(() => {
+                    if (result && result.ac) applyACSnapshot(result.ac);
+                    const modeLabel = modeName.replace('MODE_', '');
+                    showToast('AC Mode: ' + modeLabel, result && result.status === 'success' ? 'success' : 'info');
+                    setTimeout(() => {
+                        document.querySelectorAll('.ac-mode-btn').forEach(btn => {
+                            btn.style.opacity = '1';
+                            btn.style.transform = 'scale(1)';
+                        });
+                        if (btnElement) {
+                            btnElement.style.transform = 'scale(1.05)';
+                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                        }
+                    }, 300);
+                })
+                .catch(e => {
+                    showToast('Error: ' + (e.message || e), 'error');
                     document.querySelectorAll('.ac-mode-btn').forEach(btn => {
                         btn.style.opacity = '1';
                         btn.style.transform = 'scale(1)';
                     });
-                    if (btnElement) {
-                        btnElement.style.transform = 'scale(1.05)';
-                        btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
-                    }
-                }, 300);
-            })
-            .catch(e => {
-                showToast('Error: ' + (e.message || e), 'error');
-                document.querySelectorAll('.ac-mode-btn').forEach(btn => {
-                    btn.style.opacity = '1';
-                    btn.style.transform = 'scale(1)';
                 });
-            });
             }); // end fetch /api/data
         }
 
@@ -5755,7 +6541,7 @@ HTML_TEMPLATE = '''
                     });
                     
                     if (codeCount > 0) {
-                        showToast(`IR codes loaded: ${codeCount} button(s)`, 'success');
+                        showToast('IR codes loaded: ' + codeCount + ' button(s)', 'success');
                     }
                 })
                 .catch(e => {
@@ -5814,7 +6600,7 @@ HTML_TEMPLATE = '''
                         return;
                     }
                     
-                    showToast(`${count} IR codes saved to server`, 'success');
+                    showToast(count + ' IR codes saved to server', 'success');
                     console.log('IR Codes saved:', codes);
                 })
                 .catch(e => showToast('Save error: ' + e, 'error'));
@@ -5844,7 +6630,7 @@ HTML_TEMPLATE = '''
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                     
-                    showToast(`Exported ${count} IR codes`, 'success');
+                    showToast('Exported ' + count + ' IR codes', 'success');
                 })
                 .catch(e => showToast('Export error: ' + e, 'error'));
         }
@@ -5871,20 +6657,20 @@ HTML_TEMPLATE = '''
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += `[IR] ${button}:\\n`;
-                            debugInfo += `   Code: ${codePreview}\\n`;
-                            debugInfo += `   Length: ${codeStr.length} chars\\n`;
+                            debugInfo += '[IR] ' + button + ':\\n';
+                            debugInfo += '   Code: ' + codePreview + '\\n';
+                            debugInfo += '   Length: ' + codeStr.length + ' chars\\n';
                             
                             // Parse protocol
                             if (codeStr.includes(':')) {
                                 const protocol = codeStr.split(':')[0];
-                                debugInfo += `   Protocol: ${protocol}\\n`;
+                                debugInfo += '   Protocol: ' + protocol + '\\n';
                             }
                             debugInfo += '\\n';
                         });
                         
                         debugInfo += '═══════════════════════════════════\\n';
-                        debugInfo += `Total: ${Object.keys(codes).length} codes\\n`;
+                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\\n';
                     }
                     
                     debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
@@ -5915,7 +6701,7 @@ HTML_TEMPLATE = '''
                         return;
                     }
                     
-                    showToast(`Testing ${buttons.length} codes...`, 'info');
+                    showToast('Testing ' + buttons.length + ' codes...', 'info');
                     
                     let index = 0;
                     const testInterval = setInterval(() => {
@@ -5926,9 +6712,9 @@ HTML_TEMPLATE = '''
                         }
                         
                         const button = buttons[index];
-                        console.log(`Testing ${button}...`);
+                        console.log('Testing ' + button + '...');
                         sendIRCode(button);
-                        showToast(`Testing: ${button}`, 'info');
+                        showToast('Testing: ' + button, 'info');
                         
                         index++;
                     }, 2000); // 2 second delay between tests
@@ -5944,16 +6730,13 @@ HTML_TEMPLATE = '''
         // Initialize sound toggle button visual on load
         function updateSoundToggleUI() {
             const btn = document.getElementById('sound-toggle-btn');
-            const icon = document.getElementById('sound-toggle-icon');
             const text = document.getElementById('sound-toggle-text');
             if (!btn) return;
             if (detectionSoundEnabled) {
                 btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                if (icon) icon.className = 'fas fa-volume-up';
                 if (text) text.textContent = 'Sound ON';
             } else {
                 btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
-                if (icon) icon.className = 'fas fa-volume-mute';
                 if (text) text.textContent = 'Sound OFF';
             }
         }
@@ -6055,7 +6838,7 @@ HTML_TEMPLATE = '''
             const toastMessage = document.getElementById('toast-message');
             const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
             
-            toastMessage.innerHTML = '<i class="fas fa-' + icon + '-circle"></i> ' + message;
+            toastMessage.innerHTML = message;
             toast.classList.add('show');
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
@@ -6110,7 +6893,7 @@ HTML_TEMPLATE = '''
                     rating: selectedFeedbackRating,
                     comment: comment,
                     google_form_url: formUrl,
-                    occupancy_count: parseInt(document.getElementById('cam-count')?.textContent || '0', 10)
+                    occupancy_count: parseInt((document.getElementById('cam-count') ? document.getElementById('cam-count').textContent : '0') || '0', 10)
                 })
             })
             .then(r => r.json())
@@ -6145,16 +6928,14 @@ HTML_TEMPLATE = '''
 
                     container.innerHTML = rows.map(item => {
                         const safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        return `
-                            <div class="feedback-history-item">
-                                <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
-                                    <strong>Rating: ${item.rating}/5</strong>
-                                    <span style="font-size:12px; color: var(--text-secondary);">${item.time}</span>
-                                </div>
-                                <div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ${item.occupancy_count} person(s)</div>
-                                <div style="margin-top:6px; font-size:13px;">${safeComment || '-'}</div>
-                            </div>
-                        `;
+                        return '<div class="feedback-history-item">' +
+                            '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                                '<strong>Rating: ' + item.rating + '/5</strong>' +
+                                '<span style="font-size:12px; color: var(--text-secondary);">' + item.time + '</span>' +
+                            '</div>' +
+                            '<div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ' + item.occupancy_count + ' person(s)</div>' +
+                            '<div style="margin-top:6px; font-size:13px;">' + (safeComment || '-') + '</div>' +
+                        '</div>';
                     }).join('');
                 })
                 .catch(() => {});
@@ -6162,37 +6943,52 @@ HTML_TEMPLATE = '''
 
         // ==================== DATA UPDATES ====================
         function updateDashboard() {
-            fetch('/api/data')
+            fetch('/api/data', { cache: 'no-store' })
                 .then(r => r.json())
-                .then(data => {
-                    const temperature = data.ac.temperature;
-                    document.getElementById('dash-temp').textContent = temperature.toFixed(1);
-                    document.getElementById('dash-hum').textContent = data.ac.humidity.toFixed(1);
+                .then(data => { try {
+                    data = data || {};
+                    const ac = data.ac || {};
+                    const lamp = data.lamp || {};
+                    const camera = data.camera || {};
+                    const system = data.system || {};
+                    const energy = data.energy || {};
+                    const num = (v, d = 0) => {
+                        const n = parseFloat(v);
+                        return Number.isFinite(n) ? n : d;
+                    };
+                    const setText = (id, val) => {
+                        const el = document.getElementById(id);
+                        if (el) el.textContent = val;
+                    };
+
+                    const temperature = num(ac.temperature);
+                    setText('dash-temp', temperature.toFixed(1));
+                    setText('dash-hum', num(ac.humidity).toFixed(1));
                     // Individual sensor readings
                     const t1El = document.getElementById('dash-temp1');
                     const t2El = document.getElementById('dash-temp2');
                     const t3El = document.getElementById('dash-temp3');
-                    if (t1El) t1El.textContent = (data.ac.temp1 || 0).toFixed(1);
-                    if (t2El) t2El.textContent = (data.ac.temp2 || 0).toFixed(1);
-                    if (t3El) t3El.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    if (t1El) t1El.textContent = num(ac.temp1).toFixed(1);
+                    if (t2El) t2El.textContent = num(ac.temp2).toFixed(1);
+                    if (t3El) t3El.textContent = num(ac.temp3).toFixed(1);
                     // Individual humidity readings
                     const h1El = document.getElementById('dash-hum1');
                     const h2El = document.getElementById('dash-hum2');
                     const h3El = document.getElementById('dash-hum3');
-                    if (h1El) h1El.textContent = (data.ac.hum1 || 0).toFixed(1);
-                    if (h2El) h2El.textContent = (data.ac.hum2 || 0).toFixed(1);
-                    if (h3El) h3El.textContent = (data.ac.hum3 || 0).toFixed(1);
+                    if (h1El) h1El.textContent = num(ac.hum1).toFixed(1);
+                    if (h2El) h2El.textContent = num(ac.hum2).toFixed(1);
+                    if (h3El) h3El.textContent = num(ac.hum3).toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
-                    if (hiEl) hiEl.textContent = (data.ac.heat_index || 0).toFixed(1);
+                    if (hiEl) hiEl.textContent = num(ac.heat_index).toFixed(1);
                     
                     // ESP32 Signal & Uptime
                     const rssiEl = document.getElementById('dash-rssi');
-                    if (rssiEl) rssiEl.textContent = data.ac.rssi || 0;
+                    if (rssiEl) rssiEl.textContent = ac.rssi || 0;
                     const uptEl = document.getElementById('dash-uptime');
                     if (uptEl) {
-                        const secs = data.ac.uptime || 0;
+                        const secs = num(ac.uptime);
                         const h = Math.floor(secs / 3600);
                         const m = Math.floor((secs % 3600) / 60);
                         uptEl.textContent = h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (secs % 60) + 's';
@@ -6200,15 +6996,16 @@ HTML_TEMPLATE = '''
                     
                     // AC State - use REAL state from ESP32, not temperature guessing
                     const acStateEl = document.getElementById('dash-ac-state');
-                    let acState = data.ac.ac_state || 'OFF';
+                    let acState = ac.ac_state || 'OFF';
                     
-                    if (acState === 'ON') {
-                        acStateEl.style.color = '#10b981'; // Green
-                    } else {
-                        acStateEl.style.color = '#ef4444'; // Red
+                    if (acStateEl) {
+                        if (acState === 'ON') {
+                            acStateEl.style.color = '#10b981'; // Green
+                        } else {
+                            acStateEl.style.color = '#ef4444'; // Red
+                        }
+                        acStateEl.textContent = acState;
                     }
-                    
-                    acStateEl.textContent = acState;
                     
                     // AC panel power dot
                     const panelDot = document.getElementById('ac-panel-dot');
@@ -6218,12 +7015,12 @@ HTML_TEMPLATE = '''
                     }
                     
                     // Set Temperature
-                    const acTemp = data.ac.ac_temp || 24;
-                    document.getElementById('dash-ac-temp').textContent = acTemp;
+                    const acTemp = num(ac.ac_temp, 24);
+                    setText('dash-ac-temp', acTemp);
                     
                     // Fan Speed with label
-                    const fanSpeed = data.ac.fan_speed || 1;
-                    document.getElementById('dash-ac-fan').textContent = fanSpeed;
+                    const fanSpeed = num(ac.fan_speed, 1);
+                    setText('dash-ac-fan', fanSpeed);
                     const fanLabel = document.getElementById('dash-ac-fan-label');
                     if (fanLabel) {
                         const fanNames = {1: 'Low', 2: 'Medium', 3: 'High'};
@@ -6231,36 +7028,36 @@ HTML_TEMPLATE = '''
                     }
                     
                     // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color — uses ac_fan_mode from ESP32
-                    const acMode = data.ac.ac_fan_mode || 'COOL';
-                    document.getElementById('dash-ac-mode').textContent = acMode;
+                    const acMode = ac.ac_fan_mode || 'COOL';
+                    setText('dash-ac-mode', acMode);
                     const modeIconEl = document.getElementById('dash-ac-mode-icon');
                     const modeTextEl = document.getElementById('dash-ac-mode');
                     const modeIcons = {
-                        'COOL': {icon: 'fa-snowflake', color: '#0ea5e9'},
-                        'HEAT': {icon: 'fa-fire', color: '#f97316'},
-                        'DRY':  {icon: 'fa-tint-slash', color: '#a855f7'},
-                        'FAN':  {icon: 'fa-fan', color: '#8b5cf6'},
-                        'AUTO': {icon: 'fa-magic', color: '#6366f1'}
+                        'COOL': {text: 'COOL', color: '#0ea5e9'},
+                        'HEAT': {text: 'HEAT', color: '#f97316'},
+                        'DRY':  {text: 'DRY', color: '#a855f7'},
+                        'FAN':  {text: 'FAN', color: '#8b5cf6'},
+                        'AUTO': {text: 'AUTO', color: '#6366f1'}
                     };
                     const modeInfo = modeIcons[acMode] || modeIcons['COOL'];
                     if (modeIconEl) {
-                        modeIconEl.innerHTML = '<i class="fas ' + modeInfo.icon + '"></i>';
+                        modeIconEl.textContent = modeInfo.text;
                         modeIconEl.style.color = modeInfo.color;
                     }
                     if (modeTextEl) modeTextEl.style.color = modeInfo.color;
                     
                     // Operating Mode (ADAPTIVE / MANUAL)
-                    const ctrlMode = data.ac.mode || 'ADAPTIVE';
+                    const ctrlMode = ac.mode || 'ADAPTIVE';
                     const ctrlIcon = document.getElementById('dash-ac-ctrl-icon');
                     const ctrlText = document.getElementById('dash-ac-ctrl-mode');
                     if (ctrlIcon && ctrlText) {
                         if (ctrlMode === 'ADAPTIVE') {
-                            ctrlIcon.innerHTML = '<i class="fas fa-robot"></i>';
+                            ctrlIcon.textContent = 'A';
                             ctrlIcon.style.color = '#10b981';
                             ctrlText.textContent = 'ADAPTIVE';
                             ctrlText.style.color = '#10b981';
                         } else {
-                            ctrlIcon.innerHTML = '<i class="fas fa-hand-paper"></i>';
+                            ctrlIcon.textContent = 'M';
                             ctrlIcon.style.color = '#f59e0b';
                             ctrlText.textContent = 'MANUAL';
                             ctrlText.style.color = '#f59e0b';
@@ -6271,12 +7068,12 @@ HTML_TEMPLATE = '''
                     const srcBadge = document.getElementById('dash-ac-source');
                     if (srcBadge) {
                         if (ctrlMode === 'ADAPTIVE') {
-                            srcBadge.innerHTML = '<i class="fas fa-robot"></i> AI Controlled';
+                            srcBadge.textContent = 'AI Controlled';
                             srcBadge.style.background = 'rgba(16, 185, 129, 0.12)';
                             srcBadge.style.color = '#10b981';
                             srcBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
                         } else {
-                            srcBadge.innerHTML = '<i class="fas fa-hand-paper"></i> Manual Control';
+                            srcBadge.textContent = 'Manual Control';
                             srcBadge.style.background = 'rgba(245, 158, 11, 0.12)';
                             srcBadge.style.color = '#f59e0b';
                             srcBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
@@ -6287,14 +7084,14 @@ HTML_TEMPLATE = '''
                     const roomTemp = document.getElementById('dash-ac-room-temp');
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
-                    if (roomHum) roomHum.textContent = data.ac.humidity.toFixed(1);
+                    if (roomHum) roomHum.textContent = num(ac.humidity).toFixed(1);
                     // Individual sensors in AC panel footer
                     const acT1 = document.getElementById('dash-ac-temp1');
                     const acT2 = document.getElementById('dash-ac-temp2');
                     const acT3 = document.getElementById('dash-ac-temp3');
-                    if (acT1) acT1.textContent = (data.ac.temp1 || 0).toFixed(1);
-                    if (acT2) acT2.textContent = (data.ac.temp2 || 0).toFixed(1);
-                    if (acT3) acT3.textContent = (data.ac.temp3 || 0).toFixed(1);
+                    if (acT1) acT1.textContent = num(ac.temp1).toFixed(1);
+                    if (acT2) acT2.textContent = num(ac.temp2).toFixed(1);
+                    if (acT3) acT3.textContent = num(ac.temp3).toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -6302,23 +7099,23 @@ HTML_TEMPLATE = '''
                     if (liveDot && liveState) {
                         liveState.textContent = acState;
                         liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
-                        document.getElementById('ac-live-temp').textContent = acTemp;
-                        document.getElementById('ac-live-fan').textContent = fanSpeed;
-                        document.getElementById('ac-live-mode').textContent = acMode;
+                        setText('ac-live-temp', acTemp);
+                        setText('ac-live-fan', fanSpeed);
+                        setText('ac-live-mode', acMode);
                     }
-                    document.getElementById('dash-lux1').textContent = (data.lamp.lux1 || 0).toFixed(0);
-                    document.getElementById('dash-lux2').textContent = (data.lamp.lux2 || 0).toFixed(0);
-                    document.getElementById('dash-lux3').textContent = (data.lamp.lux3 || 0).toFixed(0);
-                    document.getElementById('dash-lux-avg').textContent = (data.lamp.lux_avg || 0).toFixed(1);
-                    document.getElementById('dash-bright1').textContent = Math.round((data.lamp.brightness1 || 0) / 255 * 100);
-                    document.getElementById('dash-bright2').textContent = Math.round((data.lamp.brightness2 || 0) / 255 * 100);
-                    document.getElementById('dash-bright3').textContent = Math.round((data.lamp.brightness3 || 0) / 255 * 100);
-                    document.getElementById('dash-bright-avg').textContent = Math.round((data.lamp.brightness_avg || 0) / 255 * 100);
-                    document.getElementById('dash-motion').textContent = data.lamp.motion ? 'MOTION DETECTED' : 'NO MOTION';
+                    setText('dash-lux1', num(lamp.lux1).toFixed(0));
+                    setText('dash-lux2', num(lamp.lux2).toFixed(0));
+                    setText('dash-lux3', num(lamp.lux3).toFixed(0));
+                    setText('dash-lux-avg', num(lamp.lux_avg).toFixed(1));
+                    setText('dash-bright1', Math.round(num(lamp.brightness1) / 255 * 100));
+                    setText('dash-bright2', Math.round(num(lamp.brightness2) / 255 * 100));
+                    setText('dash-bright3', Math.round(num(lamp.brightness3) / 255 * 100));
+                    setText('dash-bright-avg', Math.round(num(lamp.brightness_avg) / 255 * 100));
+                    setText('dash-motion', lamp.motion ? 'MOTION DETECTED' : 'NO MOTION');
                     
-                    const personDetected = data.camera.person_detected;
-                    const personCount = data.camera.count || 0;
-                    const confidence = data.camera.confidence || 0;
+                    const personDetected = !!camera.person_detected;
+                    const personCount = num(camera.count);
+                    const confidence = num(camera.confidence);
                     
                     const camPersonEl = document.getElementById('cam-person');
                     if (camPersonEl) {
@@ -6365,8 +7162,8 @@ HTML_TEMPLATE = '''
                     }
                     
                     // Update GA/PSO Fitness (from optimization algorithm)
-                    const gaFitness = parseFloat(data.system.ga_fitness) || 0;
-                    const psoFitness = parseFloat(data.system.pso_fitness) || 0;
+                    const gaFitness = num(system.ga_fitness);
+                    const psoFitness = num(system.pso_fitness);
                     
                     const gaEl = document.getElementById('ga-fitness');
                     const psoEl = document.getElementById('pso-fitness');
@@ -6383,14 +7180,14 @@ HTML_TEMPLATE = '''
                     // PSO Brightness
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
-                        const psoBright = data.system.pso_brightness || 0;
+                        const psoBright = num(system.pso_brightness);
                         psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
                     }
                     
                     // Optimization Runs
                     const optRunsEl = document.getElementById('dash-opt-runs');
                     if (optRunsEl) {
-                        optRunsEl.textContent = data.system.optimization_runs || 0;
+                        optRunsEl.textContent = num(system.optimization_runs);
                     }
                     
                     // Calculate AC power based on temperature logic
@@ -6398,17 +7195,19 @@ HTML_TEMPLATE = '''
                     const actualACState = temperature < 30 ? 'ON' : 'OFF';
                     
                     if (actualACState === 'ON') {
-                        acPower = data.ac.fan_speed === 1 ? 100 : (data.ac.fan_speed === 2 ? 200 : 300);
+                        acPower = fanSpeed === 1 ? 100 : (fanSpeed === 2 ? 200 : 300);
                     }
-                    let lampPower = ((data.lamp.brightness1 || 0) + (data.lamp.brightness2 || 0) + (data.lamp.brightness3 || 0)) / 255 * 10;
+                    let lampPower = (num(lamp.brightness1) + num(lamp.brightness2) + num(lamp.brightness3)) / 255 * 10;
                     let totalPower = acPower + lampPower;
 
                     // Use real PZEM data if available, otherwise estimate
                     let realPower = null;
                     let realEnergyKwh = null;
-                    if (data.energy && data.energy.connected) {
-                        realPower = parseFloat(data.energy.power || 0);
-                        realEnergyKwh = parseFloat(data.energy.energy || 0);
+                    let realCurrent = null;
+                    if (energy && energy.connected) {
+                        realPower = num(energy.power);
+                        realEnergyKwh = num(energy.energy);
+                        realCurrent = num(energy.current);
                     }
 
                     let acEnergyKwh = (acPower / 1000) * 24;
@@ -6420,6 +7219,7 @@ HTML_TEMPLATE = '''
                     document.getElementById('ac-power').textContent = acPower.toFixed(0);
                     document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
                     document.getElementById('total-power').textContent = displayPower.toFixed(1);
+                    document.getElementById('total-current').textContent = realCurrent !== null ? realCurrent.toFixed(2) : '0';
                     document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
                     document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
                     document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
@@ -6434,12 +7234,12 @@ HTML_TEMPLATE = '''
                         }
                         charts.energy.data.labels.push(timeLabel);
                         charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
-                        charts.energy.update();
+                        charts.energy.update('none');
                     }
                     
                     // Energy Monitor (PZEM-016) data
-                    if (data.energy) {
-                        const e = data.energy;
+                    if (energy) {
+                        const e = energy;
                         const eVolt = document.getElementById('energy-voltage');
                         const eCurr = document.getElementById('energy-current');
                         const ePow = document.getElementById('energy-power');
@@ -6472,7 +7272,7 @@ HTML_TEMPLATE = '''
                     }
 
                     updateModeBadges();
-                });
+                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
         }
 
         function updateLogs() {
@@ -6493,11 +7293,11 @@ HTML_TEMPLATE = '''
         // ==================== DEVICE STATUS ====================
         function diagLog(msg) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent += msg + '\n';
+            if (el) el.textContent += msg + '\\n';
         }
         function diagClear(title) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\\n';
         }
 
         function checkMqttStatus(showDetail) {
@@ -6632,9 +7432,8 @@ HTML_TEMPLATE = '''
         function showAlertBanner(alert) {
             const banner = document.createElement('div');
             banner.className = 'alert-banner ' + alert.level;
-            banner.innerHTML = '<i class="fas fa-' + (alert.level === 'danger' ? 'exclamation-triangle' : 'exclamation-circle') + '"></i>' +
-                '<span>' + alert.message + '</span>' +
-                '<button class="alert-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>';
+            banner.innerHTML = '<span>' + alert.message + '</span>' +
+                '<button class="alert-close" onclick="this.parentElement.remove()">&times;</button>';
             document.body.appendChild(banner);
             setTimeout(() => { if (banner.parentElement) banner.remove(); }, 8000);
         }
@@ -6650,12 +7449,12 @@ HTML_TEMPLATE = '''
                 if (charts.temp && charts.temp.data.labels.length < 50) {
                     charts.temp.data.labels.push(timeStr);
                     charts.temp.data.datasets[0].data.push(data.data.temperature);
-                    charts.temp.update();
+                    charts.temp.update('none');
                 }
                 if (charts.hum && charts.hum.data.labels.length < 50) {
                     charts.hum.data.labels.push(timeStr);
                     charts.hum.data.datasets[0].data.push(data.data.humidity);
-                    charts.hum.update();
+                    charts.hum.update('none');
                 }
             }
             
@@ -6669,12 +7468,12 @@ HTML_TEMPLATE = '''
                 if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
                     charts.lampLux.data.labels.push(timeStr);
                     charts.lampLux.data.datasets[0].data.push(luxAvg);
-                    charts.lampLux.update();
+                    charts.lampLux.update('none');
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
-                    charts.lampBright.update();
+                    charts.lampBright.update('none');
                 }
             }
             
@@ -6723,6 +7522,52 @@ HTML_TEMPLATE = '''
                 if (pwr > 0 || vlt > 0) {
                     showEnergyBubble(pwr, vlt, cur);
                 }
+
+                // Real-time push to energy charts (so charts work even without InfluxDB)
+                // Remove "No Data" overlays once data arrives
+                ['powerChart','voltageChart','currentChart','kwhChart'].forEach(function(cid){
+                    var ov = document.getElementById('nodata-' + cid);
+                    if (ov) ov.remove();
+                });
+                var now = new Date();
+                var tStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
+                if (charts.energyPower && pwr >= 0) {
+                    if (charts.energyPower.data.labels.length > 120) {
+                        charts.energyPower.data.labels.shift();
+                        charts.energyPower.data.datasets[0].data.shift();
+                    }
+                    charts.energyPower.data.labels.push(tStr);
+                    charts.energyPower.data.datasets[0].data.push(pwr);
+                    charts.energyPower.update('none');
+                }
+                if (charts.energyVoltage && vlt >= 0) {
+                    if (charts.energyVoltage.data.labels.length > 120) {
+                        charts.energyVoltage.data.labels.shift();
+                        charts.energyVoltage.data.datasets[0].data.shift();
+                    }
+                    charts.energyVoltage.data.labels.push(tStr);
+                    charts.energyVoltage.data.datasets[0].data.push(vlt);
+                    charts.energyVoltage.update('none');
+                }
+                if (charts.energyCurrent && cur >= 0) {
+                    if (charts.energyCurrent.data.labels.length > 120) {
+                        charts.energyCurrent.data.labels.shift();
+                        charts.energyCurrent.data.datasets[0].data.shift();
+                    }
+                    charts.energyCurrent.data.labels.push(tStr);
+                    charts.energyCurrent.data.datasets[0].data.push(cur);
+                    charts.energyCurrent.update('none');
+                }
+                var kwhVal = parseFloat(e.energy || 0);
+                if (charts.energyKwh && kwhVal >= 0) {
+                    if (charts.energyKwh.data.labels.length > 120) {
+                        charts.energyKwh.data.labels.shift();
+                        charts.energyKwh.data.datasets[0].data.shift();
+                    }
+                    charts.energyKwh.data.labels.push(tStr);
+                    charts.energyKwh.data.datasets[0].data.push(kwhVal);
+                    charts.energyKwh.update('none');
+                }
             }
 
             // Real-time optimization (GA->AC / PSO->Lamp) updates
@@ -6768,11 +7613,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast(`GA->AC: ${gaTemp}°C (${gaFitness.toFixed(1)}) | PSO->Lamp: ${psoBrightness}% (${psoFitness.toFixed(1)})`, 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: ' + psoBrightness + '% (' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
-                    showToast(`GA->AC: ${gaTemp}°C Fan:${gaFan} (Fitness: ${gaFitness.toFixed(2)})`, 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast(`PSO->Lamp: ${psoBrightness}% (Fitness: ${psoFitness.toFixed(2)})`, 'success');
+                    showToast('PSO->Lamp: ' + psoBrightness + '% (Fitness: ' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -6872,10 +7717,10 @@ HTML_TEMPLATE = '''
                 if (overlayBadge) {
                     if (personDetected && personCount > 0) {
                         overlayBadge.className = 'person-badge detected';
-                        overlayBadge.innerHTML = `<i class="fas fa-user-check"></i> ${personCount} Person(s) - ${confidence}%`;
+                        overlayBadge.innerHTML = personCount + ' Person(s) - ' + confidence + '%';
                     } else {
                         overlayBadge.className = 'person-badge not-detected';
-                        overlayBadge.innerHTML = '<i class="fas fa-user-slash"></i> No Person';
+                        overlayBadge.innerHTML = 'No Person';
                     }
                 }
                 
@@ -6896,7 +7741,7 @@ HTML_TEMPLATE = '''
                     } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
                         const mins = Math.floor(lastSeenAgo / 60);
                         const secs = lastSeenAgo % 60;
-                        lastSeenEl.textContent = mins > 0 ? `${mins}m ${secs}s lalu` : `${secs}s lalu`;
+                        lastSeenEl.textContent = mins > 0 ? (mins + 'm ' + secs + 's lalu') : (secs + 's lalu');
                         lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
                         if (lastSeenLabel) lastSeenLabel.textContent = 'Since last detection';
                     } else {
@@ -6919,7 +7764,7 @@ HTML_TEMPLATE = '''
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
                         const offMins = Math.floor(autoOffIn / 60);
                         const offSecs = autoOffIn % 60;
-                        autoOffEl.textContent = `${offMins}m ${offSecs}s`;
+                        autoOffEl.textContent = offMins + 'm ' + offSecs + 's';
                         autoOffEl.style.color = autoOffIn < 120 ? '#ef4444' : '#f59e0b';
                         if (autoOffLabel) autoOffLabel.textContent = 'Countdown auto-OFF AC';
                     } else {
@@ -6944,14 +7789,14 @@ HTML_TEMPLATE = '''
             const algo = (data.algorithm || '').toUpperCase();
             
             if (status === 'running') {
-                showToast(`${algo} optimization running...`, 'success');
+                showToast(algo + ' optimization running...', 'success');
                 // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
             } else if (status === 'completed') {
-                showToast(`${algo} optimization completed! GA: ${(data.ga_fitness || 0).toFixed(2)}, PSO: ${(data.pso_fitness || 0).toFixed(2)}`, 'success');
+                showToast(algo + ' optimization completed! GA: ' + (data.ga_fitness || 0).toFixed(2) + ', PSO: ' + (data.pso_fitness || 0).toFixed(2), 'success');
                 // Re-enable run buttons
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
@@ -6960,13 +7805,13 @@ HTML_TEMPLATE = '''
                 // Refresh ML data
                 refreshMLData();
             } else if (status === 'error') {
-                showToast(`${algo} error: ${data.message || 'Unknown error'}`, 'error');
+                showToast(algo + ' error: ' + (data.message || 'Unknown error'), 'error');
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
                     btn.style.opacity = '1';
                 });
             } else if (status === 'busy') {
-                showToast(`Optimization already in progress`, 'warning');
+                showToast('Optimization already in progress', 'warning');
             }
         });
 
@@ -7037,8 +7882,12 @@ HTML_TEMPLATE = '''
                 document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
                 
                 document.getElementById(savedPage).classList.add('active');
-                const navItem = document.querySelector('[onclick="showPage(\\''+savedPage+'\\')"]');
-                if (navItem) navItem.classList.add('active');
+                document.querySelectorAll('.nav-item').forEach(function(item) {
+                    const oc = item.getAttribute('onclick') || '';
+                    if (oc.indexOf("showPage('" + savedPage + "')") !== -1) {
+                        item.classList.add('active');
+                    }
+                });
             }
             
             const savedRanges = localStorage.getItem('chartRanges');
@@ -7047,7 +7896,27 @@ HTML_TEMPLATE = '''
 
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
+            try {
+                var ovInit = document.getElementById('sidebar-overlay');
+                if (ovInit) {
+                    ovInit.classList.remove('active');
+                    ovInit.style.display = 'none';
+                    ovInit.style.pointerEvents = 'none';
+                }
+            } catch(e) {}
+            try {
+                // Safety net: hidden fixed overlays must not consume clicks.
+                var blockers = document.querySelectorAll('body *');
+                blockers.forEach(function(el) {
+                    if (!el || !el.style) return;
+                    var cs = window.getComputedStyle(el);
+                    if (cs.position === 'fixed' && cs.display === 'none') {
+                        el.style.pointerEvents = 'none';
+                    }
+                });
+            } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
+            try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
             try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
             try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
@@ -7062,7 +7931,7 @@ HTML_TEMPLATE = '''
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Tidak diketahui') + '\n\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Tidak diketahui') + '\\n\\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
                         }
                     }
                 }).catch(function() {});
@@ -7070,6 +7939,15 @@ HTML_TEMPLATE = '''
             try { updateLogs(); } catch(e) { console.error('[ERROR] updateLogs:', e); }
             try { checkCameraStatus(); } catch(e) { console.error('[ERROR] checkCameraStatus:', e); }
             try { loadAllEnergyCharts(); } catch(e) { console.error('[ERROR] loadAllEnergyCharts:', e); }
+            setTimeout(function() {
+                try {
+                    if (ensureChartsReady()) {
+                        loadAllEnergyCharts();
+                    }
+                } catch(e) {
+                    console.error('[ERROR] delayed energy chart init:', e);
+                }
+            }, 600);
             const googleFormInput = document.getElementById('google-form-url');
             if (googleFormInput) {
                 googleFormInput.value = localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
@@ -7092,80 +7970,27 @@ HTML_TEMPLATE = '''
                     try { updateChartData(chartName, chartRanges[chartName]); } catch(e) {}
                 });
             }, 30000);
+
+            setInterval(function() {
+                try {
+                    var energyPage = document.getElementById('energy');
+                    if (energyPage && energyPage.classList.contains('active')) {
+                        loadAllEnergyCharts();
+                    }
+                } catch(e) {}
+            }, 8000);
             
             console.log('[OK] Dashboard Ready!');
         };
-    </script>
-
-    <!-- Failsafe Navigation - independent script block -->
-    <script>
-        (function() {
-            if (typeof window.showPage === 'function') {
-                console.log('[OK] showPage already defined');
-                return;
-            }
-            console.warn('[FAILSAFE] Main script failed - activating failsafe navigation');
-            window.showPage = function(pageId) {
-                var pages = document.querySelectorAll('.page');
-                var navs = document.querySelectorAll('.nav-item');
-                for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
-                for (var i = 0; i < navs.length; i++) navs[i].classList.remove('active');
-                var el = document.getElementById(pageId);
-                if (el) el.classList.add('active');
-                for (var i = 0; i < navs.length; i++) {
-                    var oc = navs[i].getAttribute('onclick');
-                    if (oc && oc.indexOf(pageId) !== -1) navs[i].classList.add('active');
-                }
-                localStorage.setItem('currentPage', pageId);
-            };
-            window.toggleSidebar = function() {
-                var sb = document.getElementById('sidebar');
-                var ov = document.getElementById('sidebar-overlay');
-                if (sb) sb.classList.toggle('open');
-                if (ov) ov.classList.toggle('active');
-            };
-            window.toggleTheme = function() {
-                var cur = document.documentElement.getAttribute('data-theme');
-                var nw = cur === 'dark' ? 'light' : 'dark';
-                document.documentElement.setAttribute('data-theme', nw);
-                localStorage.setItem('theme', nw);
-            };
-            // Start basic data polling
-            function basicUpdate() {
-                try {
-                    var x = new XMLHttpRequest();
-                    x.open('GET', '/api/data');
-                    x.onload = function() {
-                        if (x.status === 200) {
-                            var d = JSON.parse(x.responseText);
-                            var t = document.getElementById('room-temp');
-                            var h = document.getElementById('room-hum');
-                            if (t && d.ac) t.textContent = (d.ac.temperature || 0) + String.fromCharCode(176) + 'C';
-                            if (h && d.ac) h.textContent = (d.ac.humidity || 0) + '%';
-                        }
-                    };
-                    x.send();
-                } catch(e) {}
-            }
-            setInterval(basicUpdate, 2000);
-            // Restore saved page
-            var saved = localStorage.getItem('currentPage');
-            if (saved && document.getElementById(saved)) {
-                window.showPage(saved);
-            }
-        })();
     </script>
 </body>
 </html>
 '''
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  Smart Room Dashboard - YOLOv8n + Auto AC Control")
-    print("=" * 60)
+    print("Smart Room Dashboard starting...")
     
     # Load saved IR codes from file
-    print("  [INIT] Loading saved IR codes...")
     try:
         import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
@@ -7173,44 +7998,24 @@ if __name__ == '__main__':
             with open(ir_file, 'r') as f:
                 mqtt_data['ir_codes'] = json.load(f)
             print(f"  [OK] Loaded {len(mqtt_data['ir_codes'])} IR codes from file")
-            # Verify each code's completeness
-            for btn_name, code in mqtt_data['ir_codes'].items():
-                if isinstance(code, str) and code.startswith('RAW:'):
-                    raw_count = code[4:].count(',') + 1
-                    status = '[OK]' if raw_count >= 100 else '[WARN]'
-                    print(f"    {status} {btn_name}: RAW {raw_count} values, {len(code)} chars")
-                else:
-                    print(f"    [IR] {btn_name}: {len(code)} chars")
         else:
             print("  [INFO] No saved IR codes found")
     except Exception as e:
         print(f"  [WARN] Error loading IR codes: {e}")
     
-    print("  [INIT] Loading YOLO model (please wait)...")
-    
     # Load YOLO SYNCHRONOUSLY
     yolo_loaded = load_yolo_model()
+    print(f"  [YOLO] {'Ready' if yolo_loaded else 'Failed to load'}")
     
-    if yolo_loaded:
-        print("  [OK] YOLO ready for person detection!")
-    else:
-        print("  [WARN] YOLO failed to load, running without detection")
-    
-    # Start background camera detection thread (runs 24/7 for auto ON/OFF)
-    print("  [CAM] Starting background camera detection thread...")
+    # Start background camera detection thread
     detection_thread = threading.Thread(target=camera_detection_loop, daemon=True)
     detection_thread.start()
-    print("  [OK] Detection thread running — auto ON/OFF active")
     
-    print("=" * 60)
-    print("  [URL] Dashboard URL: http://172.20.0.65:5000")
-    print("  [URL] Video Feed:    http://172.20.0.65:5000/video_feed")
-    print("  Features:")
-    print("     - YOLOv8n Person Detection (background thread)")
-    print("     - Auto ON: 3 frames (~2s) person confirmed -> AC ON")
-    print("     - Auto OFF: 10 min no person -> AC OFF")
-    print("     - 4K Camera (fallback 1080p)")
-    print("     - Real-time Person Count & Confidence")
-    print("=" * 60)
+    # Start GA/PSO auto-optimization background thread
+    opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
+    opt_thread.start()
+    print(f"  [OPT] GA/PSO auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    print("  [URL] Dashboard: http://172.20.0.65:5000")
+    
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
