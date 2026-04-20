@@ -4107,10 +4107,31 @@ HTML_TEMPLATE = '''
                 <p>Manual lamp control — 2 Lamps (GPIO 25 & 26), 3 BH1750 Sensors</p>
             </div>
 
+            <!-- ========== LAMP MODE SELECTOR ========== -->
+            <div id="lamp-mode-selector" style="margin-bottom: 20px; padding: 20px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+                <div style="text-align: center; margin-bottom: 14px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">
+                    Lamp Control Mode
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <button id="btn-lamp-adaptive" onclick="setLampMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <span style="font-size: 24px; font-weight: 800;">A</span>
+                        <span>ADAPTIVE</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">PSO controls lamps automatically</span>
+                    </button>
+                    <button id="btn-lamp-manual" onclick="setLampMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
+                        <span style="font-size: 24px; font-weight: 800;">M</span>
+                        <span>MANUAL</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control lamps manually</span>
+                    </button>
+                </div>
+                <div id="lamp-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
+                    Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization
+                </div>
+            </div>
+
             <div class="control-panel">
                 <div class="control-title">
                     <span>Lamp Control</span>
-                    <div class="mode-badge adaptive" id="lamp-mode-badge" onclick="toggleLampMode()">ADAPTIVE MODE</div>
                 </div>
 
                 <!-- Live Sensor Readings -->
@@ -4132,24 +4153,32 @@ HTML_TEMPLATE = '''
                         <div style="font-size: 18px; font-weight: 700;" id="ctrl-motion-status"><span style="color: #ef4444;">IDLE</span></div>
                     </div>
                 </div>
-                
-                <div class="control-group">
-                    <label class="control-label">Lamp 1 Brightness (GPIO 25): <span id="brightness-display-1">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
-                </div>
 
-                <div class="control-group">
-                    <label class="control-label">Lamp 2 Brightness (GPIO 26): <span id="brightness-display-2">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
-                </div>
-
-                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn btn-primary" onclick="applyLampSettings()">
-                        Apply Both
-                    </button>
-                    <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
-                        Sync Lamp 2 to Lamp 1
-                    </button>
+                <!-- Manual Controls with Overlay -->
+                <div id="lamp-manual-controls" style="position: relative;">
+                    <div id="lamp-manual-overlay" style="display: flex; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); border-radius: 12px; z-index: 10; align-items: center; justify-content: center; backdrop-filter: blur(3px);">
+                        <div style="text-align: center; color: white;">
+                            <div style="font-size: 28px; margin-bottom: 8px;">🤖</div>
+                            <div style="font-weight: 700; font-size: 14px;">ADAPTIVE Mode Active</div>
+                            <div style="font-size: 12px; opacity: 0.8;">Switch to MANUAL to control lamps</div>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Lamp 1 Brightness (GPIO 25): <span id="brightness-display-1">0</span>%</label>
+                        <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Lamp 2 Brightness (GPIO 26): <span id="brightness-display-2">0</span>%</label>
+                        <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="applyLampSettings()">
+                            Apply Both
+                        </button>
+                        <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
+                            Sync Lamp 2 to Lamp 1
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -5785,7 +5814,7 @@ HTML_TEMPLATE = '''
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: 'MANUAL' })
             }).then(() => {
-                updateModeBadges();
+                applyLampModeUI('MANUAL');
             }).catch(() => {});
             
             fetch('/api/lamp/control', {
@@ -5901,29 +5930,70 @@ HTML_TEMPLATE = '''
                 .then(r => r.json())
                 .then(data => {
                     applyACModeUI(data.ac.mode);
-                    
-                    const lampBadge = document.getElementById('lamp-mode-badge');
-                    if (lampBadge) {
-                        lampBadge.textContent = data.lamp.mode + ' MODE';
-                        lampBadge.className = 'mode-badge ' + data.lamp.mode.toLowerCase();
-                    }
+                    applyLampModeUI(data.lamp.mode);
                 });
         }
 
-        function toggleLampMode() {
-            fetch('/api/data')
-                .then(r => r.json())
-                .then(data => {
-                    const newMode = data.lamp.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    fetch('/api/lamp/mode', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ mode: newMode })
-                    })
-                    .then(r => r.json())
-                    .then(result => { updateModeBadges(); showToast('Lamp Mode: ' + newMode); })
-                    .catch(e => showToast('Error: ' + e, 'error'));
-                });
+        function setLampMode(mode) {
+            fetch('/api/lamp/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(r => r.json())
+            .then(result => {
+                applyLampModeUI(mode);
+                showToast('Lamp Mode: ' + mode, 'success');
+            })
+            .catch(e => showToast('Error: ' + e, 'error'));
+        }
+
+        function applyLampModeUI(mode) {
+            const overlay = document.getElementById('lamp-manual-overlay');
+            const indicator = document.getElementById('lamp-mode-indicator');
+            const btnAdaptive = document.getElementById('btn-lamp-adaptive');
+            const btnManual = document.getElementById('btn-lamp-manual');
+            if (mode === 'ADAPTIVE') {
+                if (overlay) overlay.style.display = 'flex';
+                if (indicator) {
+                    indicator.style.background = 'rgba(245, 158, 11, 0.1)';
+                    indicator.style.color = '#f59e0b';
+                    indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization';
+                }
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                    btnAdaptive.style.borderColor = '#f59e0b';
+                    btnAdaptive.style.color = 'white';
+                    btnAdaptive.style.opacity = '1';
+                }
+                if (btnManual) {
+                    btnManual.style.background = 'var(--bg-card)';
+                    btnManual.style.borderColor = 'var(--border)';
+                    btnManual.style.color = 'var(--text-secondary)';
+                    btnManual.style.opacity = '0.6';
+                }
+            } else {
+                if (overlay) overlay.style.display = 'none';
+                if (indicator) {
+                    indicator.style.background = 'rgba(99, 102, 241, 0.1)';
+                    indicator.style.color = '#6366f1';
+                    indicator.style.borderColor = 'rgba(99, 102, 241, 0.3)';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control lamps manually using sliders below';
+                }
+                if (btnManual) {
+                    btnManual.style.background = 'linear-gradient(135deg, #6366f1, #4f46e5)';
+                    btnManual.style.borderColor = '#6366f1';
+                    btnManual.style.color = 'white';
+                    btnManual.style.opacity = '1';
+                }
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'var(--bg-card)';
+                    btnAdaptive.style.borderColor = 'var(--border)';
+                    btnAdaptive.style.color = 'var(--text-secondary)';
+                    btnAdaptive.style.opacity = '0.6';
+                }
+            }
         }
 
         // ==================== IR REMOTE ====================
@@ -6683,6 +6753,8 @@ HTML_TEMPLATE = '''
                     setText('ctrl-lux3', num(lamp.lux3).toFixed(0));
                     const ctrlMotion = document.getElementById('ctrl-motion-status');
                     if (ctrlMotion) ctrlMotion.innerHTML = lamp.motion ? '<span style="color:#10b981">MOTION</span>' : '<span style="color:#ef4444">IDLE</span>';
+                    // Sync lamp mode buttons
+                    applyLampModeUI(lamp.mode || 'ADAPTIVE');
                     
                     const personDetected = !!camera.person_detected;
                     const personCount = num(camera.count);
