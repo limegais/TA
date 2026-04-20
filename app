@@ -1076,18 +1076,17 @@ def on_message(client, userdata, msg):
             l3 = payload.get('lux3', l1)
             b1 = payload.get('brightness1', payload.get('brightness', 0))
             b2 = payload.get('brightness2', b1)
-            b3 = payload.get('brightness3', b1)
             mqtt_data['lamp'].update({
                 'lux1': l1, 'lux2': l2, 'lux3': l3,
                 'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
                 'motion': payload.get('motion', False),
-                'brightness1': b1, 'brightness2': b2, 'brightness3': b3,
-                'brightness_avg': round((b1 + b2 + b3) / 3.0, 1),
+                'brightness1': b1, 'brightness2': b2,
+                'brightness_avg': round((b1 + b2) / 2.0, 1),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
+            save_lamp_data(l1, l2, l3, b1, b2, 0, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1))
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
@@ -1190,7 +1189,7 @@ def on_message(client, userdata, msg):
                     now = time.time()
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
-                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'source': 'adaptive'}))
         
         elif 'ml/status' in topic:
             socketio.emit('ml_status', payload)
@@ -3892,7 +3891,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-lamp" class="page">
             <div class="header">
                 <h1>Lamp Dashboard</h1>
-                <p>Lighting monitoring & status — 3 Lamps</p>
+                <p>Lighting monitoring — 3 Sensors, 2 Lamps (GPIO 25 & 26)</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
                         <span class="device-dot offline"></span>
@@ -3903,59 +3902,87 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="stats-grid dashboard-grid">
-                <!-- Lamp 1 -->
+                <!-- Sensor 1 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 1 — Lux</span>
+                        <span class="stat-title">Sensor 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            L1
+                            S1
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright1">0</span>%</span>
+                        <span>BH1750 Channel 1</span>
                     </div>
                 </div>
 
-                <!-- Lamp 2 -->
+                <!-- Sensor 2 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 2 — Lux</span>
+                        <span class="stat-title">Sensor 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            L2
+                            S2
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright2">0</span>%</span>
+                        <span>BH1750 Channel 2</span>
                     </div>
                 </div>
 
-                <!-- Lamp 3 -->
+                <!-- Sensor 3 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 3 — Lux</span>
+                        <span class="stat-title">Sensor 3 — Lux</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            L3
+                            S3
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright3">0</span>%</span>
+                        <span>BH1750 Channel 3</span>
                     </div>
                 </div>
 
-                <!-- Average -->
+                <!-- Average Lux -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Average (3 Lamps)</span>
+                        <span class="stat-title">Average Lux (3 Sensors)</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             AVG
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Avg Brightness: <span id="dash-bright-avg">0</span>%</span>
+                        <span>Target: 400 lx</span>
+                    </div>
+                </div>
+
+                <!-- Lamp 1 Brightness -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 1 — Brightness</span>
+                        <div class="stat-icon" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">
+                            L1
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-bright1">0</span>%</div>
+                    <div class="stat-change">
+                        <span>GPIO 25 (DAC)</span>
+                    </div>
+                </div>
+
+                <!-- Lamp 2 Brightness -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 2 — Brightness</span>
+                        <div class="stat-icon" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">
+                            L2
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-bright2">0</span>%</div>
+                    <div class="stat-change">
+                        <span>GPIO 26 (DAC)</span>
                     </div>
                 </div>
 
@@ -4046,7 +4073,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
+                    <div class="chart-title">Average Light Intensity (Lux) — 3 Sensors</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
@@ -4059,7 +4086,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Average Brightness Level — 3 Lamps</div>
+                    <div class="chart-title">Average Brightness Level — 2 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
@@ -4557,7 +4584,7 @@ HTML_TEMPLATE = '''
         <div id="control-lamp" class="page">
             <div class="header">
                 <h1>Lamp Control Panel</h1>
-                <p>Manual lamp control and brightness settings — 3 Lamps</p>
+                <p>Manual lamp control — 2 Lamps (GPIO 25 & 26), 3 BH1750 Sensors</p>
             </div>
 
             <div class="control-panel">
@@ -4565,28 +4592,43 @@ HTML_TEMPLATE = '''
                     <span>Lamp Control</span>
                     <div class="mode-badge adaptive" id="lamp-mode-badge" onclick="toggleLampMode()">ADAPTIVE MODE</div>
                 </div>
+
+                <!-- Live Sensor Readings -->
+                <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px; padding: 12px; background: var(--bg-elevated); border-radius: 10px; border: 1px solid var(--border);">
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 1</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #f59e0b;"><span id="ctrl-lux1">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 2</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #10b981;"><span id="ctrl-lux2">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 3</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #6366f1;"><span id="ctrl-lux3">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Motion</div>
+                        <div style="font-size: 18px; font-weight: 700;" id="ctrl-motion-status"><span style="color: #ef4444;">IDLE</span></div>
+                    </div>
+                </div>
                 
                 <div class="control-group">
-                    <label class="control-label">Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
+                    <label class="control-label">Lamp 1 Brightness (GPIO 25): <span id="brightness-display-1">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label">Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
+                    <label class="control-label">Lamp 2 Brightness (GPIO 26): <span id="brightness-display-2">0</span>%</label>
                     <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
-                </div>
-
-                <div class="control-group">
-                    <label class="control-label">Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
                 </div>
 
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-primary" onclick="applyLampSettings()">
-                        Apply All
+                        Apply Both
                     </button>
                     <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
-                        Sync All to Lamp 1
+                        Sync Lamp 2 to Lamp 1
                     </button>
                 </div>
             </div>
@@ -6210,24 +6252,21 @@ HTML_TEMPLATE = '''
         function syncAllSliders() {
             const val = document.getElementById('brightness-slider-1').value;
             document.getElementById('brightness-slider-2').value = val;
-            document.getElementById('brightness-slider-3').value = val;
             document.getElementById('brightness-display-2').textContent = val;
-            document.getElementById('brightness-display-3').textContent = val;
             saveSettings();
         }
 
         function applyLampSettings() {
             const b1 = parseInt(document.getElementById('brightness-slider-1').value);
             const b2 = parseInt(document.getElementById('brightness-slider-2').value);
-            const b3 = parseInt(document.getElementById('brightness-slider-3').value);
             
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness1: b1, brightness2: b2, brightness3: b3 })
+                body: JSON.stringify({ brightness1: b1, brightness2: b2 })
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '% L3=' + b3 + '%'))
+            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -7107,11 +7146,15 @@ HTML_TEMPLATE = '''
                     setText('dash-lux2', num(lamp.lux2).toFixed(0));
                     setText('dash-lux3', num(lamp.lux3).toFixed(0));
                     setText('dash-lux-avg', num(lamp.lux_avg).toFixed(1));
-                    setText('dash-bright1', Math.round(num(lamp.brightness1) / 255 * 100));
-                    setText('dash-bright2', Math.round(num(lamp.brightness2) / 255 * 100));
-                    setText('dash-bright3', Math.round(num(lamp.brightness3) / 255 * 100));
-                    setText('dash-bright-avg', Math.round(num(lamp.brightness_avg) / 255 * 100));
+                    setText('dash-bright1', Math.round(num(lamp.brightness1)));
+                    setText('dash-bright2', Math.round(num(lamp.brightness2)));
                     setText('dash-motion', lamp.motion ? 'MOTION DETECTED' : 'NO MOTION');
+                    // Update lamp control page live readings
+                    setText('ctrl-lux1', num(lamp.lux1).toFixed(0));
+                    setText('ctrl-lux2', num(lamp.lux2).toFixed(0));
+                    setText('ctrl-lux3', num(lamp.lux3).toFixed(0));
+                    const ctrlMotion = document.getElementById('ctrl-motion-status');
+                    if (ctrlMotion) ctrlMotion.innerHTML = lamp.motion ? '<span style="color:#10b981">MOTION</span>' : '<span style="color:#ef4444">IDLE</span>';
                     
                     const personDetected = !!camera.person_detected;
                     const personCount = num(camera.count);
