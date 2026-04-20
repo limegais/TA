@@ -86,22 +86,24 @@ OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
 
 # Live sensor data for fitness calculation
 opt_sensor_data = {
-    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False, 'lux': 200,
+    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False,
+    'lux': 200, 'lux1': 200, 'lux2': 200, 'lux3': 200,
     'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
     'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default'
 }
 
-# Auto optimization config
-AUTO_OPT_INTERVAL = 600  # seconds between optimization cycles
+# Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
+AUTO_OPT_INTERVAL_AC = 300   # 5 min for AC (temperature changes slowly)
+AUTO_OPT_INTERVAL_LAMP = 180 # 3 min for Lamp (light changes faster)
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
     'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
-    'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
+    'pso': {'fitness': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
 }
 
-ga_params = {'population_size': 20, 'generations': 30, 'mutation_rate': 0.25, 'crossover_rate': 0.8, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 40, 'iterations': 120, 'w': 0.9, 'c1': 2.0, 'c2': 2.0}
+ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
+pso_params = {'swarm_size': 25, 'iterations': 50, 'w': 0.7, 'c1': 1.8, 'c2': 2.2}
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -169,31 +171,55 @@ def calculate_ac_fitness(temp_set, fan_speed):
         fitness -= 10.0
     return max(0.0, round(fitness, 2))
 
-def calculate_lamp_fitness(brightness):
-    ambient_lux = opt_sensor_data['lux']
+def calculate_lamp_fitness_2d(brightness1, brightness2):
+    """Zone-aware 2D fitness: brightness1 controls zone near sensor1, brightness2 near sensor3.
+    3 sensors measure actual lux. Target: 400 lux uniform across all zones."""
+    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 200))
+    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 200))
+    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 200))
     person_detected = opt_sensor_data['person_detected']
-    fitness = 0
-    lamp_lux = brightness * 5
-    total_lux = ambient_lux + lamp_lux
+    TARGET_LUX = 400.0
+    fitness = 0.0
+
+    # Estimate contributed lux from each lamp (empirical: 1% brightness ≈ 3-5 lux)
+    lamp1_lux = brightness1 * 4.0
+    lamp2_lux = brightness2 * 4.0
+    # Zone model: lamp1 mainly affects sensor1/2, lamp2 mainly affects sensor2/3
+    est_lux1 = lux1 + lamp1_lux * 0.8 + lamp2_lux * 0.2
+    est_lux2 = lux2 + lamp1_lux * 0.5 + lamp2_lux * 0.5
+    est_lux3 = lux3 + lamp1_lux * 0.2 + lamp2_lux * 0.8
+
     if person_detected:
-        if 300 <= total_lux <= 500: fitness += 50
-        elif 200 <= total_lux <= 600: fitness += 35
-        elif total_lux < 200: fitness += max(0, 50 - (200 - total_lux) * 0.2)
-        else: fitness += max(0, 50 - (total_lux - 600) * 0.1)
+        # === COMFORT: Each zone should be near target (max 45 pts) ===
+        for est in [est_lux1, est_lux2, est_lux3]:
+            fitness += _gaussian_score(est, TARGET_LUX, 100.0, 15.0)
+
+        # === UNIFORMITY: All zones similar brightness (max 20 pts) ===
+        lux_values = [est_lux1, est_lux2, est_lux3]
+        lux_range = max(lux_values) - min(lux_values)
+        uniformity = math.exp(-(lux_range ** 2) / (2 * 150.0 ** 2))
+        fitness += uniformity * 20.0
+
+        # === ENERGY: Lower brightness = less power (max 15 pts) ===
+        total_power = (brightness1 + brightness2) * 0.5
+        max_power = 100.0  # 2 lamps at 100%
+        energy_ratio = 1.0 - (total_power / max_power)
+        fitness += energy_ratio * 15.0
     else:
-        if brightness <= 5: fitness += 50
-        elif brightness <= 20: fitness += 35
-        else: fitness += max(0, 50 - brightness * 0.5)
-    lamp_power = brightness * 0.5
-    energy_ratio = 1 - (lamp_power / 50.0)
-    fitness += energy_ratio * (10 if person_detected else 30)
-    if person_detected:
-        if ambient_lux >= 400: fitness += 20 if brightness <= 20 else (12 if brightness <= 40 else 0)
-        elif ambient_lux >= 200: fitness += 20 if 20 <= brightness <= 60 else 8
-        else: fitness += 20 if brightness >= 60 else (12 if brightness >= 40 else 5)
-    else:
-        if brightness <= 5: fitness += 20
-    return max(0, round(fitness, 2))
+        # No person: minimize energy, keep minimal light
+        if brightness1 <= 5 and brightness2 <= 5:
+            fitness += 80.0
+        elif brightness1 <= 15 and brightness2 <= 15:
+            fitness += 50.0
+        else:
+            avg_b = (brightness1 + brightness2) / 2.0
+            fitness += max(0, 80.0 - avg_b * 1.5)
+
+    return max(0.0, round(fitness, 2))
+
+# Keep backward compat wrapper for single-brightness calls
+def calculate_lamp_fitness(brightness):
+    return calculate_lamp_fitness_2d(brightness, brightness)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -216,7 +242,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
         ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
-        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux") |> mean()'
+        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2" or r._field == "lux3" or r._field == "lux_avg") |> mean()'
         for table in query_api.query(ac_query):
             for rec in table.records:
                 if rec.get_field() == 'temperature' and rec.get_value() is not None:
@@ -225,8 +251,13 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
         for table in query_api.query(lamp_query):
             for rec in table.records:
-                if rec.get_field() == 'lux' and rec.get_value() is not None:
-                    opt_sensor_data['lux'] = round(float(rec.get_value()), 1)
+                field = rec.get_field()
+                val = rec.get_value()
+                if val is not None:
+                    if field == 'lux_avg':
+                        opt_sensor_data['lux'] = round(float(val), 1)
+                    elif field in ('lux1', 'lux2', 'lux3'):
+                        opt_sensor_data[field] = round(float(val), 1)
         opt_sensor_data['data_source'] = 'influxdb'
         client.close()
     except Exception as e:
@@ -333,30 +364,51 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
+    """2D PSO: optimizes (brightness1, brightness2) for 2 lamps independently."""
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
-    w, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX)] for _ in range(swarm_size)]
-    velocities = [[random.uniform(-10, 10)] for _ in range(swarm_size)]
+    w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
+    w_end = 0.3
+    DIM = 2  # brightness1, brightness2
+    max_vel = 15
+
+    # Initialize swarm with 2D positions
+    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-10, 10) for _ in range(DIM)] for _ in range(swarm_size)]
+
+    # Seed from last result if available
+    if last_opt_results['pso'].get('brightness1', 0) > 0:
+        seed_b1 = last_opt_results['pso']['brightness1']
+        seed_b2 = last_opt_results['pso']['brightness2']
+        positions[0] = [seed_b1, seed_b2]
+        for j in range(1, min(5, swarm_size)):
+            positions[j] = [max(0, min(100, seed_b1 + random.randint(-10, 10))),
+                            max(0, min(100, seed_b2 + random.randint(-10, 10)))]
+
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness(p[0]) for p in positions]
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
     g_idx = pb_fit.index(max(pb_fit))
     g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
     fitness_history = []
+
     for it in range(iterations):
-        cur_w = w - (w - 0.4) * (it / iterations)
+        cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
         for i in range(swarm_size):
-            r1, r2 = random.random(), random.random()
-            velocities[i][0] = cur_w * velocities[i][0] + c1 * r1 * (pb_pos[i][0] - positions[i][0]) + c2 * r2 * (g_pos[0] - positions[i][0])
-            max_vel = 20
-            velocities[i][0] = max(-max_vel, min(max_vel, velocities[i][0]))
-            positions[i][0] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][0] + velocities[i][0]))))
-            fit = calculate_lamp_fitness(positions[i][0])
+            for d in range(DIM):
+                r1, r2 = random.random(), random.random()
+                velocities[i][d] = (cur_w * velocities[i][d]
+                    + c1 * r1 * (pb_pos[i][d] - positions[i][d])
+                    + c2 * r2 * (g_pos[d] - positions[i][d]))
+                velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
+                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][d] + velocities[i][d]))))
+            fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
             if fit > pb_fit[i]:
                 pb_fit[i], pb_pos[i] = fit, positions[i][:]
             if fit > g_fit:
                 g_fit, g_pos = fit, positions[i][:]
         fitness_history.append(g_fit)
+
+    # Return 2D result
     return g_pos, g_fit, fitness_history
 
 def run_optimization_cycle(algo='both'):
@@ -373,8 +425,9 @@ def run_optimization_cycle(algo='both'):
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} fitness={fit:.2f}")
         if algo in ('pso', 'both'):
             sol, fit, hist = run_pso_optimization()
-            last_opt_results['pso'] = {'fitness': fit, 'brightness': sol[0], 'stats': hist}
-            print(f"[PSO] Done: {sol[0]}% fitness={fit:.2f}")
+            b1, b2 = sol[0], sol[1]
+            last_opt_results['pso'] = {'fitness': fit, 'brightness': int((b1 + b2) / 2), 'brightness1': b1, 'brightness2': b2, 'stats': hist}
+            print(f"[PSO] Done: L1={b1}% L2={b2}% fitness={fit:.2f}")
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -384,6 +437,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'pso_brightness': last_opt_results['pso']['brightness'],
+            'pso_brightness1': last_opt_results['pso'].get('brightness1', 0),
+            'pso_brightness2': last_opt_results['pso'].get('brightness2', 0),
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', [])
         })
@@ -395,6 +450,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
+            'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
+            'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
         })
         # Auto-apply if ADAPTIVE mode
@@ -405,16 +462,17 @@ def run_optimization_cycle(algo='both'):
                 ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                 mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            opt_b = last_opt_results['pso']['brightness']
-            if opt_b > 0:
-                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_b), 'source': 'adaptive'}))
+            opt_b1 = last_opt_results['pso'].get('brightness1', 0)
+            opt_b2 = last_opt_results['pso'].get('brightness2', 0)
+            if opt_b1 > 0 or opt_b2 > 0:
+                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
         socketio.emit('ml_status', {
             'status': 'completed', 'algorithm': algo,
             'ga_fitness': last_opt_results['ga']['fitness'],
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
             'ga_solution': {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']},
-            'pso_solution': {'brightness': last_opt_results['pso']['brightness']},
+            'pso_solution': {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)},
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', [])
         })
@@ -428,15 +486,29 @@ def run_optimization_cycle(algo='both'):
         optimization_lock.release()
 
 def optimization_auto_loop():
-    """Background thread: auto-optimize every AUTO_OPT_INTERVAL seconds"""
+    """Background thread: separate intervals for AC (GA) and Lamp (PSO)."""
     time.sleep(10)  # wait for Flask + MQTT to start
-    print(f"[OPT] Auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
+    last_ga_time = 0
+    last_pso_time = 0
     while True:
         try:
-            run_optimization_cycle('both')
+            now = time.time()
+            run_ga = (now - last_ga_time) >= AUTO_OPT_INTERVAL_AC
+            run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
+            if run_ga and run_pso:
+                run_optimization_cycle('both')
+                last_ga_time = now
+                last_pso_time = now
+            elif run_pso:
+                run_optimization_cycle('pso')
+                last_pso_time = now
+            elif run_ga:
+                run_optimization_cycle('ga')
+                last_ga_time = now
         except Exception as e:
             print(f"[OPT] Auto cycle error: {e}")
-        time.sleep(AUTO_OPT_INTERVAL)
+        time.sleep(30)  # check every 30s
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -1088,7 +1160,7 @@ def on_message(client, userdata, msg):
             })
             # Save lamp data to InfluxDB
             save_lamp_data(l1, l2, l3, b1, b2, 0, mqtt_data['lamp']['motion'])
-            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1))
+            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3)
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -1184,13 +1256,14 @@ def on_message(client, userdata, msg):
                 pass
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
             if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
-                if opt_brightness > 0:
+                opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
+                opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+                if opt_b1 > 0 or opt_b2 > 0:
                     global _last_adaptive_lamp_apply
                     now = time.time()
                     if now - _last_adaptive_lamp_apply >= 5:
                         _last_adaptive_lamp_apply = now
-                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'source': 'adaptive'}))
+                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
         
         elif 'ml/status' in topic:
             socketio.emit('ml_status', payload)
@@ -2043,6 +2116,8 @@ def update_optimization():
             'ga_temp': ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0)),
             'ga_fan': ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0)),
             'pso_brightness': pso_sol.get('brightness', mqtt_data['system'].get('pso_brightness', 0)),
+            'pso_brightness1': pso_sol.get('brightness1', mqtt_data['system'].get('pso_brightness1', 0)),
+            'pso_brightness2': pso_sol.get('brightness2', mqtt_data['system'].get('pso_brightness2', 0)),
             'ga_history': data.get('ga_history', mqtt_data['system'].get('ga_history', [])),
             'pso_history': data.get('pso_history', mqtt_data['system'].get('pso_history', []))
         })
@@ -2065,15 +2140,16 @@ def update_optimization():
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
         if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
-            if opt_brightness > 0:
+            opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
+            opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+            if opt_b1 > 0 or opt_b2 > 0:
                 global _last_adaptive_lamp_apply
                 now = time.time()
                 if now - _last_adaptive_lamp_apply >= 5:
                     _last_adaptive_lamp_apply = now
-                    lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
+                    lamp_cmd = {'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: L1={opt_b1}% L2={opt_b2}%', 'level': 'success'})
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -8066,7 +8142,7 @@ if __name__ == '__main__':
     # Start GA/PSO auto-optimization background thread
     opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
     opt_thread.start()
-    print(f"  [OPT] GA/PSO auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
     
