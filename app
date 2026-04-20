@@ -34,7 +34,7 @@ device_last_seen = {
 alert_rules = {
     'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
     'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
-    'no_person_timeout': {'timeout_minutes': 10, 'enabled': True, 'last_person_seen': None}
+    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 15, 'enabled': True, 'last_person_seen': None}
 }
 active_alerts = deque(maxlen=50)
 
@@ -461,7 +461,7 @@ def run_optimization_cycle(algo='both'):
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                 mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_b1 = last_opt_results['pso'].get('brightness1', 0)
             opt_b2 = last_opt_results['pso'].get('brightness2', 0)
             if opt_b1 > 0 or opt_b2 > 0:
@@ -535,11 +535,14 @@ _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person -> auto OFF
+NO_PERSON_TIMEOUT_SECONDS = 300  # 5 menit no person -> AC auto OFF
+NO_PERSON_LAMP_TIMEOUT = 900     # 15 menit no person -> Lamp auto OFF
 AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
 _auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
+_lamp_auto_off_triggered = False   # Prevents repeated lamp OFF
+_no_person_lamp_start_time = None  # When no person started (for lamp timer)
 
 # Background detection thread state
 _latest_frame_bytes = None
@@ -730,14 +733,20 @@ def _person_present_recently():
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
-    """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 10 min empty"""
+    """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 5 min empty, Lamp OFF after 15 min empty"""
     global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time, _auto_off_time
+    global _lamp_auto_off_triggered, _no_person_lamp_start_time
     
-    # Only act in ADAPTIVE mode
-    if mqtt_data['ac'].get('mode') != 'ADAPTIVE':
+    ac_adaptive = mqtt_data['ac'].get('mode') == 'ADAPTIVE'
+    lamp_adaptive = mqtt_data['lamp'].get('mode') == 'ADAPTIVE'
+    
+    # Only act if at least one is ADAPTIVE
+    if not ac_adaptive and not lamp_adaptive:
         _person_consecutive_frames = 0
         _no_person_start_time = None
+        _no_person_lamp_start_time = None
         _auto_off_triggered = False
+        _lamp_auto_off_triggered = False
         return
     
     # How many consecutive frames needed to confirm person?
@@ -754,7 +763,9 @@ def handle_person_based_control(person_count):
         if _person_consecutive_frames >= required_frames and not in_cooldown:
             _last_person_confirmed_time = time.time()  # Record time person was confirmed
             _no_person_start_time = None
+            _no_person_lamp_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
+            _lamp_auto_off_triggered = False
             _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
@@ -784,10 +795,14 @@ def handle_person_based_control(person_count):
         # Start no-person timer
         if _no_person_start_time is None:
             _no_person_start_time = time.time()
+        if _no_person_lamp_start_time is None:
+            _no_person_lamp_start_time = time.time()
         
-        # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
         elapsed = time.time() - _no_person_start_time
-        if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
+        elapsed_lamp = time.time() - _no_person_lamp_start_time
+        
+        # Auto OFF AC: no person for 5 minutes (ADAPTIVE only)
+        if ac_adaptive and elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
             _auto_off_triggered = True
             _auto_off_time = time.time()
             if mqtt_data['ac'].get('ac_state') != 'OFF':
@@ -798,14 +813,38 @@ def handle_person_based_control(person_count):
                     }))
                     mqtt_data['ac']['ac_state'] = 'OFF'
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
-                                       'msg': f'Auto OFF: No person for {int(elapsed/60)} min', 'level': 'warning'})
+                                       'msg': f'Auto OFF AC: No person for {int(elapsed/60)} min', 'level': 'warning'})
                     socketio.emit('alert', {
                         'type': 'auto_off', 'level': 'warning',
                         'message': f'No person for {int(elapsed/60)} min — AC turned OFF automatically',
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"[ERROR] Auto OFF error: {e}")
+                    print(f"[ERROR] Auto OFF AC error: {e}")
+        
+        # Auto OFF Lamp: no person for 15 minutes (ADAPTIVE only)
+        if lamp_adaptive and elapsed_lamp >= NO_PERSON_LAMP_TIMEOUT and not _lamp_auto_off_triggered:
+            _lamp_auto_off_triggered = True
+            current_b1 = mqtt_data['lamp'].get('brightness1', 0)
+            current_b2 = mqtt_data['lamp'].get('brightness2', 0)
+            if current_b1 > 0 or current_b2 > 0:
+                try:
+                    mqtt_client.publish("smartroom/lamp/control", json.dumps({
+                        "brightness1": 0, "brightness2": 0,
+                        "source": "camera_auto"
+                    }))
+                    mqtt_data['lamp']['brightness1'] = 0
+                    mqtt_data['lamp']['brightness2'] = 0
+                    mqtt_data['lamp']['brightness_avg'] = 0
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                                       'msg': f'Auto OFF Lamp: No person for {int(elapsed_lamp/60)} min', 'level': 'warning'})
+                    socketio.emit('alert', {
+                        'type': 'lamp_auto_off', 'level': 'warning',
+                        'message': f'No person for {int(elapsed_lamp/60)} min — Lamps turned OFF automatically',
+                        'time': datetime.now().strftime('%H:%M:%S')
+                    })
+                except Exception as e:
+                    print(f"[ERROR] Auto OFF Lamp error: {e}")
 
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
@@ -1127,6 +1166,9 @@ def on_message(client, userdata, msg):
                 'hum2': payload.get('hum2', 0),
                 'temp3': payload.get('temp3', 0),
                 'hum3': payload.get('hum3', 0),
+                'swing': payload.get('swing', False),
+                'turbo': payload.get('turbo', False),
+                'econo': payload.get('econo', False),
             })
             save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
             save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
@@ -1255,7 +1297,7 @@ def on_message(client, userdata, msg):
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 pass
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
-            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
                 opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
                 opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
                 if opt_b1 > 0 or opt_b2 > 0:
@@ -2139,7 +2181,7 @@ def update_optimization():
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
             opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
             if opt_b1 > 0 or opt_b2 > 0:
@@ -4034,18 +4076,45 @@ HTML_TEMPLATE = '''
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
                         AC Mode
                     </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
-                        <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white; flex-direction: column;" onclick="sendACMode('MODE_AUTO', this)">
+                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;">
+                        <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white;" onclick="sendACMode('MODE_AUTO', this)">
                             Auto
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white; flex-direction: column;" onclick="sendACMode('MODE_COOL', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white;" onclick="sendACMode('MODE_COOL', this)">
                             Cool
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white; flex-direction: column;" onclick="sendACMode('MODE_FAN', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #ef4444; color: white;" onclick="sendACMode('MODE_HEAT', this)">
+                            Heat
+                        </button>
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white;" onclick="sendACMode('MODE_FAN', this)">
                             Fan
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white; flex-direction: column;" onclick="sendACMode('MODE_DRY', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white;" onclick="sendACMode('MODE_DRY', this)">
                             Dry
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Swing / Turbo / Econo Toggle Buttons -->
+                <div style="margin-top: 20px;">
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
+                        Extra Features
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                        <button class="btn" id="btn-swing" onclick="sendACCommand('SWING_TOGGLE')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">🔄</span>
+                            <span>Swing</span>
+                            <span id="swing-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
+                        </button>
+                        <button class="btn" id="btn-turbo" onclick="sendACCommand('TURBO')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">⚡</span>
+                            <span>Turbo</span>
+                            <span id="turbo-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
+                        </button>
+                        <button class="btn" id="btn-econo" onclick="sendACCommand('ECONO')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">🌿</span>
+                            <span>Econo</span>
+                            <span id="econo-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
                         </button>
                     </div>
                 </div>
@@ -5724,6 +5793,27 @@ HTML_TEMPLATE = '''
             if (typeof updateDashboard === 'function') {
                 try { updateDashboard(); } catch (e) {}
             }
+            updateExtraFeatureButtons(ac);
+        }
+
+        function updateExtraFeatureButtons(ac) {
+            if (!ac) return;
+            var features = [
+                {id: 'btn-swing', statusId: 'swing-status', key: 'swing', color: '#0ea5e9'},
+                {id: 'btn-turbo', statusId: 'turbo-status', key: 'turbo', color: '#ef4444'},
+                {id: 'btn-econo', statusId: 'econo-status', key: 'econo', color: '#10b981'}
+            ];
+            features.forEach(function(f) {
+                var btn = document.getElementById(f.id);
+                var status = document.getElementById(f.statusId);
+                var isOn = !!ac[f.key];
+                if (btn) {
+                    btn.style.background = isOn ? f.color : 'var(--bg-card)';
+                    btn.style.color = isOn ? 'white' : 'var(--text-secondary)';
+                    btn.style.borderColor = isOn ? f.color : 'var(--border)';
+                }
+                if (status) status.textContent = isOn ? 'ON' : 'OFF';
+            });
         }
 
         function sendACCommand(command) {
@@ -6740,6 +6830,7 @@ HTML_TEMPLATE = '''
                         setText('ac-live-fan', fanSpeed);
                         setText('ac-live-mode', acMode);
                     }
+                    updateExtraFeatureButtons(ac);
                     setText('dash-lux1', num(lamp.lux1).toFixed(0));
                     setText('dash-lux2', num(lamp.lux2).toFixed(0));
                     setText('dash-lux3', num(lamp.lux3).toFixed(0));
