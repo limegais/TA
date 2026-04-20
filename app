@@ -481,7 +481,7 @@ _last_adaptive_lamp_apply = 0
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
-    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness3': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
@@ -547,7 +547,7 @@ def save_sensor_data(temperature, humidity, heat_index):
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
-        bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
+        bright_avg = (brightness1 + brightness2) / 2.0
         write_to_influxdb('lamp_sensor', {
             'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
             'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
@@ -1082,6 +1082,7 @@ def on_message(client, userdata, msg):
                 'motion': payload.get('motion', False),
                 'brightness1': b1, 'brightness2': b2,
                 'brightness_avg': round((b1 + b2) / 2.0, 1),
+                'mode': payload.get('mode', mqtt_data['lamp'].get('mode', 'ADAPTIVE')),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
@@ -5007,7 +5008,6 @@ HTML_TEMPLATE = '''
                 fanSpeed: getVal('fan-speed-slider', 1) || 1,
                 lampBrightness1: getVal('brightness-slider-1', 0) || 0,
                 lampBrightness2: getVal('brightness-slider-2', 0) || 0,
-                lampBrightness3: getVal('brightness-slider-3', 0) || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -6260,13 +6260,22 @@ HTML_TEMPLATE = '''
             const b1 = parseInt(document.getElementById('brightness-slider-1').value);
             const b2 = parseInt(document.getElementById('brightness-slider-2').value);
             
+            // Auto-switch to MANUAL mode so PI controller doesn't override
+            fetch('/api/lamp/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'MANUAL' })
+            }).then(() => {
+                updateModeBadges();
+            }).catch(() => {});
+            
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness1: b1, brightness2: b2 })
+                body: JSON.stringify({ brightness1: b1, brightness2: b2, source: 'dashboard' })
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '%'))
+            .then(result => showToast('Lamp → MANUAL | L1=' + b1 + '% L2=' + b2 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -7515,7 +7524,7 @@ HTML_TEMPLATE = '''
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
-                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
+                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg));
                     charts.lampBright.update('none');
                 }
             }
