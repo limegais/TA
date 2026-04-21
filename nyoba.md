@@ -177,7 +177,9 @@ def calculate_lamp_fitness_2d(brightness1, brightness2):
     lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 200))
     lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 200))
     lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 200))
-    person_detected = opt_sensor_data['person_detected']
+    # Use debounced confirmation (20-min window) so brief camera misses don't cause PSO
+    # to optimize for darkness while a person is actually still in the room.
+    person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX = 400.0
     fitness = 0.0
 
@@ -743,9 +745,15 @@ def _person_present_recently():
            (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
 
 def _person_present_recently_lamp():
-    """True if person confirmed within 20 min (NO_PERSON_LAMP_TIMEOUT) — used for Lamp."""
-    return _last_person_confirmed_time > 0 and \
-           (time.time() - _last_person_confirmed_time) < NO_PERSON_LAMP_TIMEOUT
+    """True if person confirmed within 20 min (NO_PERSON_LAMP_TIMEOUT) — used for Lamp.
+    Checks ALL sources: local YOLO thread, MQTT camera/detection, and opt_sensor_data."""
+    # 1. Time-based confirmation from local YOLO camera thread
+    time_confirmed = (_last_person_confirmed_time > 0 and
+                      (time.time() - _last_person_confirmed_time) < NO_PERSON_LAMP_TIMEOUT)
+    # 2. Current live state from ANY camera source (MQTT or local)
+    currently_detected = (mqtt_data['camera'].get('person_detected', False) or
+                          opt_sensor_data.get('person_detected', False))
+    return time_confirmed or currently_detected
 
 def _safe_lamp_brightness(b1, b2):
     """If person is present, clamp brightness to at least LAMP_MIN_BRIGHTNESS_PERSON.
@@ -1315,13 +1323,19 @@ def on_message(client, userdata, msg):
             device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
 
         elif 'camera/detection' in topic:
+            person_from_mqtt = payload.get('person_detected', False)
             mqtt_data['camera'].update({
-                'person_detected': payload.get('person_detected', False),
+                'person_detected': person_from_mqtt,
                 'count': payload.get('count', 0),
                 'confidence': payload.get('confidence', 0)
             })
+            # Update _last_person_confirmed_time from MQTT camera so lamp protection
+            # works even when local camera thread is not running
+            if person_from_mqtt:
+                global _last_person_confirmed_time
+                _last_person_confirmed_time = time.time()
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
-            update_opt_sensor_data(person_detected=payload.get('person_detected', False))
+            update_opt_sensor_data(person_detected=person_from_mqtt)
             # Track device status
             device_last_seen['camera']['last_seen'] = datetime.now()
             device_last_seen['camera']['status'] = 'online'
