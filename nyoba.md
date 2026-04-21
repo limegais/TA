@@ -454,18 +454,21 @@ def run_optimization_cycle(algo='both'):
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
         })
-        # Auto-apply if ADAPTIVE mode
-        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+        # Auto-apply AC — only when GA produced fresh results this cycle
+        if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = last_opt_results['ga']['temp']
             opt_fan = last_opt_results['ga']['fan']
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
-                ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
-                mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-            opt_b1 = last_opt_results['pso'].get('brightness1', 0)
-            opt_b2 = last_opt_results['pso'].get('brightness2', 0)
+                now = time.time()
+                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
+                    _last_adaptive_ac_apply = now
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+        # Auto-apply Lamp — only when PSO produced fresh results this cycle
+        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
+            opt_b1, opt_b2 = _safe_lamp_brightness(last_opt_results['pso'].get('brightness1', 0), last_opt_results['pso'].get('brightness2', 0))
             if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
+                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
                 _record_lamp_apply(opt_b1, opt_b2)
         socketio.emit('ml_status', {
             'status': 'completed', 'algorithm': algo,
@@ -556,8 +559,10 @@ _last_adaptive_lamp_apply = 0
 # Lamp adaptive: track last sent brightness to avoid flickering (only send if change >= threshold)
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
+AC_ADAPTIVE_DEBOUNCE = 600     # 10 minutes between adaptive AC SET commands
 LAMP_ADAPTIVE_DEBOUNCE = 60    # seconds between adaptive lamp commands
 LAMP_CHANGE_THRESHOLD = 3      # minimum % change to trigger a new lamp command
+LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
 
 # Global data storage
 mqtt_data = {
@@ -733,9 +738,22 @@ def detect_persons(frame):
         return frame, 0, 0.0, []
 
 def _person_present_recently():
-    """True if person confirmed within NO_PERSON_TIMEOUT_SECONDS — blocks adaptive SET when room is empty"""
+    """True if person confirmed within 5 min (NO_PERSON_TIMEOUT_SECONDS) — used for AC."""
     return _last_person_confirmed_time > 0 and \
            (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
+
+def _person_present_recently_lamp():
+    """True if person confirmed within 20 min (NO_PERSON_LAMP_TIMEOUT) — used for Lamp."""
+    return _last_person_confirmed_time > 0 and \
+           (time.time() - _last_person_confirmed_time) < NO_PERSON_LAMP_TIMEOUT
+
+def _safe_lamp_brightness(b1, b2):
+    """If person is present, clamp brightness to at least LAMP_MIN_BRIGHTNESS_PERSON.
+    This prevents PSO from dimming lamp to near-zero due to brief false 'no person' detections."""
+    if _person_present_recently_lamp():
+        b1 = max(b1, LAMP_MIN_BRIGHTNESS_PERSON)
+        b2 = max(b2, LAMP_MIN_BRIGHTNESS_PERSON)
+    return int(b1), int(b2)
 
 def _should_apply_lamp(b1, b2):
     """Return True only if brightness changed enough AND debounce elapsed. Prevents flickering."""
@@ -1332,26 +1350,25 @@ def on_message(client, userdata, msg):
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
                 'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
             })
-            # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-            # Skip if camera auto-OFF is active (no person detected)
-            if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-                opt_temp = mqtt_data['system'].get('ga_temp', 0)
-                opt_fan = mqtt_data['system'].get('ga_fan', 0)
+            # AUTO-APPLY AC — only if ga_solution was present in this payload
+            if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+                opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
+                opt_fan = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                     global _last_adaptive_ac_apply
                     now = time.time()
-                    if now - _last_adaptive_ac_apply >= 5:
+                    if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                         _last_adaptive_ac_apply = now
                         ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-            elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                pass
-            # AUTO-APPLY: If Lamp is in ADAPTIVE mode
-            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-                opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
-                opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+            # AUTO-APPLY Lamp — only if pso_solution was present in this payload
+            if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
+                opt_b1, opt_b2 = _safe_lamp_brightness(
+                    pso_sol.get('brightness1', payload.get('pso_brightness1', pso_sol.get('brightness', 0))),
+                    pso_sol.get('brightness2', payload.get('pso_brightness2', pso_sol.get('brightness', 0)))
+                )
                 if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                    client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
+                    client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
                     _record_lamp_apply(opt_b1, opt_b2)
         
         elif 'ml/status' in topic:
@@ -2214,25 +2231,27 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        # AUTO-APPLY: If AC is in ADAPTIVE mode, send optimized settings to ESP32
-        if mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-            opt_temp = mqtt_data['system'].get('ga_temp', 0)
-            opt_fan = mqtt_data['system'].get('ga_fan', 0)
+        # AUTO-APPLY AC — only if ga_solution was provided in this request
+        if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
+            opt_fan = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                 global _last_adaptive_ac_apply
                 now = time.time()
-                if now - _last_adaptive_ac_apply >= 5:
+                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                     _last_adaptive_ac_apply = now
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
         
-        # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-            opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
-            opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+        # AUTO-APPLY Lamp — only if pso_solution was provided in this request
+        if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
+            opt_b1, opt_b2 = _safe_lamp_brightness(
+                pso_sol.get('brightness1', mqtt_data['system'].get('pso_brightness1', pso_sol.get('brightness', 0))),
+                pso_sol.get('brightness2', mqtt_data['system'].get('pso_brightness2', pso_sol.get('brightness', 0)))
+            )
             if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                lamp_cmd = {'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}
+                lamp_cmd = {'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}
                 mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
                 _record_lamp_apply(opt_b1, opt_b2)
                 log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: L1={opt_b1}% L2={opt_b2}%', 'level': 'success'})
