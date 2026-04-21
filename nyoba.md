@@ -34,7 +34,7 @@ device_last_seen = {
 alert_rules = {
     'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
     'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
-    'no_person_timeout': {'timeout_minutes': 10, 'enabled': True, 'last_person_seen': None}
+    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 20, 'enabled': True, 'last_person_seen': None}
 }
 active_alerts = deque(maxlen=50)
 
@@ -86,22 +86,24 @@ OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
 
 # Live sensor data for fitness calculation
 opt_sensor_data = {
-    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False, 'lux': 200,
+    'temperature': 28.0, 'humidity': 55.0, 'person_detected': False,
+    'lux': 200, 'lux1': 200, 'lux2': 200, 'lux3': 200,
     'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
     'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default'
 }
 
-# Auto optimization config
-AUTO_OPT_INTERVAL = 600  # seconds between optimization cycles
+# Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
+AUTO_OPT_INTERVAL_AC = 300   # 5 min for AC (temperature changes slowly)
+AUTO_OPT_INTERVAL_LAMP = 180 # 3 min for Lamp (light changes faster)
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
     'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
-    'pso': {'fitness': 0, 'brightness': 0, 'stats': []}
+    'pso': {'fitness': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
 }
 
-ga_params = {'population_size': 20, 'generations': 30, 'mutation_rate': 0.25, 'crossover_rate': 0.8, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 40, 'iterations': 120, 'w': 0.9, 'c1': 2.0, 'c2': 2.0}
+ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
+pso_params = {'swarm_size': 25, 'iterations': 50, 'w': 0.7, 'c1': 1.8, 'c2': 2.2}
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -169,31 +171,55 @@ def calculate_ac_fitness(temp_set, fan_speed):
         fitness -= 10.0
     return max(0.0, round(fitness, 2))
 
-def calculate_lamp_fitness(brightness):
-    ambient_lux = opt_sensor_data['lux']
+def calculate_lamp_fitness_2d(brightness1, brightness2):
+    """Zone-aware 2D fitness: brightness1 controls zone near sensor1, brightness2 near sensor3.
+    3 sensors measure actual lux. Target: 400 lux uniform across all zones."""
+    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 200))
+    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 200))
+    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 200))
     person_detected = opt_sensor_data['person_detected']
-    fitness = 0
-    lamp_lux = brightness * 5
-    total_lux = ambient_lux + lamp_lux
+    TARGET_LUX = 400.0
+    fitness = 0.0
+
+    # Estimate contributed lux from each lamp (empirical: 1% brightness ≈ 3-5 lux)
+    lamp1_lux = brightness1 * 4.0
+    lamp2_lux = brightness2 * 4.0
+    # Zone model: lamp1 mainly affects sensor1/2, lamp2 mainly affects sensor2/3
+    est_lux1 = lux1 + lamp1_lux * 0.8 + lamp2_lux * 0.2
+    est_lux2 = lux2 + lamp1_lux * 0.5 + lamp2_lux * 0.5
+    est_lux3 = lux3 + lamp1_lux * 0.2 + lamp2_lux * 0.8
+
     if person_detected:
-        if 300 <= total_lux <= 500: fitness += 50
-        elif 200 <= total_lux <= 600: fitness += 35
-        elif total_lux < 200: fitness += max(0, 50 - (200 - total_lux) * 0.2)
-        else: fitness += max(0, 50 - (total_lux - 600) * 0.1)
+        # === COMFORT: Each zone should be near target (max 45 pts) ===
+        for est in [est_lux1, est_lux2, est_lux3]:
+            fitness += _gaussian_score(est, TARGET_LUX, 100.0, 15.0)
+
+        # === UNIFORMITY: All zones similar brightness (max 20 pts) ===
+        lux_values = [est_lux1, est_lux2, est_lux3]
+        lux_range = max(lux_values) - min(lux_values)
+        uniformity = math.exp(-(lux_range ** 2) / (2 * 150.0 ** 2))
+        fitness += uniformity * 20.0
+
+        # === ENERGY: Lower brightness = less power (max 15 pts) ===
+        total_power = (brightness1 + brightness2) * 0.5
+        max_power = 100.0  # 2 lamps at 100%
+        energy_ratio = 1.0 - (total_power / max_power)
+        fitness += energy_ratio * 15.0
     else:
-        if brightness <= 5: fitness += 50
-        elif brightness <= 20: fitness += 35
-        else: fitness += max(0, 50 - brightness * 0.5)
-    lamp_power = brightness * 0.5
-    energy_ratio = 1 - (lamp_power / 50.0)
-    fitness += energy_ratio * (10 if person_detected else 30)
-    if person_detected:
-        if ambient_lux >= 400: fitness += 20 if brightness <= 20 else (12 if brightness <= 40 else 0)
-        elif ambient_lux >= 200: fitness += 20 if 20 <= brightness <= 60 else 8
-        else: fitness += 20 if brightness >= 60 else (12 if brightness >= 40 else 5)
-    else:
-        if brightness <= 5: fitness += 20
-    return max(0, round(fitness, 2))
+        # No person: minimize energy, keep minimal light
+        if brightness1 <= 5 and brightness2 <= 5:
+            fitness += 80.0
+        elif brightness1 <= 15 and brightness2 <= 15:
+            fitness += 50.0
+        else:
+            avg_b = (brightness1 + brightness2) / 2.0
+            fitness += max(0, 80.0 - avg_b * 1.5)
+
+    return max(0.0, round(fitness, 2))
+
+# Keep backward compat wrapper for single-brightness calls
+def calculate_lamp_fitness(brightness):
+    return calculate_lamp_fitness_2d(brightness, brightness)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -216,7 +242,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
         ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
-        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux") |> mean()'
+        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2" or r._field == "lux3" or r._field == "lux_avg") |> mean()'
         for table in query_api.query(ac_query):
             for rec in table.records:
                 if rec.get_field() == 'temperature' and rec.get_value() is not None:
@@ -225,8 +251,13 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
         for table in query_api.query(lamp_query):
             for rec in table.records:
-                if rec.get_field() == 'lux' and rec.get_value() is not None:
-                    opt_sensor_data['lux'] = round(float(rec.get_value()), 1)
+                field = rec.get_field()
+                val = rec.get_value()
+                if val is not None:
+                    if field == 'lux_avg':
+                        opt_sensor_data['lux'] = round(float(val), 1)
+                    elif field in ('lux1', 'lux2', 'lux3'):
+                        opt_sensor_data[field] = round(float(val), 1)
         opt_sensor_data['data_source'] = 'influxdb'
         client.close()
     except Exception as e:
@@ -333,30 +364,51 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
+    """2D PSO: optimizes (brightness1, brightness2) for 2 lamps independently."""
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
-    w, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX)] for _ in range(swarm_size)]
-    velocities = [[random.uniform(-10, 10)] for _ in range(swarm_size)]
+    w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
+    w_end = 0.3
+    DIM = 2  # brightness1, brightness2
+    max_vel = 15
+
+    # Initialize swarm with 2D positions
+    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-10, 10) for _ in range(DIM)] for _ in range(swarm_size)]
+
+    # Seed from last result if available
+    if last_opt_results['pso'].get('brightness1', 0) > 0:
+        seed_b1 = last_opt_results['pso']['brightness1']
+        seed_b2 = last_opt_results['pso']['brightness2']
+        positions[0] = [seed_b1, seed_b2]
+        for j in range(1, min(5, swarm_size)):
+            positions[j] = [max(0, min(100, seed_b1 + random.randint(-10, 10))),
+                            max(0, min(100, seed_b2 + random.randint(-10, 10)))]
+
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness(p[0]) for p in positions]
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
     g_idx = pb_fit.index(max(pb_fit))
     g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
     fitness_history = []
+
     for it in range(iterations):
-        cur_w = w - (w - 0.4) * (it / iterations)
+        cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
         for i in range(swarm_size):
-            r1, r2 = random.random(), random.random()
-            velocities[i][0] = cur_w * velocities[i][0] + c1 * r1 * (pb_pos[i][0] - positions[i][0]) + c2 * r2 * (g_pos[0] - positions[i][0])
-            max_vel = 20
-            velocities[i][0] = max(-max_vel, min(max_vel, velocities[i][0]))
-            positions[i][0] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][0] + velocities[i][0]))))
-            fit = calculate_lamp_fitness(positions[i][0])
+            for d in range(DIM):
+                r1, r2 = random.random(), random.random()
+                velocities[i][d] = (cur_w * velocities[i][d]
+                    + c1 * r1 * (pb_pos[i][d] - positions[i][d])
+                    + c2 * r2 * (g_pos[d] - positions[i][d]))
+                velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
+                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][d] + velocities[i][d]))))
+            fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
             if fit > pb_fit[i]:
                 pb_fit[i], pb_pos[i] = fit, positions[i][:]
             if fit > g_fit:
                 g_fit, g_pos = fit, positions[i][:]
         fitness_history.append(g_fit)
+
+    # Return 2D result
     return g_pos, g_fit, fitness_history
 
 def run_optimization_cycle(algo='both'):
@@ -373,8 +425,9 @@ def run_optimization_cycle(algo='both'):
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} fitness={fit:.2f}")
         if algo in ('pso', 'both'):
             sol, fit, hist = run_pso_optimization()
-            last_opt_results['pso'] = {'fitness': fit, 'brightness': sol[0], 'stats': hist}
-            print(f"[PSO] Done: {sol[0]}% fitness={fit:.2f}")
+            b1, b2 = sol[0], sol[1]
+            last_opt_results['pso'] = {'fitness': fit, 'brightness': int((b1 + b2) / 2), 'brightness1': b1, 'brightness2': b2, 'stats': hist}
+            print(f"[PSO] Done: L1={b1}% L2={b2}% fitness={fit:.2f}")
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -384,6 +437,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'pso_brightness': last_opt_results['pso']['brightness'],
+            'pso_brightness1': last_opt_results['pso'].get('brightness1', 0),
+            'pso_brightness2': last_opt_results['pso'].get('brightness2', 0),
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', [])
         })
@@ -395,6 +450,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
+            'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
+            'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
         })
         # Auto-apply if ADAPTIVE mode
@@ -404,17 +461,19 @@ def run_optimization_cycle(algo='both'):
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                 mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            opt_b = last_opt_results['pso']['brightness']
-            if opt_b > 0:
-                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness': int(opt_b), 'source': 'adaptive'}))
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_b1 = last_opt_results['pso'].get('brightness1', 0)
+            opt_b2 = last_opt_results['pso'].get('brightness2', 0)
+            if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
+                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
+                _record_lamp_apply(opt_b1, opt_b2)
         socketio.emit('ml_status', {
             'status': 'completed', 'algorithm': algo,
             'ga_fitness': last_opt_results['ga']['fitness'],
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
             'ga_solution': {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']},
-            'pso_solution': {'brightness': last_opt_results['pso']['brightness']},
+            'pso_solution': {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)},
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', [])
         })
@@ -428,15 +487,29 @@ def run_optimization_cycle(algo='both'):
         optimization_lock.release()
 
 def optimization_auto_loop():
-    """Background thread: auto-optimize every AUTO_OPT_INTERVAL seconds"""
+    """Background thread: separate intervals for AC (GA) and Lamp (PSO)."""
     time.sleep(10)  # wait for Flask + MQTT to start
-    print(f"[OPT] Auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
+    last_ga_time = 0
+    last_pso_time = 0
     while True:
         try:
-            run_optimization_cycle('both')
+            now = time.time()
+            run_ga = (now - last_ga_time) >= AUTO_OPT_INTERVAL_AC
+            run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
+            if run_ga and run_pso:
+                run_optimization_cycle('both')
+                last_ga_time = now
+                last_pso_time = now
+            elif run_pso:
+                run_optimization_cycle('pso')
+                last_pso_time = now
+            elif run_ga:
+                run_optimization_cycle('ga')
+                last_ga_time = now
         except Exception as e:
             print(f"[OPT] Auto cycle error: {e}")
-        time.sleep(AUTO_OPT_INTERVAL)
+        time.sleep(30)  # check every 30s
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -463,11 +536,14 @@ _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 600  # 10 menit no person -> auto OFF
+NO_PERSON_TIMEOUT_SECONDS = 300  # 5 menit no person -> AC auto OFF
+NO_PERSON_LAMP_TIMEOUT = 1200    # 20 menit no person -> Lamp auto OFF
 AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
 _auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
+_lamp_auto_off_triggered = False   # Prevents repeated lamp OFF
+_no_person_lamp_start_time = None  # When no person started (for lamp timer)
 
 # Background detection thread state
 _latest_frame_bytes = None
@@ -477,11 +553,16 @@ _detection_thread_running = False
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
+# Lamp adaptive: track last sent brightness to avoid flickering (only send if change >= threshold)
+_last_sent_lamp_b1 = -1
+_last_sent_lamp_b2 = -1
+LAMP_ADAPTIVE_DEBOUNCE = 60    # seconds between adaptive lamp commands
+LAMP_CHANGE_THRESHOLD = 3      # minimum % change to trigger a new lamp command
 
 # Global data storage
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
-    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness3': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
@@ -547,7 +628,7 @@ def save_sensor_data(temperature, humidity, heat_index):
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
-        bright_avg = (brightness1 + brightness2 + brightness3) / 3.0
+        bright_avg = (brightness1 + brightness2) / 2.0
         write_to_influxdb('lamp_sensor', {
             'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
             'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
@@ -656,16 +737,39 @@ def _person_present_recently():
     return _last_person_confirmed_time > 0 and \
            (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
 
+def _should_apply_lamp(b1, b2):
+    """Return True only if brightness changed enough AND debounce elapsed. Prevents flickering."""
+    global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+    now = time.time()
+    b1i, b2i = int(b1), int(b2)
+    debounce_ok = (now - _last_adaptive_lamp_apply) >= LAMP_ADAPTIVE_DEBOUNCE
+    change_ok = (abs(b1i - _last_sent_lamp_b1) >= LAMP_CHANGE_THRESHOLD or
+                 abs(b2i - _last_sent_lamp_b2) >= LAMP_CHANGE_THRESHOLD)
+    return debounce_ok and change_ok
+
+def _record_lamp_apply(b1, b2):
+    """Update tracking after a lamp command is sent."""
+    global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+    _last_sent_lamp_b1 = int(b1)
+    _last_sent_lamp_b2 = int(b2)
+    _last_adaptive_lamp_apply = time.time()
+
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
-    """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 10 min empty"""
+    """Smart auto ON/OFF: turn ON AC when person confirmed, OFF after 5 min empty, Lamp OFF after 15 min empty"""
     global _person_consecutive_frames, _no_person_start_time, _auto_off_triggered, _last_person_confirmed_time, _auto_off_time
+    global _lamp_auto_off_triggered, _no_person_lamp_start_time
     
-    # Only act in ADAPTIVE mode
-    if mqtt_data['ac'].get('mode') != 'ADAPTIVE':
+    ac_adaptive = mqtt_data['ac'].get('mode') == 'ADAPTIVE'
+    lamp_adaptive = mqtt_data['lamp'].get('mode') == 'ADAPTIVE'
+    
+    # Only act if at least one is ADAPTIVE
+    if not ac_adaptive and not lamp_adaptive:
         _person_consecutive_frames = 0
         _no_person_start_time = None
+        _no_person_lamp_start_time = None
         _auto_off_triggered = False
+        _lamp_auto_off_triggered = False
         return
     
     # How many consecutive frames needed to confirm person?
@@ -682,7 +786,15 @@ def handle_person_based_control(person_count):
         if _person_consecutive_frames >= required_frames and not in_cooldown:
             _last_person_confirmed_time = time.time()  # Record time person was confirmed
             _no_person_start_time = None
+            _no_person_lamp_start_time = None
             _auto_off_triggered = False  # Allow auto-OFF to fire again if person leaves later
+            # When lamp was auto-off and person returns: reset so lamp turns on instantly
+            if _lamp_auto_off_triggered:
+                _lamp_auto_off_triggered = False
+                global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+                _last_sent_lamp_b1 = -1
+                _last_sent_lamp_b2 = -1
+                _last_adaptive_lamp_apply = 0
             _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
@@ -705,6 +817,27 @@ def handle_person_based_control(person_count):
                     })
                 except Exception as e:
                     print(f"[ERROR] Auto ON error: {e}")
+            # Lamp auto ON: fires immediately after lamp reset (cache cleared above)
+            # _should_apply_lamp will pass since _last_sent_lamp_b1=-1 => change >= threshold
+            if lamp_adaptive and (mqtt_data['lamp'].get('brightness1', 0) == 0 and mqtt_data['lamp'].get('brightness2', 0) == 0):
+                b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 50))
+                b2 = mqtt_data['system'].get('pso_brightness2', b1)
+                if b1 > 0 or b2 > 0:
+                    try:
+                        mqtt_client.publish("smartroom/lamp/control", json.dumps({
+                            "brightness1": int(b1), "brightness2": int(b2),
+                            "source": "camera_auto"
+                        }))
+                        _record_lamp_apply(b1, b2)
+                        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                                           'msg': f'Auto ON Lamp: L1={b1}% L2={b2}%', 'level': 'success'})
+                        socketio.emit('alert', {
+                            'type': 'lamp_auto_on', 'level': 'success',
+                            'message': 'Person detected — Lamps turned ON automatically',
+                            'time': datetime.now().strftime('%H:%M:%S')
+                        })
+                    except Exception as e:
+                        print(f"[ERROR] Auto ON Lamp error: {e}")
             _person_consecutive_frames = required_frames  # Cap to avoid overflow
     else:
         _person_consecutive_frames = 0
@@ -712,10 +845,14 @@ def handle_person_based_control(person_count):
         # Start no-person timer
         if _no_person_start_time is None:
             _no_person_start_time = time.time()
+        if _no_person_lamp_start_time is None:
+            _no_person_lamp_start_time = time.time()
         
-        # Auto OFF: no person for NO_PERSON_TIMEOUT_SECONDS
         elapsed = time.time() - _no_person_start_time
-        if elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
+        elapsed_lamp = time.time() - _no_person_lamp_start_time
+        
+        # Auto OFF AC: no person for 5 minutes (ADAPTIVE only)
+        if ac_adaptive and elapsed >= NO_PERSON_TIMEOUT_SECONDS and not _auto_off_triggered:
             _auto_off_triggered = True
             _auto_off_time = time.time()
             if mqtt_data['ac'].get('ac_state') != 'OFF':
@@ -726,14 +863,38 @@ def handle_person_based_control(person_count):
                     }))
                     mqtt_data['ac']['ac_state'] = 'OFF'
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
-                                       'msg': f'Auto OFF: No person for {int(elapsed/60)} min', 'level': 'warning'})
+                                       'msg': f'Auto OFF AC: No person for {int(elapsed/60)} min', 'level': 'warning'})
                     socketio.emit('alert', {
                         'type': 'auto_off', 'level': 'warning',
                         'message': f'No person for {int(elapsed/60)} min — AC turned OFF automatically',
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
-                    print(f"[ERROR] Auto OFF error: {e}")
+                    print(f"[ERROR] Auto OFF AC error: {e}")
+        
+        # Auto OFF Lamp: no person for 20 minutes (ADAPTIVE only)
+        if lamp_adaptive and elapsed_lamp >= NO_PERSON_LAMP_TIMEOUT and not _lamp_auto_off_triggered:
+            _lamp_auto_off_triggered = True
+            current_b1 = mqtt_data['lamp'].get('brightness1', 0)
+            current_b2 = mqtt_data['lamp'].get('brightness2', 0)
+            if current_b1 > 0 or current_b2 > 0:
+                try:
+                    mqtt_client.publish("smartroom/lamp/control", json.dumps({
+                        "brightness1": 0, "brightness2": 0,
+                        "source": "camera_auto"
+                    }))
+                    mqtt_data['lamp']['brightness1'] = 0
+                    mqtt_data['lamp']['brightness2'] = 0
+                    mqtt_data['lamp']['brightness_avg'] = 0
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                                       'msg': f'Auto OFF Lamp: No person for {int(elapsed_lamp/60)} min', 'level': 'warning'})
+                    socketio.emit('alert', {
+                        'type': 'lamp_auto_off', 'level': 'warning',
+                        'message': f'No person for {int(elapsed_lamp/60)} min — Lamps turned OFF automatically',
+                        'time': datetime.now().strftime('%H:%M:%S')
+                    })
+                except Exception as e:
+                    print(f"[ERROR] Auto OFF Lamp error: {e}")
 
 # ==================== CAMERA FUNCTIONS ====================
 def get_camera():
@@ -1055,6 +1216,9 @@ def on_message(client, userdata, msg):
                 'hum2': payload.get('hum2', 0),
                 'temp3': payload.get('temp3', 0),
                 'hum3': payload.get('hum3', 0),
+                'swing': payload.get('swing', False),
+                'turbo': payload.get('turbo', False),
+                'econo': payload.get('econo', False),
             })
             save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
             save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
@@ -1076,19 +1240,19 @@ def on_message(client, userdata, msg):
             l3 = payload.get('lux3', l1)
             b1 = payload.get('brightness1', payload.get('brightness', 0))
             b2 = payload.get('brightness2', b1)
-            b3 = payload.get('brightness3', b1)
             mqtt_data['lamp'].update({
                 'lux1': l1, 'lux2': l2, 'lux3': l3,
                 'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
                 'motion': payload.get('motion', False),
-                'brightness1': b1, 'brightness2': b2, 'brightness3': b3,
-                'brightness_avg': round((b1 + b2 + b3) / 3.0, 1),
+                'brightness1': b1, 'brightness2': b2,
+                'brightness_avg': round((b1 + b2) / 2.0, 1),
+                'mode': payload.get('mode', mqtt_data['lamp'].get('mode', 'ADAPTIVE')),
                 'rssi': payload.get('rssi', 0),
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(l1, l2, l3, b1, b2, b3, mqtt_data['lamp']['motion'])
-            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1))
+            save_lamp_data(l1, l2, l3, b1, b2, 0, mqtt_data['lamp']['motion'])
+            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3)
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -1183,14 +1347,12 @@ def on_message(client, userdata, msg):
             elif mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE':
                 pass
             # AUTO-APPLY: If Lamp is in ADAPTIVE mode
-            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-                opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
-                if opt_brightness > 0:
-                    global _last_adaptive_lamp_apply
-                    now = time.time()
-                    if now - _last_adaptive_lamp_apply >= 5:
-                        _last_adaptive_lamp_apply = now
-                        client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_brightness), 'brightness2': int(opt_brightness), 'brightness3': int(opt_brightness), 'source': 'adaptive'}))
+            if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+                opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
+                opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+                if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
+                    client.publish('smartroom/lamp/control', json.dumps({'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}))
+                    _record_lamp_apply(opt_b1, opt_b2)
         
         elif 'ml/status' in topic:
             socketio.emit('ml_status', payload)
@@ -2043,6 +2205,8 @@ def update_optimization():
             'ga_temp': ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0)),
             'ga_fan': ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0)),
             'pso_brightness': pso_sol.get('brightness', mqtt_data['system'].get('pso_brightness', 0)),
+            'pso_brightness1': pso_sol.get('brightness1', mqtt_data['system'].get('pso_brightness1', 0)),
+            'pso_brightness2': pso_sol.get('brightness2', mqtt_data['system'].get('pso_brightness2', 0)),
             'ga_history': data.get('ga_history', mqtt_data['system'].get('ga_history', [])),
             'pso_history': data.get('pso_history', mqtt_data['system'].get('pso_history', []))
         })
@@ -2064,16 +2228,14 @@ def update_optimization():
                     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
         
         # AUTO-APPLY: If Lamp is in ADAPTIVE mode, send optimized brightness
-        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            opt_brightness = mqtt_data['system'].get('pso_brightness', 0)
-            if opt_brightness > 0:
-                global _last_adaptive_lamp_apply
-                now = time.time()
-                if now - _last_adaptive_lamp_apply >= 5:
-                    _last_adaptive_lamp_apply = now
-                    lamp_cmd = {'brightness': int(opt_brightness), 'source': 'adaptive'}
-                    mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: {opt_brightness}%', 'level': 'success'})
+        if mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
+            opt_b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 0))
+            opt_b2 = mqtt_data['system'].get('pso_brightness2', opt_b1)
+            if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
+                lamp_cmd = {'brightness1': int(opt_b1), 'brightness2': int(opt_b2), 'source': 'adaptive'}
+                mqtt_client.publish('smartroom/lamp/control', json.dumps(lamp_cmd))
+                _record_lamp_apply(opt_b1, opt_b2)
+                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive Lamp: L1={opt_b1}% L2={opt_b2}%', 'level': 'success'})
         
         return jsonify({'status': 'success', 'message': 'Optimization data updated'})
     except Exception as e:
@@ -2382,944 +2544,458 @@ HTML_TEMPLATE = '''
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+            margin: 0; padding: 0; box-sizing: border-box;
         }
-
         :root {
-            --primary: #6366f1;
-            --primary-dark: #4f46e5;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-            --bg-dark: #f1f5f9;
-            --bg-card: #ffffff;
-            --bg-card-hover: #f8fafc;
-            --text-primary: #1e293b;
-            --text-secondary: #64748b;
-            --border: #e2e8f0;
-            --shadow: rgba(0, 0, 0, 0.08);
+            --primary: #6366f1; --primary-dark: #4f46e5; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --bg-dark: #f1f5f9;
+            --bg-card: #ffffff; --bg-card-hover: #f8fafc; --text-primary: #1e293b; --text-secondary: #64748b; --border: #e2e8f0; --shadow: rgba(0, 0, 0, 0.08);
             --input-bg: #f8fafc;
         }
-
         [data-theme="dark"] {
-            --bg-dark: #0f172a;
-            --bg-card: #1e293b;
-            --bg-card-hover: #334155;
-            --text-primary: #f1f5f9;
-            --text-secondary: #94a3b8;
-            --border: #334155;
-            --shadow: rgba(0, 0, 0, 0.3);
-            --input-bg: #0f172a;
+            --bg-dark: #0f172a; --bg-card: #1e293b; --bg-card-hover: #334155; --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8; --border: #334155; --shadow: rgba(0, 0, 0, 0.3); --input-bg: #0f172a;
         }
-
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: var(--bg-dark);
-            color: var(--text-primary);
-            overflow-x: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
+            color: var(--text-primary); overflow-x: hidden;
         }
-
         .sidebar {
-            position: fixed;
-            left: 0;
-            top: 0;
-            width: 260px;
-            height: 100vh;
-            background: var(--bg-card);
-            border-right: 1px solid var(--border);
-            padding: 20px;
-            overflow-y: auto;
-            z-index: 1000;
+            position: fixed; left: 0; top: 0; width: 260px; height: 100vh;
+            background: var(--bg-card); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; z-index: 1000;
         }
-
         .logo {
-            font-size: 24px;
-            font-weight: bold;
-            color: var(--primary);
-            margin-bottom: 30px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            font-size: 24px; font-weight: bold; color: var(--primary); margin-bottom: 30px; display: flex; align-items: center; gap: 10px;
         }
-
         .nav-item {
-            padding: 12px 16px;
-            margin: 8px 0;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s;
-            display: flex;
-            align-items: center;
-            gap: 12px;
+            padding: 12px 16px; margin: 8px 0; border-radius: 8px; cursor: pointer;
+            transition: all 0.3s; display: flex; align-items: center; gap: 12px;
             color: var(--text-secondary);
         }
-
         .nav-item:hover {
-            background: var(--bg-card-hover);
-            color: var(--text-primary);
+            background: var(--bg-card-hover); color: var(--text-primary);
         }
-
         .nav-item.active {
-            background: var(--primary);
-            color: white;
+            background: var(--primary); color: white;
         }
-
         .main-content {
-            margin-left: 260px;
-            padding: 22px;
-            min-height: 100vh;
+            margin-left: 260px; padding: 22px; min-height: 100vh;
         }
-
         .page {
             display: none;
         }
-
         .page.active {
-            display: block;
-            animation: fadeIn 0.3s;
+            display: block; animation: fadeIn 0.3s;
         }
-
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
         }
-
         .header {
-            background: var(--bg-card);
-            padding: 20px 30px;
-            border-radius: 12px;
-            margin-bottom: 16px;
-            border: 1px solid var(--border);
+            background: var(--bg-card); padding: 20px 30px; border-radius: 12px; margin-bottom: 16px; border: 1px solid var(--border);
         }
-
         .header h1 {
-            font-size: 28px;
-            margin-bottom: 5px;
+            font-size: 28px; margin-bottom: 5px;
         }
-
         .header p {
-            color: var(--text-secondary);
-            font-size: 14px;
+            color: var(--text-secondary); font-size: 14px;
         }
-
         .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 14px;
-            margin-bottom: 16px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; margin-bottom: 16px;
         }
-
         .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            align-items: stretch;
+            grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch;
         }
-
         .dashboard-grid .stat-card {
             min-height: 185px;
         }
-
         .feedback-grid {
-            display: grid;
-            grid-template-columns: 1.2fr 1fr;
-            gap: 20px;
+            display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px;
         }
-
         .occupancy-top {
-            display: grid;
-            grid-template-columns: 280px 1fr;
-            gap: 20px;
-            margin-bottom: 20px;
+            display: grid; grid-template-columns: 280px 1fr; gap: 20px; margin-bottom: 20px;
         }
-
         .occupancy-kpi {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 16px;
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
         }
-
         .occupancy-kpi .kpi-label {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-bottom: 8px;
+            font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;
         }
-
         .occupancy-kpi .kpi-value {
-            font-size: 36px;
-            font-weight: 700;
-            color: #06b6d4;
-            line-height: 1;
+            font-size: 36px; font-weight: 700; color: #06b6d4; line-height: 1;
         }
-
         .occupancy-mini-note {
-            margin-top: 8px;
-            font-size: 12px;
-            color: var(--text-secondary);
+            margin-top: 8px; font-size: 12px; color: var(--text-secondary);
         }
-
         .occupancy-chart-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 14px;
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
         }
-
         .occupancy-chart-card canvas {
             max-height: 160px;
         }
-
         .rating-row {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 10px;
+            display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px;
         }
-
         .rating-btn {
-            border: 1px solid var(--border);
-            background: var(--bg-card);
-            color: var(--text-primary);
-            border-radius: 14px;
-            min-width: 74px;
-            min-height: 74px;
-            padding: 10px 12px;
-            cursor: pointer;
-            transition: all 0.2s;
-            font-size: 22px;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
+            border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); border-radius: 14px; min-width: 74px; min-height: 74px; padding: 10px 12px;
+            cursor: pointer; transition: all 0.2s; font-size: 22px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
         }
-
         .rating-btn.active {
-            background: var(--primary);
-            border-color: var(--primary);
-            color: #fff;
-            transform: translateY(-2px);
+            background: var(--primary); border-color: var(--primary);
+            color: #fff; transform: translateY(-2px);
             box-shadow: 0 10px 20px rgba(99, 102, 241, 0.35);
         }
-
         .feedback-input {
-            width: 100%;
-            background: var(--input-bg);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            color: var(--text-primary);
-            padding: 10px 12px;
+            width: 100%; background: var(--input-bg); border: 1px solid var(--border);
+            border-radius: 10px; color: var(--text-primary); padding: 10px 12px;
             margin-top: 10px;
         }
-
         .feedback-history-item {
-            padding: 10px 12px;
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            margin-bottom: 10px;
-            background: var(--bg-card-hover);
+            padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; background: var(--bg-card-hover);
         }
-
         .stat-card {
-            background: var(--bg-card);
-            padding: 18px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            transition: all 0.3s;
+            background: var(--bg-card); padding: 18px; border-radius: 12px; border: 1px solid var(--border); transition: all 0.3s;
         }
-
         .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 30px var(--shadow);
+            transform: translateY(-5px); box-shadow: 0 10px 30px var(--shadow);
         }
-
         .stat-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;
         }
-
         .stat-title {
-            color: var(--text-secondary);
-            font-size: 14px;
-            font-weight: 500;
+            color: var(--text-secondary); font-size: 14px; font-weight: 500;
         }
-
         .stat-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
+            width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 20px;
         }
-
         .stat-value {
-            font-size: 32px;
-            font-weight: bold;
-            margin-bottom: 8px;
+            font-size: 32px; font-weight: bold; margin-bottom: 8px;
         }
-
         .stat-change {
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 5px;
+            font-size: 13px; display: flex; align-items: center; gap: 5px;
         }
-
-        .stat-change.up { color: var(--success); }
-        .stat-change.down { color: var(--danger); }
-
+            .stat-change.up { color: var(--success); }
+            .stat-change.down { color: var(--danger); }
         .chart-container {
-            background: var(--bg-card);
-            padding: 24px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            margin-bottom: 30px;
+            background: var(--bg-card); padding: 24px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 30px;
         }
-
         .chart-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;
         }
-
         .chart-title {
-            font-size: 18px;
-            font-weight: 600;
+            font-size: 18px; font-weight: 600;
         }
-
         .chart-options {
-            display: flex;
-            gap: 10px;
+            display: flex; gap: 10px;
         }
-
         .chart-option-btn {
-            padding: 8px 16px;
-            border: 1px solid var(--border);
-            background: transparent;
-            color: var(--text-secondary);
-            border-radius: 6px;
-            cursor: pointer;
+            padding: 8px 16px; border: 1px solid var(--border); background: transparent;
+            color: var(--text-secondary); border-radius: 6px; cursor: pointer;
             transition: all 0.3s;
         }
-
         .chart-option-btn:hover {
-            background: var(--bg-card-hover);
-            color: var(--text-primary);
+            background: var(--bg-card-hover); color: var(--text-primary);
         }
-
         .chart-option-btn.active {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
+            background: var(--primary); color: white; border-color: var(--primary);
         }
-
         /* Energy page premium chart styling */
         #energy .power-card {
-            border-radius: 16px;
-            border: 1px solid rgba(99, 102, 241, 0.16);
-            background: linear-gradient(150deg, rgba(99,102,241,0.08), rgba(15,23,42,0.03));
-            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+            border-radius: 16px; border: 1px solid rgba(99, 102, 241, 0.16);
+            background: linear-gradient(150deg, rgba(99,102,241,0.08), rgba(15,23,42,0.03)); box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
         }
-
         #energy .chart-container {
-            border-radius: 16px;
-            border: 1px solid rgba(99, 102, 241, 0.18);
-            background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.9));
-            box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08);
-            padding: 18px 20px 16px;
-            margin-bottom: 22px;
+            border-radius: 16px; border: 1px solid rgba(99, 102, 241, 0.18); background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.9));
+            box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08); padding: 18px 20px 16px; margin-bottom: 22px;
         }
-
         #energy .chart-header {
-            margin-bottom: 14px;
-            gap: 10px;
-            flex-wrap: wrap;
+            margin-bottom: 14px; gap: 10px; flex-wrap: wrap;
         }
-
         #energy .chart-title {
-            font-size: 16px;
-            font-weight: 700;
-            letter-spacing: 0.2px;
-            color: var(--text-primary);
+            font-size: 16px; font-weight: 700; letter-spacing: 0.2px; color: var(--text-primary);
         }
-
         #energy .chart-options {
-            gap: 8px;
-            flex-wrap: wrap;
+            gap: 8px; flex-wrap: wrap;
         }
-
         #energy .chart-option-btn {
-            border-radius: 999px;
-            padding: 6px 13px;
-            font-size: 12px;
-            font-weight: 700;
-            border: 1px solid rgba(99, 102, 241, 0.22);
-            background: rgba(99, 102, 241, 0.06);
+            border-radius: 999px; padding: 6px 13px; font-size: 12px;
+            font-weight: 700; border: 1px solid rgba(99, 102, 241, 0.22); background: rgba(99, 102, 241, 0.06);
             color: #475569;
         }
-
         #energy .chart-option-btn:hover {
-            transform: translateY(-1px);
-            background: rgba(99, 102, 241, 0.12);
-            color: #1e293b;
+            transform: translateY(-1px); background: rgba(99, 102, 241, 0.12); color: #1e293b;
         }
-
         #energy .chart-option-btn.active {
-            background: linear-gradient(135deg, #4f46e5, #6366f1);
-            color: #ffffff;
-            border-color: transparent;
-            box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
+            background: linear-gradient(135deg, #4f46e5, #6366f1); color: #ffffff;
+            border-color: transparent; box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
         }
-
         #energy canvas {
-            height: 250px !important;
-            max-height: 250px;
+            height: 250px !important; max-height: 250px;
         }
-
         /* ML Optimization Page Styles */
         .ml-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
+            width: 100%; border-collapse: collapse; font-size: 13px;
         }
         .ml-table th, .ml-table td {
-            padding: 10px 14px;
-            text-align: center;
-            border-bottom: 1px solid var(--border);
+            padding: 10px 14px; text-align: center; border-bottom: 1px solid var(--border);
         }
         .ml-table th {
-            background: rgba(99, 102, 241, 0.1);
-            color: var(--primary);
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 11px;
-            letter-spacing: 0.5px;
+            background: rgba(99, 102, 241, 0.1); color: var(--primary); font-weight: 600;
+            text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;
         }
         .ml-table tr:hover {
             background: var(--bg-card-hover);
         }
         .ml-param-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 14px;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
         }
         .ml-param-item label {
-            display: block;
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-bottom: 6px;
+            display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;
         }
         .ml-input {
-            width: 100%;
-            padding: 8px 12px;
-            background: var(--input-bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            color: var(--text-primary);
-            font-size: 14px;
-            transition: border-color 0.3s;
+            width: 100%; padding: 8px 12px; background: var(--input-bg); border: 1px solid var(--border);
+            border-radius: 8px; color: var(--text-primary); font-size: 14px; transition: border-color 0.3s;
         }
         .ml-input:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+            outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
         }
         .ml-action-btn {
-            padding: 8px 18px !important;
-            font-weight: 600 !important;
-            cursor: pointer;
-            transition: all 0.3s !important;
+            padding: 8px 18px !important; font-weight: 600 !important; cursor: pointer; transition: all 0.3s !important;
         }
         .ml-action-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            transform: translateY(-2px); box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
         .ml-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
+            display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
         }
-        .ml-badge.good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-        .ml-badge.mid { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
-        .ml-badge.low { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
-
+            .ml-badge.good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+            .ml-badge.mid { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+            .ml-badge.low { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
         @media (max-width: 768px) {
             .ml-param-grid { grid-template-columns: 1fr; }
         }
-
         .mode-badge {
-            display: inline-block;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
+            display: inline-block; padding: 6px 14px; border-radius: 20px;
+            font-size: 12px; font-weight: 600; cursor: pointer;
             transition: all 0.3s;
         }
-
         .mode-badge.adaptive {
-            background: linear-gradient(135deg, #10b981, #059669);
-            color: white;
+            background: linear-gradient(135deg, #10b981, #059669); color: white;
         }
-
         .mode-badge.manual {
-            background: linear-gradient(135deg, #f59e0b, #d97706);
-            color: white;
+            background: linear-gradient(135deg, #f59e0b, #d97706); color: white;
         }
-
         .mode-badge:hover {
-            transform: scale(1.05);
-            box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
+            transform: scale(1.05); box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
         }
-
         .control-panel {
-            background: var(--bg-card);
-            padding: 24px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            margin-bottom: 20px;
+            background: var(--bg-card); padding: 24px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 20px;
         }
-
         .control-title {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            font-size: 18px; font-weight: 600; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;
         }
-
         .control-group {
             margin-bottom: 20px;
         }
-
         .control-label {
-            display: block;
-            color: var(--text-secondary);
-            margin-bottom: 10px;
-            font-size: 14px;
+            display: block; color: var(--text-secondary); margin-bottom: 10px; font-size: 14px;
         }
-
         .slider {
-            width: 100%;
-            height: 8px;
-            border-radius: 5px;
-            background: var(--border);
-            outline: none;
-            -webkit-appearance: none;
+            width: 100%; height: 8px; border-radius: 5px; background: var(--border); outline: none; -webkit-appearance: none;
         }
-
         .slider::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background: var(--primary);
+            -webkit-appearance: none; appearance: none; width: 20px;
+            height: 20px; border-radius: 50%; background: var(--primary);
             cursor: pointer;
         }
-
         .btn {
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
+            padding: 12px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
+            cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px;
         }
-
         .btn-primary {
-            background: var(--primary);
-            color: white;
+            background: var(--primary); color: white;
         }
-
         .btn-primary:hover {
-            background: var(--primary-dark);
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
+            background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
         }
-
         .btn-success {
-            background: var(--success);
-            color: white;
+            background: var(--success); color: white;
         }
-
         .btn-danger {
-            background: var(--danger);
-            color: white;
+            background: var(--danger); color: white;
         }
-
         .btn-warning {
-            background: var(--warning);
-            color: white;
+            background: var(--warning); color: white;
         }
-
         .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+            opacity: 0.5; cursor: not-allowed;
         }
-
         .btn-sm {
-            padding: 6px 12px;
-            font-size: 12px;
+            padding: 6px 12px; font-size: 12px;
         }
-
         .ir-button-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 15px; margin-top: 20px;
         }
-
         .ir-button {
-            padding: 15px;
-            background: var(--input-bg);
-            border: 2px solid var(--border);
-            border-radius: 8px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.3s;
-            position: relative;
+            padding: 15px; background: var(--input-bg); border: 2px solid var(--border); border-radius: 8px;
+            text-align: center; cursor: pointer; transition: all 0.3s; position: relative;
         }
-
         .ir-button:hover {
-            border-color: var(--primary);
-            transform: translateY(-2px);
+            border-color: var(--primary); transform: translateY(-2px);
         }
-
         .ir-button.learned {
             border-color: var(--success);
         }
-
         .ir-button.learning {
-            border-color: var(--warning);
-            animation: pulse 1s infinite;
+            border-color: var(--warning); animation: pulse 1s infinite;
         }
-
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-
         @keyframes blink {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.2; }
         }
-
         .ir-button-name {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-bottom: 5px;
+            font-size: 12px; color: var(--text-secondary); margin-bottom: 5px;
         }
-
         .ir-button-icon {
-            font-size: 24px;
-            margin: 10px 0;
+            font-size: 24px; margin: 10px 0;
         }
-
         .ir-status {
-            font-size: 10px;
-            margin-top: 5px;
+            font-size: 10px; margin-top: 5px;
         }
-
         .log-container {
-            background: var(--bg-card);
-            padding: 20px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            max-height: 500px;
-            overflow-y: auto;
+            background: var(--bg-card); padding: 20px; border-radius: 12px;
+            border: 1px solid var(--border); max-height: 500px; overflow-y: auto;
         }
-
         .log-entry {
-            padding: 10px;
-            margin: 5px 0;
-            border-left: 3px solid var(--border);
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
+            padding: 10px; margin: 5px 0; border-left: 3px solid var(--border); font-family: 'Courier New', monospace; font-size: 13px;
         }
-
-        .log-entry.success { border-left-color: var(--success); }
-        .log-entry.error { border-left-color: var(--danger); }
-        .log-entry.info { border-left-color: var(--primary); }
-
+            .log-entry.success { border-left-color: var(--success); }
+            .log-entry.error { border-left-color: var(--danger); }
+            .log-entry.info { border-left-color: var(--primary); }
         .toast {
-            position: fixed;
-            bottom: 30px;
-            right: 30px;
-            background: var(--bg-card);
-            padding: 16px 20px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            box-shadow: 0 10px 30px var(--shadow);
-            display: none;
-            z-index: 9999;
+            position: fixed; bottom: 30px; right: 30px; background: var(--bg-card); padding: 16px 20px;
+            border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 10px 30px var(--shadow); display: none; z-index: 9999;
             animation: slideIn 0.3s;
         }
-
         @keyframes slideIn {
             from { transform: translateX(400px); }
             to { transform: translateX(0); }
         }
-
-        .toast.show { display: block; }
-
+            .toast.show { display: block; }
         /* Energy data bubble notification */
         .energy-bubble {
-            position: fixed;
-            top: 80px;
-            right: 30px;
-            background: linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95));
-            color: #fff;
-            padding: 10px 18px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: 600;
-            z-index: 9998;
-            pointer-events: none;
-            opacity: 0;
-            transform: translateY(-10px) scale(0.9);
-            transition: opacity 0.3s, transform 0.3s;
-            box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            position: fixed; top: 80px; right: 30px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95)); color: #fff; padding: 10px 18px; border-radius: 20px; font-size: 13px; font-weight: 600;
+            z-index: 9998; pointer-events: none; opacity: 0; transform: translateY(-10px) scale(0.9); transition: opacity 0.3s, transform 0.3s; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4); display: flex; align-items: center; gap: 8px;
         }
         .energy-bubble.show {
-            opacity: 1;
-            transform: translateY(0) scale(1);
+            opacity: 1; transform: translateY(0) scale(1);
         }
         .energy-bubble .bubble-dot {
-            width: 8px;
-            height: 8px;
-            background: #fff;
-            border-radius: 50%;
-            animation: bubblePulse 1s infinite;
+            width: 8px; height: 8px; background: #fff; border-radius: 50%; animation: bubblePulse 1s infinite;
         }
         @keyframes bubblePulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
         }
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 20px;
+        margin-top: 20px;
         }
-
         .power-card {
-            background: var(--bg-card);
-            padding: 20px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            text-align: center;
+            background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border); text-align: center;
         }
-
         .power-value {
-            font-size: 36px;
-            font-weight: bold;
-            color: var(--primary);
-            margin: 10px 0;
+            font-size: 36px; font-weight: bold; color: var(--primary); margin: 10px 0;
         }
-
         /* ========== CAMERA STYLES ========== */
         .camera-view {
-            background: var(--bg-card);
-            padding: 20px;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            text-align: center;
-            margin-bottom: 20px;
+            background: var(--bg-card); padding: 20px; border-radius: 12px;
+            border: 1px solid var(--border); text-align: center; margin-bottom: 20px;
         }
-
         .camera-feed-container {
-            position: relative;
-            background: #000;
-            border-radius: 8px;
-            overflow: hidden;
-            max-width: 100%;
+            position: relative; background: #000; border-radius: 8px; overflow: hidden; max-width: 100%;
         }
-
         .camera-feed-container img {
-            width: 100%;
-            max-height: 800px;
-            object-fit: contain;
-            display: block;
-            margin: 0 auto;
+            width: 100%; max-height: 800px; object-fit: contain; display: block; margin: 0 auto;
         }
-
         .camera-overlay-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
-            padding: 10px 15px;
-            display: flex;
-            justify-content: space-between;
+            position: absolute; top: 0; left: 0; right: 0;
+            background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%); padding: 10px 15px; display: flex; justify-content: space-between;
             align-items: center;
         }
-
         .camera-rec-badge {
-            background: var(--danger);
-            color: white;
-            padding: 3px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: bold;
-            animation: pulse 1.5s infinite;
-            display: flex;
-            align-items: center;
-            gap: 5px;
+            background: var(--danger); color: white; padding: 3px 10px; border-radius: 4px; font-size: 12px;
+            font-weight: bold; animation: pulse 1.5s infinite; display: flex; align-items: center; gap: 5px;
         }
-
         .camera-time-badge {
-            color: white;
-            font-size: 12px;
-            background: rgba(0,0,0,0.5);
-            padding: 3px 10px;
-            border-radius: 4px;
-            font-family: monospace;
+            color: white; font-size: 12px; background: rgba(0,0,0,0.5); padding: 3px 10px; border-radius: 4px; font-family: monospace;
         }
-
         .camera-error {
-            padding: 80px 20px;
-            color: var(--text-secondary);
+            padding: 80px 20px; color: var(--text-secondary);
         }
-
         .camera-error i {
-            font-size: 64px;
-            margin-bottom: 20px;
-            color: var(--border);
+            font-size: 64px; margin-bottom: 20px; color: var(--border);
         }
-
         .camera-info-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-top: 20px;
         }
-
         .camera-info-card {
-            background: var(--input-bg);
-            padding: 15px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
+            background: var(--input-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border);
         }
-
         .camera-info-label {
-            color: var(--text-secondary);
-            font-size: 12px;
-            margin-bottom: 5px;
+            color: var(--text-secondary); font-size: 12px; margin-bottom: 5px;
         }
-
         .camera-info-value {
-            font-size: 18px;
-            font-weight: bold;
-            color: var(--text-primary);
+            font-size: 18px; font-weight: bold; color: var(--text-primary);
         }
-
         .detection-alert {
-            position: fixed;
-            top: 100px;
-            right: 30px;
-            background: linear-gradient(135deg, #ef4444, #dc2626);
-            color: white;
-            padding: 20px 25px;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(239, 68, 68, 0.5);
-            display: none;
-            z-index: 8888;
-            animation: slideInRight 0.5s, pulse 2s infinite;
-            max-width: 300px;
+            position: fixed; top: 100px; right: 30px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; padding: 20px 25px;
+            border-radius: 12px; box-shadow: 0 10px 40px rgba(239, 68, 68, 0.5); display: none; z-index: 8888; animation: slideInRight 0.5s, pulse 2s infinite; max-width: 300px;
         }
-
         .detection-alert.show {
             display: block;
         }
-
         @keyframes slideInRight {
             from { transform: translateX(400px); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
         }
-
         .detection-alert-header {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 10px;
-            font-size: 18px;
-            font-weight: bold;
+            display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 18px; font-weight: bold;
         }
-
         .detection-alert-icon {
-            font-size: 24px;
-            animation: bounce 1s infinite;
+            font-size: 24px; animation: bounce 1s infinite;
         }
-
         @keyframes bounce {
             0%, 100% { transform: translateY(0); }
             50% { transform: translateY(-5px); }
         }
-
         .detection-alert-body {
-            font-size: 14px;
-            opacity: 0.9;
+            font-size: 14px; opacity: 0.9;
         }
-
         .detection-close {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(255,255,255,0.2);
-            border: none;
-            color: white;
-            width: 25px;
-            height: 25px;
-            border-radius: 50%;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
+            position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.2); border: none; color: white;
+            width: 25px; height: 25px; border-radius: 50%; cursor: pointer; display: flex; align-items: center;
             justify-content: center;
         }
-
         .person-badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            margin: 2px;
+            display: inline-block; padding: 4px 12px; border-radius: 12px;
+            font-size: 11px; font-weight: 600; margin: 2px;
             animation: fadeIn 0.3s;
         }
-
         .person-badge.detected {
-            background: linear-gradient(135deg, #10b981, #059669);
-            color: white;
-            box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+            background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
         }
-
         .person-badge.not-detected {
-            background: linear-gradient(135deg, #64748b, #475569);
-            color: rgba(255,255,255,0.7);
+            background: linear-gradient(135deg, #64748b, #475569); color: rgba(255,255,255,0.7);
         }
-
         @media (max-width: 768px) {
-            .sidebar { 
-                transform: translateX(-100%);
-                transition: transform 0.3s ease;
-                z-index: 2000;
-            }
+        .sidebar {
+            transform: translateX(-100%); transition: transform 0.3s ease; z-index: 2000;
+        }
             .sidebar.open { transform: translateX(0); }
             .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
             .stats-grid { grid-template-columns: 1fr; }
@@ -3328,157 +3004,86 @@ HTML_TEMPLATE = '''
             .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
         }
-
         @media (min-width: 769px) and (max-width: 1200px) {
-            .dashboard-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
+        .dashboard-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
             .occupancy-top { grid-template-columns: 1fr; }
         }
-
         @media (min-width: 1201px) {
-            .dashboard-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
+        .dashboard-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
-
+        }
         .hamburger-btn {
-            display: none;
-            position: fixed;
-            top: 12px;
-            left: 12px;
-            z-index: 1998;
-            width: 44px;
-            height: 44px;
-            border-radius: 10px;
-            background: var(--primary);
-            color: white;
-            border: none;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            cursor: pointer;
-            box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+            display: none; position: fixed; top: 12px; left: 12px; z-index: 1998; width: 44px; height: 44px; border-radius: 10px;
+            background: var(--primary); color: white; border: none; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; box-shadow: 0 4px 15px rgba(99,102,241,0.4);
         }
-
         .sidebar-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.5);
-            z-index: 1999;
+            display: none; position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1999;
             pointer-events: none;
         }
-
         .sidebar-overlay.active {
-            display: block;
-            pointer-events: auto;
+            display: block; pointer-events: auto;
         }
-
         /* Device Status Indicators */
         .device-status-item {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 5px 12px;
-            background: var(--bg-card-hover);
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 500;
+            display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+            background: var(--bg-card-hover); border-radius: 20px; font-size: 12px; font-weight: 500;
             color: var(--text-secondary);
         }
         .device-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
+            width: 8px; height: 8px; border-radius: 50%; display: inline-block;
         }
         .device-dot.online {
-            background: #10b981;
-            box-shadow: 0 0 6px #10b981;
-            animation: pulse-green 2s infinite;
+            background: #10b981; box-shadow: 0 0 6px #10b981; animation: pulse-green 2s infinite;
         }
         .device-dot.offline {
             background: #ef4444;
         }
         .device-time {
-            font-size: 10px;
-            color: var(--text-secondary);
-            opacity: 0.7;
+            font-size: 10px; color: var(--text-secondary); opacity: 0.7;
         }
         @keyframes pulse-green {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-
         /* Alert Notification Banner */
         .alert-banner {
-            position: fixed;
-            top: 15px;
-            right: 15px;
-            z-index: 3000;
-            max-width: 380px;
-            padding: 14px 20px;
-            border-radius: 12px;
-            color: white;
-            font-size: 13px;
-            font-weight: 500;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-            animation: slideInRight 0.4s ease;
-            display: flex;
-            align-items: center;
+            position: fixed; top: 15px; right: 15px; z-index: 3000; max-width: 380px; padding: 14px 20px; border-radius: 12px;
+            color: white; font-size: 13px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,0.3); animation: slideInRight 0.4s ease; display: flex; align-items: center;
             gap: 10px;
         }
-        .alert-banner.danger { background: linear-gradient(135deg, #ef4444, #dc2626); }
-        .alert-banner.warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
-        .alert-banner .alert-close { background: none; border: none; color: white; cursor: pointer; font-size: 16px; margin-left: auto; opacity: 0.8; }
-        .alert-banner .alert-close:hover { opacity: 1; }
+            .alert-banner.danger { background: linear-gradient(135deg, #ef4444, #dc2626); }
+            .alert-banner.warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
+            .alert-banner .alert-close { background: none; border: none; color: white; cursor: pointer; font-size: 16px; margin-left: auto; opacity: 0.8; }
+            .alert-banner .alert-close:hover { opacity: 1; }
         @keyframes slideInRight {
             from { transform: translateX(100%); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
         }
-
         /* Theme Toggle */
         .theme-toggle {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 16px;
-            margin: 8px 0;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s;
-            color: var(--text-secondary);
-            border: 1px solid var(--border);
-            background: transparent;
-            width: 100%;
+            display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin: 8px 0; border-radius: 8px;
+            cursor: pointer; transition: all 0.3s; color: var(--text-secondary); border: 1px solid var(--border); background: transparent; width: 100%;
             font-size: 14px;
         }
         .theme-toggle:hover {
-            background: var(--bg-card-hover);
-            color: var(--text-primary);
+            background: var(--bg-card-hover); color: var(--text-primary);
         }
         .theme-toggle i {
-            font-size: 16px;
-            width: 20px;
-            text-align: center;
+            font-size: 16px; width: 20px; text-align: center;
         }
         .theme-divider {
-            border: none;
-            border-top: 1px solid var(--border);
-            margin: 15px 0;
+            border: none; border-top: 1px solid var(--border); margin: 15px 0;
         }
-
         /* Light theme adjustments */
         .slider {
             background: var(--border);
         }
         select.slider {
-            background: var(--input-bg);
-            color: var(--text-primary);
+            background: var(--input-bg); color: var(--text-primary);
         }
     </style>
 </head>
@@ -3892,7 +3497,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-lamp" class="page">
             <div class="header">
                 <h1>Lamp Dashboard</h1>
-                <p>Lighting monitoring & status — 3 Lamps</p>
+                <p>Lighting monitoring — 3 Sensors, 2 Lamps (GPIO 25 & 26)</p>
                 <div style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-esp32-lamp">
                         <span class="device-dot offline"></span>
@@ -3903,59 +3508,87 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="stats-grid dashboard-grid">
-                <!-- Lamp 1 -->
+                <!-- Sensor 1 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 1 — Lux</span>
+                        <span class="stat-title">Sensor 1 — Lux</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
-                            L1
+                            S1
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux1">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright1">0</span>%</span>
+                        <span>BH1750 Channel 1</span>
                     </div>
                 </div>
 
-                <!-- Lamp 2 -->
+                <!-- Sensor 2 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 2 — Lux</span>
+                        <span class="stat-title">Sensor 2 — Lux</span>
                         <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
-                            L2
+                            S2
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux2">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright2">0</span>%</span>
+                        <span>BH1750 Channel 2</span>
                     </div>
                 </div>
 
-                <!-- Lamp 3 -->
+                <!-- Sensor 3 -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Lamp 3 — Lux</span>
+                        <span class="stat-title">Sensor 3 — Lux</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
-                            L3
+                            S3
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux3">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Brightness: <span id="dash-bright3">0</span>%</span>
+                        <span>BH1750 Channel 3</span>
                     </div>
                 </div>
 
-                <!-- Average -->
+                <!-- Average Lux -->
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Average (3 Lamps)</span>
+                        <span class="stat-title">Average Lux (3 Sensors)</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
                             AVG
                         </div>
                     </div>
                     <div class="stat-value"><span id="dash-lux-avg">0</span> lx</div>
                     <div class="stat-change">
-                        <span>Avg Brightness: <span id="dash-bright-avg">0</span>%</span>
+                        <span>Target: 400 lx</span>
+                    </div>
+                </div>
+
+                <!-- Lamp 1 Brightness -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 1 — Brightness</span>
+                        <div class="stat-icon" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">
+                            L1
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-bright1">0</span>%</div>
+                    <div class="stat-change">
+                        <span>GPIO 25 (DAC)</span>
+                    </div>
+                </div>
+
+                <!-- Lamp 2 Brightness -->
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Lamp 2 — Brightness</span>
+                        <div class="stat-icon" style="background: rgba(251, 191, 36, 0.2); color: #fbbf24;">
+                            L2
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-bright2">0</span>%</div>
+                    <div class="stat-change">
+                        <span>GPIO 26 (DAC)</span>
                     </div>
                 </div>
 
@@ -4046,7 +3679,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Average Light Intensity (Lux) — 3 Lamps</div>
+                    <div class="chart-title">Average Light Intensity (Lux) — 3 Sensors</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
@@ -4059,7 +3692,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Average Brightness Level — 3 Lamps</div>
+                    <div class="chart-title">Average Brightness Level — 2 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
@@ -4487,18 +4120,45 @@ HTML_TEMPLATE = '''
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
                         AC Mode
                     </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
-                        <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white; flex-direction: column;" onclick="sendACMode('MODE_AUTO', this)">
+                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;">
+                        <button class="btn ac-mode-btn" id="mode-btn-auto" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--primary); color: white;" onclick="sendACMode('MODE_AUTO', this)">
                             Auto
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white; flex-direction: column;" onclick="sendACMode('MODE_COOL', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white;" onclick="sendACMode('MODE_COOL', this)">
                             Cool
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white; flex-direction: column;" onclick="sendACMode('MODE_FAN', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #ef4444; color: white;" onclick="sendACMode('MODE_HEAT', this)">
+                            Heat
+                        </button>
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white;" onclick="sendACMode('MODE_FAN', this)">
                             Fan
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white; flex-direction: column;" onclick="sendACMode('MODE_DRY', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white;" onclick="sendACMode('MODE_DRY', this)">
                             Dry
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Swing / Turbo / Econo Toggle Buttons -->
+                <div style="margin-top: 20px;">
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600;">
+                        Extra Features
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                        <button class="btn" id="btn-swing" onclick="sendACCommand('SWING_TOGGLE')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">🔄</span>
+                            <span>Swing</span>
+                            <span id="swing-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
+                        </button>
+                        <button class="btn" id="btn-turbo" onclick="sendACCommand('TURBO')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">⚡</span>
+                            <span>Turbo</span>
+                            <span id="turbo-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
+                        </button>
+                        <button class="btn" id="btn-econo" onclick="sendACCommand('ECONO')" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: var(--bg-card); color: var(--text-secondary); border: 2px solid var(--border); cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                            <span style="font-size: 20px;">🌿</span>
+                            <span>Econo</span>
+                            <span id="econo-status" style="font-size: 11px; opacity: 0.7;">OFF</span>
                         </button>
                     </div>
                 </div>
@@ -4557,37 +4217,81 @@ HTML_TEMPLATE = '''
         <div id="control-lamp" class="page">
             <div class="header">
                 <h1>Lamp Control Panel</h1>
-                <p>Manual lamp control and brightness settings — 3 Lamps</p>
+                <p>Manual lamp control — 2 Lamps (GPIO 25 & 26), 3 BH1750 Sensors</p>
+            </div>
+
+            <!-- ========== LAMP MODE SELECTOR ========== -->
+            <div id="lamp-mode-selector" style="margin-bottom: 20px; padding: 20px; border-radius: 16px; border: 2px solid var(--border); background: var(--bg-card);">
+                <div style="text-align: center; margin-bottom: 14px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">
+                    Lamp Control Mode
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <button id="btn-lamp-adaptive" onclick="setLampMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                        <span style="font-size: 24px; font-weight: 800;">A</span>
+                        <span>ADAPTIVE</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">PSO controls lamps automatically</span>
+                    </button>
+                    <button id="btn-lamp-manual" onclick="setLampMode('MANUAL')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.6;">
+                        <span style="font-size: 24px; font-weight: 800;">M</span>
+                        <span>MANUAL</span>
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control lamps manually</span>
+                    </button>
+                </div>
+                <div id="lamp-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
+                    Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization
+                </div>
             </div>
 
             <div class="control-panel">
                 <div class="control-title">
                     <span>Lamp Control</span>
-                    <div class="mode-badge adaptive" id="lamp-mode-badge" onclick="toggleLampMode()">ADAPTIVE MODE</div>
-                </div>
-                
-                <div class="control-group">
-                    <label class="control-label">Lamp 1 Brightness: <span id="brightness-display-1">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
                 </div>
 
-                <div class="control-group">
-                    <label class="control-label">Lamp 2 Brightness: <span id="brightness-display-2">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
+                <!-- Live Sensor Readings -->
+                <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px; padding: 12px; background: var(--bg-elevated); border-radius: 10px; border: 1px solid var(--border);">
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 1</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #f59e0b;"><span id="ctrl-lux1">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 2</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #10b981;"><span id="ctrl-lux2">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Sensor 3</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #6366f1;"><span id="ctrl-lux3">0</span> lx</div>
+                    </div>
+                    <div style="flex: 1; min-width: 80px; text-align: center;">
+                        <div style="font-size: 11px; color: var(--text-secondary);">Motion</div>
+                        <div style="font-size: 18px; font-weight: 700;" id="ctrl-motion-status"><span style="color: #ef4444;">IDLE</span></div>
+                    </div>
                 </div>
 
-                <div class="control-group">
-                    <label class="control-label">Lamp 3 Brightness: <span id="brightness-display-3">0</span>%</label>
-                    <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-3" oninput="updateBrightness(3, this.value)">
-                </div>
-
-                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn btn-primary" onclick="applyLampSettings()">
-                        Apply All
-                    </button>
-                    <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
-                        Sync All to Lamp 1
-                    </button>
+                <!-- Manual Controls with Overlay -->
+                <div id="lamp-manual-controls" style="position: relative;">
+                    <div id="lamp-manual-overlay" style="display: flex; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); border-radius: 12px; z-index: 10; align-items: center; justify-content: center; backdrop-filter: blur(3px);">
+                        <div style="text-align: center; color: white;">
+                            <div style="font-size: 28px; margin-bottom: 8px;">🤖</div>
+                            <div style="font-weight: 700; font-size: 14px;">ADAPTIVE Mode Active</div>
+                            <div style="font-size: 12px; opacity: 0.8;">Switch to MANUAL to control lamps</div>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Lamp 1 Brightness (GPIO 25): <span id="brightness-display-1">0</span>%</label>
+                        <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-1" oninput="updateBrightness(1, this.value)">
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Lamp 2 Brightness (GPIO 26): <span id="brightness-display-2">0</span>%</label>
+                        <input type="range" min="0" max="100" value="0" class="slider" id="brightness-slider-2" oninput="updateBrightness(2, this.value)">
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="applyLampSettings()">
+                            Apply Both
+                        </button>
+                        <button class="btn" onclick="syncAllSliders()" style="background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);">
+                            Sync Lamp 2 to Lamp 1
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -4965,7 +4669,6 @@ HTML_TEMPLATE = '''
                 fanSpeed: getVal('fan-speed-slider', 1) || 1,
                 lampBrightness1: getVal('brightness-slider-1', 0) || 0,
                 lampBrightness2: getVal('brightness-slider-2', 0) || 0,
-                lampBrightness3: getVal('brightness-slider-3', 0) || 0
             };
             localStorage.setItem('smartroom_settings', JSON.stringify(settings));
         }
@@ -6134,6 +5837,27 @@ HTML_TEMPLATE = '''
             if (typeof updateDashboard === 'function') {
                 try { updateDashboard(); } catch (e) {}
             }
+            updateExtraFeatureButtons(ac);
+        }
+
+        function updateExtraFeatureButtons(ac) {
+            if (!ac) return;
+            var features = [
+                {id: 'btn-swing', statusId: 'swing-status', key: 'swing', color: '#0ea5e9'},
+                {id: 'btn-turbo', statusId: 'turbo-status', key: 'turbo', color: '#ef4444'},
+                {id: 'btn-econo', statusId: 'econo-status', key: 'econo', color: '#10b981'}
+            ];
+            features.forEach(function(f) {
+                var btn = document.getElementById(f.id);
+                var status = document.getElementById(f.statusId);
+                var isOn = !!ac[f.key];
+                if (btn) {
+                    btn.style.background = isOn ? f.color : 'var(--bg-card)';
+                    btn.style.color = isOn ? 'white' : 'var(--text-secondary)';
+                    btn.style.borderColor = isOn ? f.color : 'var(--border)';
+                }
+                if (status) status.textContent = isOn ? 'ON' : 'OFF';
+            });
         }
 
         function sendACCommand(command) {
@@ -6210,24 +5934,30 @@ HTML_TEMPLATE = '''
         function syncAllSliders() {
             const val = document.getElementById('brightness-slider-1').value;
             document.getElementById('brightness-slider-2').value = val;
-            document.getElementById('brightness-slider-3').value = val;
             document.getElementById('brightness-display-2').textContent = val;
-            document.getElementById('brightness-display-3').textContent = val;
             saveSettings();
         }
 
         function applyLampSettings() {
             const b1 = parseInt(document.getElementById('brightness-slider-1').value);
             const b2 = parseInt(document.getElementById('brightness-slider-2').value);
-            const b3 = parseInt(document.getElementById('brightness-slider-3').value);
+            
+            // Auto-switch to MANUAL mode so PI controller doesn't override
+            fetch('/api/lamp/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'MANUAL' })
+            }).then(() => {
+                applyLampModeUI('MANUAL');
+            }).catch(() => {});
             
             fetch('/api/lamp/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness1: b1, brightness2: b2, brightness3: b3 })
+                body: JSON.stringify({ brightness1: b1, brightness2: b2, source: 'dashboard' })
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp brightness applied: L1=' + b1 + '% L2=' + b2 + '% L3=' + b3 + '%'))
+            .then(result => showToast('Lamp → MANUAL | L1=' + b1 + '% L2=' + b2 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -6334,29 +6064,70 @@ HTML_TEMPLATE = '''
                 .then(r => r.json())
                 .then(data => {
                     applyACModeUI(data.ac.mode);
-                    
-                    const lampBadge = document.getElementById('lamp-mode-badge');
-                    if (lampBadge) {
-                        lampBadge.textContent = data.lamp.mode + ' MODE';
-                        lampBadge.className = 'mode-badge ' + data.lamp.mode.toLowerCase();
-                    }
+                    applyLampModeUI(data.lamp.mode);
                 });
         }
 
-        function toggleLampMode() {
-            fetch('/api/data')
-                .then(r => r.json())
-                .then(data => {
-                    const newMode = data.lamp.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    fetch('/api/lamp/mode', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ mode: newMode })
-                    })
-                    .then(r => r.json())
-                    .then(result => { updateModeBadges(); showToast('Lamp Mode: ' + newMode); })
-                    .catch(e => showToast('Error: ' + e, 'error'));
-                });
+        function setLampMode(mode) {
+            fetch('/api/lamp/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(r => r.json())
+            .then(result => {
+                applyLampModeUI(mode);
+                showToast('Lamp Mode: ' + mode, 'success');
+            })
+            .catch(e => showToast('Error: ' + e, 'error'));
+        }
+
+        function applyLampModeUI(mode) {
+            const overlay = document.getElementById('lamp-manual-overlay');
+            const indicator = document.getElementById('lamp-mode-indicator');
+            const btnAdaptive = document.getElementById('btn-lamp-adaptive');
+            const btnManual = document.getElementById('btn-lamp-manual');
+            if (mode === 'ADAPTIVE') {
+                if (overlay) overlay.style.display = 'flex';
+                if (indicator) {
+                    indicator.style.background = 'rgba(245, 158, 11, 0.1)';
+                    indicator.style.color = '#f59e0b';
+                    indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization';
+                }
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
+                    btnAdaptive.style.borderColor = '#f59e0b';
+                    btnAdaptive.style.color = 'white';
+                    btnAdaptive.style.opacity = '1';
+                }
+                if (btnManual) {
+                    btnManual.style.background = 'var(--bg-card)';
+                    btnManual.style.borderColor = 'var(--border)';
+                    btnManual.style.color = 'var(--text-secondary)';
+                    btnManual.style.opacity = '0.6';
+                }
+            } else {
+                if (overlay) overlay.style.display = 'none';
+                if (indicator) {
+                    indicator.style.background = 'rgba(99, 102, 241, 0.1)';
+                    indicator.style.color = '#6366f1';
+                    indicator.style.borderColor = 'rgba(99, 102, 241, 0.3)';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control lamps manually using sliders below';
+                }
+                if (btnManual) {
+                    btnManual.style.background = 'linear-gradient(135deg, #6366f1, #4f46e5)';
+                    btnManual.style.borderColor = '#6366f1';
+                    btnManual.style.color = 'white';
+                    btnManual.style.opacity = '1';
+                }
+                if (btnAdaptive) {
+                    btnAdaptive.style.background = 'var(--bg-card)';
+                    btnAdaptive.style.borderColor = 'var(--border)';
+                    btnAdaptive.style.color = 'var(--text-secondary)';
+                    btnAdaptive.style.opacity = '0.6';
+                }
+            }
         }
 
         // ==================== IR REMOTE ====================
@@ -7103,15 +6874,22 @@ HTML_TEMPLATE = '''
                         setText('ac-live-fan', fanSpeed);
                         setText('ac-live-mode', acMode);
                     }
+                    updateExtraFeatureButtons(ac);
                     setText('dash-lux1', num(lamp.lux1).toFixed(0));
                     setText('dash-lux2', num(lamp.lux2).toFixed(0));
                     setText('dash-lux3', num(lamp.lux3).toFixed(0));
                     setText('dash-lux-avg', num(lamp.lux_avg).toFixed(1));
-                    setText('dash-bright1', Math.round(num(lamp.brightness1) / 255 * 100));
-                    setText('dash-bright2', Math.round(num(lamp.brightness2) / 255 * 100));
-                    setText('dash-bright3', Math.round(num(lamp.brightness3) / 255 * 100));
-                    setText('dash-bright-avg', Math.round(num(lamp.brightness_avg) / 255 * 100));
+                    setText('dash-bright1', Math.round(num(lamp.brightness1)));
+                    setText('dash-bright2', Math.round(num(lamp.brightness2)));
                     setText('dash-motion', lamp.motion ? 'MOTION DETECTED' : 'NO MOTION');
+                    // Update lamp control page live readings
+                    setText('ctrl-lux1', num(lamp.lux1).toFixed(0));
+                    setText('ctrl-lux2', num(lamp.lux2).toFixed(0));
+                    setText('ctrl-lux3', num(lamp.lux3).toFixed(0));
+                    const ctrlMotion = document.getElementById('ctrl-motion-status');
+                    if (ctrlMotion) ctrlMotion.innerHTML = lamp.motion ? '<span style="color:#10b981">MOTION</span>' : '<span style="color:#ef4444">IDLE</span>';
+                    // Sync lamp mode buttons
+                    applyLampModeUI(lamp.mode || 'ADAPTIVE');
                     
                     const personDetected = !!camera.person_detected;
                     const personCount = num(camera.count);
@@ -7472,7 +7250,7 @@ HTML_TEMPLATE = '''
                 }
                 if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
                     charts.lampBright.data.labels.push(timeStr);
-                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg / 255 * 100));
+                    charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg));
                     charts.lampBright.update('none');
                 }
             }
@@ -8014,7 +7792,7 @@ if __name__ == '__main__':
     # Start GA/PSO auto-optimization background thread
     opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
     opt_thread.start()
-    print(f"  [OPT] GA/PSO auto-optimization started (every {AUTO_OPT_INTERVAL}s)")
+    print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
     
