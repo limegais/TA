@@ -497,6 +497,10 @@ def run_optimization_cycle(algo='both'):
             opt_b1, opt_b2 = _safe_lamp_brightness(last_opt_results['pso'].get('brightness1', 0), last_opt_results['pso'].get('brightness2', 0))
             if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
                 mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
+                # Update locally so auto-ON block doesn't re-fire before ESP32 confirms
+                mqtt_data['lamp']['brightness1'] = opt_b1
+                mqtt_data['lamp']['brightness2'] = opt_b2
+                mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
                 _record_lamp_apply(opt_b1, opt_b2)
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
@@ -607,7 +611,7 @@ mqtt_data = {
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
-    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'ga_history': [], 'pso_history': []},
+    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
 }
@@ -903,17 +907,24 @@ def handle_person_based_control(person_count):
                     })
                 except Exception as e:
                     print(f"[ERROR] Auto ON error: {e}")
-            # Lamp auto ON: fires immediately after lamp reset (cache cleared above)
-            # _should_apply_lamp will pass since _last_sent_lamp_b1=-1 => change >= threshold
+            # Lamp auto ON: fires only when lamp was previously OFF (brightness=0)
+            # CRITICAL: update mqtt_data['lamp'] locally right after publish so this block
+            # does NOT fire again on the next YOLO frame while waiting for ESP32 confirmation
             if lamp_adaptive and (mqtt_data['lamp'].get('brightness1', 0) == 0 and mqtt_data['lamp'].get('brightness2', 0) == 0):
-                b1 = mqtt_data['system'].get('pso_brightness1', mqtt_data['system'].get('pso_brightness', 50))
-                b2 = mqtt_data['system'].get('pso_brightness2', b1)
+                # Use PSO result if available; fall back to 60% if PSO hasn't run yet
+                # (PSO first runs ~3 min after startup — 60% is a safe default)
+                b1 = mqtt_data['system'].get('pso_brightness1', 0) or mqtt_data['system'].get('pso_brightness', 0) or 60
+                b2 = mqtt_data['system'].get('pso_brightness2', 0) or b1
                 if b1 > 0 or b2 > 0:
                     try:
                         mqtt_client.publish("smartroom/lamp/control", json.dumps({
                             "brightness1": int(b1), "brightness2": int(b2),
                             "source": "camera_auto"
                         }))
+                        # Update locally immediately — prevents re-firing on next YOLO frame
+                        mqtt_data['lamp']['brightness1'] = int(b1)
+                        mqtt_data['lamp']['brightness2'] = int(b2)
+                        mqtt_data['lamp']['brightness_avg'] = round((b1 + b2) / 2.0, 1)
                         _record_lamp_apply(b1, b2)
                         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
                                            'msg': f'Auto ON Lamp: L1={b1}% L2={b2}%', 'level': 'success'})
@@ -1119,6 +1130,8 @@ def camera_detection_loop():
                 mqtt_data['camera']['person_detected'] = person_count > 0
                 mqtt_data['camera']['count'] = person_count
                 mqtt_data['camera']['confidence'] = int(confidence * 100)
+                # Sync to opt_sensor_data so PSO fitness function uses current local YOLO result
+                update_opt_sensor_data(person_detected=person_count > 0)
                 
                 # * Smart auto ON/OFF -- only on YOLO frames
                 handle_person_based_control(person_count)
@@ -1544,8 +1557,7 @@ def on_message(client, userdata, msg):
         print(f"[ERROR] MQTT Message Handler Error: {str(e)}\n{tb}")
         # Only log to dashboard if it's a real unexpected error, not a known transient one
         err_str = str(e)
-        if err_str not in ("'timeout_minutes'",):
-            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {err_str}', 'level': 'error'})
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {err_str}', 'level': 'error'})
 
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
     global mqtt_status
