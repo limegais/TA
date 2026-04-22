@@ -589,12 +589,16 @@ _detection_thread_running = False
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
-# Lamp adaptive: track last sent brightness to avoid flickering (only send if change >= threshold)
+# Lamp adaptive: track last sent brightness AND lux snapshot to prevent PSO stochastic noise
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
-AC_ADAPTIVE_DEBOUNCE = 600     # 10 minutes between adaptive AC SET commands
-LAMP_ADAPTIVE_DEBOUNCE = 60    # seconds between adaptive lamp commands
-LAMP_CHANGE_THRESHOLD = 3      # minimum % change to trigger a new lamp command
+_last_apply_lux1 = -1.0   # lux readings captured at last lamp apply (lux stability gate)
+_last_apply_lux2 = -1.0
+_last_apply_lux3 = -1.0
+AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
+LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — PSO is stochastic, no need to apply every 3-min run
+LAMP_CHANGE_THRESHOLD = 8       # minimum 8% brightness change (PSO natural noise is ~5-7%)
+LUX_CHANGE_THRESHOLD = 30.0     # lux must change >30 before a new brightness is warranted
 LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
 
 # Global data storage
@@ -795,21 +799,41 @@ def _safe_lamp_brightness(b1, b2):
     return int(b1), int(b2)
 
 def _should_apply_lamp(b1, b2):
-    """Return True only if brightness changed enough AND debounce elapsed. Prevents flickering."""
+    """Return True only if brightness changed enough AND debounce elapsed AND lux changed."""
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
     now = time.time()
     b1i, b2i = int(b1), int(b2)
     debounce_ok = (now - _last_adaptive_lamp_apply) >= LAMP_ADAPTIVE_DEBOUNCE
     change_ok = (abs(b1i - _last_sent_lamp_b1) >= LAMP_CHANGE_THRESHOLD or
                  abs(b2i - _last_sent_lamp_b2) >= LAMP_CHANGE_THRESHOLD)
-    return debounce_ok and change_ok
+    if not debounce_ok or not change_ok:
+        return False
+    # Lux stability gate: if the light environment hasn't changed meaningfully since the
+    # last apply, PSO randomness alone must not cause lamp flicker. Only allow if lux
+    # changed >LUX_CHANGE_THRESHOLD on at least one sensor, or if this is the first apply
+    # after a reset (_last_apply_lux1 == -1.0).
+    if _last_apply_lux1 >= 0.0:
+        cur_lux1 = opt_sensor_data.get('lux1', -1.0)
+        cur_lux2 = opt_sensor_data.get('lux2', -1.0)
+        cur_lux3 = opt_sensor_data.get('lux3', -1.0)
+        if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
+            lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
+                           abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
+                           abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
+            if not lux_changed:
+                return False  # environment stable — PSO noise must not cause flicker
+    return True
 
 def _record_lamp_apply(b1, b2):
-    """Update tracking after a lamp command is sent."""
+    """Update brightness tracking and capture lux snapshot for the stability gate."""
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
+    _last_apply_lux1 = float(opt_sensor_data.get('lux1', _last_apply_lux1))
+    _last_apply_lux2 = float(opt_sensor_data.get('lux2', _last_apply_lux2))
+    _last_apply_lux3 = float(opt_sensor_data.get('lux3', _last_apply_lux3))
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
@@ -849,9 +873,14 @@ def handle_person_based_control(person_count):
             if _lamp_auto_off_triggered:
                 _lamp_auto_off_triggered = False
                 global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+                global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
                 _last_sent_lamp_b1 = -1
                 _last_sent_lamp_b2 = -1
                 _last_adaptive_lamp_apply = 0
+                # Reset lux cache so the first PSO result after person returns always passes the gate
+                _last_apply_lux1 = -1.0
+                _last_apply_lux2 = -1.0
+                _last_apply_lux3 = -1.0
             _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
