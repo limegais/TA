@@ -81,7 +81,7 @@ load_energy_recording()
 # ==================== GA/PSO OPTIMIZATION ENGINE (embedded) ====================
 # Optimization bounds
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
-OPT_FAN_MIN, OPT_FAN_MAX = 1, 3
+OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
 OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
 
 # Live sensor data for fitness calculation
@@ -123,7 +123,8 @@ def _get_temp_uniformity():
 def calculate_ac_fitness(temp_set, fan_speed):
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
-    person_detected = opt_sensor_data['person_detected']
+    # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
+    person_detected = opt_sensor_data['person_detected'] or _person_present_recently()
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
@@ -378,10 +379,13 @@ def run_pso_optimization(verbose=False):
     positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)] for _ in range(swarm_size)]
     velocities = [[random.uniform(-10, 10) for _ in range(DIM)] for _ in range(swarm_size)]
 
-    # Seed from last result if available
-    if last_opt_results['pso'].get('brightness1', 0) > 0:
-        seed_b1 = last_opt_results['pso']['brightness1']
-        seed_b2 = last_opt_results['pso']['brightness2']
+    # Smart seeding: use last result UNLESS it was a "no person" low-brightness solution
+    # and person is currently present — avoids slow convergence from a bad starting point
+    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+    seed_b1 = last_opt_results['pso'].get('brightness1', 0)
+    seed_b2 = last_opt_results['pso'].get('brightness2', 0)
+    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)  # "no person" result
+    if seed_b1 > 0 and not (person_now and seed_is_dark):
         positions[0] = [seed_b1, seed_b2]
         for j in range(1, min(5, swarm_size)):
             positions[j] = [max(0, min(100, seed_b1 + random.randint(-10, 10))),
@@ -392,6 +396,9 @@ def run_pso_optimization(verbose=False):
     g_idx = pb_fit.index(max(pb_fit))
     g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
     fitness_history = []
+    stagnation_counter = 0
+    stagnation_limit = max(8, iterations // 6)  # ~8 iterations before re-diversify
+    prev_g_fit = -1.0
 
     for it in range(iterations):
         cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
@@ -409,6 +416,24 @@ def run_pso_optimization(verbose=False):
             if fit > g_fit:
                 g_fit, g_pos = fit, positions[i][:]
         fitness_history.append(g_fit)
+        # Stagnation detection: re-randomize worst particles when stuck at local minimum
+        if g_fit - prev_g_fit < 0.1:
+            stagnation_counter += 1
+        else:
+            stagnation_counter = 0
+        prev_g_fit = g_fit
+        if stagnation_counter >= stagnation_limit:
+            re_count = max(2, swarm_size // 5)
+            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si])[:re_count]
+            for si in worst_idx:
+                positions[si] = [random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)]
+                velocities[si] = [random.uniform(-10, 10) for _ in range(DIM)]
+                new_fit = calculate_lamp_fitness_2d(positions[si][0], positions[si][1])
+                pb_pos[si] = positions[si][:]
+                pb_fit[si] = new_fit
+                if new_fit > g_fit:
+                    g_fit, g_pos = new_fit, positions[si][:]
+            stagnation_counter = 0
 
     # Return 2D result
     return g_pos, g_fit, fitness_history
@@ -467,21 +492,26 @@ def run_optimization_cycle(algo='both'):
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
+        # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
         if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
             opt_b1, opt_b2 = _safe_lamp_brightness(last_opt_results['pso'].get('brightness1', 0), last_opt_results['pso'].get('brightness2', 0))
             if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
                 mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
                 _record_lamp_apply(opt_b1, opt_b2)
-        socketio.emit('ml_status', {
+        # Emit status — only include solution fields for the algorithm that actually ran
+        status_payload = {
             'status': 'completed', 'algorithm': algo,
             'ga_fitness': last_opt_results['ga']['fitness'],
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
-            'ga_solution': {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']},
-            'pso_solution': {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)},
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', [])
-        })
+        }
+        if algo in ('ga', 'both'):
+            status_payload['ga_solution'] = {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']}
+        if algo in ('pso', 'both'):
+            status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)}
+        socketio.emit('ml_status', status_payload)
         return True
     except Exception as e:
         print(f"[OPT] Error: {e}")
@@ -492,7 +522,9 @@ def run_optimization_cycle(algo='both'):
         optimization_lock.release()
 
 def optimization_auto_loop():
-    """Background thread: separate intervals for AC (GA) and Lamp (PSO)."""
+    """Background thread: GA (AC) and PSO (Lamp) always run in separate cycles.
+    CRITICAL: 'both' is NEVER used — GA and PSO must never coincide so that
+    an AC signal never causes a lamp brightness change at the same time."""
     time.sleep(10)  # wait for Flask + MQTT to start
     print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
     last_ga_time = 0
@@ -502,16 +534,15 @@ def optimization_auto_loop():
             now = time.time()
             run_ga = (now - last_ga_time) >= AUTO_OPT_INTERVAL_AC
             run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
-            if run_ga and run_pso:
-                run_optimization_cycle('both')
-                last_ga_time = now
-                last_pso_time = now
+            # GA and PSO are ALWAYS separate — one per check interval.
+            # If both timers are due simultaneously, GA (AC) runs first;
+            # PSO (Lamp) is deferred to the next check (~30s later).
+            if run_ga:
+                run_optimization_cycle('ga')
+                last_ga_time = time.time()
             elif run_pso:
                 run_optimization_cycle('pso')
-                last_pso_time = now
-            elif run_ga:
-                run_optimization_cycle('ga')
-                last_ga_time = now
+                last_pso_time = time.time()
         except Exception as e:
             print(f"[OPT] Auto cycle error: {e}")
         time.sleep(30)  # check every 30s
