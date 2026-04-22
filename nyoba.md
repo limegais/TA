@@ -1613,7 +1613,7 @@ def get_influx_data(measurement, field, hours=1):
         for table in result:
             for record in table.records:
                 data_points.append({
-                    'time': record.get_time().strftime('%H:%M'),
+                    'time': record.get_time().astimezone().strftime('%H:%M'),
                     'value': round(float(record.get_value()), 2)
                 })
         
@@ -2099,7 +2099,7 @@ def energy_history():
             for table in result:
                 for record in table.records:
                     points.append({
-                        'time': record.get_time().strftime(time_format),
+                        'time': record.get_time().astimezone().strftime(time_format),
                         'value': round(float(record.get_value()), 2)
                     })
             return points
