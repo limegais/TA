@@ -1479,8 +1479,13 @@ def on_message(client, userdata, msg):
                 socketio.emit('ir_learned', {'status': 'error', 'message': 'Invalid IR data received'})
         
     except Exception as e:
-        print(f"[ERROR] MQTT Message Handler Error: {str(e)}")
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {str(e)}', 'level': 'error'})
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[ERROR] MQTT Message Handler Error: {str(e)}\n{tb}")
+        # Only log to dashboard if it's a real unexpected error, not a known transient one
+        err_str = str(e)
+        if err_str not in ("'timeout_minutes'",):
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Error: {err_str}', 'level': 'error'})
 
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
     global mqtt_status
@@ -2190,6 +2195,12 @@ def control_ac():
 def control_lamp():
     try:
         data = request.json
+        if not data or not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
+        # Validate brightness values if present
+        for key in ('brightness1', 'brightness2'):
+            if key in data:
+                data[key] = max(0, min(100, int(data[key])))
         mqtt_client.publish('smartroom/lamp/control', json.dumps(data))
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Lamp Control: {data}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': 'Lamp command sent'})
@@ -2473,45 +2484,50 @@ def config_alerts():
 
 def check_alert_rules():
     """Check sensor data against alert rules and emit alerts"""
-    now = datetime.now()
-    temp = mqtt_data['ac'].get('temperature', 0)
-    humidity = mqtt_data['ac'].get('humidity', 0)
-    person = mqtt_data['camera'].get('person_detected', False)
-    
-    # High temperature alert
-    rule = alert_rules['high_temp']
-    if rule['enabled'] and temp > rule['threshold']:
-        if not rule['triggered']:
-            rule['triggered'] = True
-            alert = {'type': 'high_temp', 'message': f'Temperature {temp:.1f}°C exceeds {rule["threshold"]}°C!', 'level': 'danger', 'time': now.strftime('%H:%M:%S')}
-            active_alerts.append(alert)
-            socketio.emit('alert', alert)
-    else:
-        rule['triggered'] = False
-    
-    # High humidity alert
-    rule = alert_rules['high_humidity']
-    if rule['enabled'] and humidity > rule['threshold']:
-        if not rule['triggered']:
-            rule['triggered'] = True
-            alert = {'type': 'high_humidity', 'message': f'Humidity {humidity:.1f}% exceeds {rule["threshold"]}%!', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
-            active_alerts.append(alert)
-            socketio.emit('alert', alert)
-    else:
-        rule['triggered'] = False
-    
-    # No person timeout -> suggest turning off AC
-    rule = alert_rules['no_person_timeout']
-    if rule['enabled']:
-        if person:
-            rule['last_person_seen'] = now
-        elif rule['last_person_seen'] is not None:
-            elapsed = (now - rule['last_person_seen']).total_seconds() / 60
-            if elapsed > rule['timeout_minutes'] and mqtt_data['ac'].get('ac_state') != 'OFF':
-                alert = {'type': 'no_person', 'message': f'No person detected for {int(elapsed)} min. Consider turning off AC.', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
+    try:
+        now = datetime.now()
+        temp = mqtt_data['ac'].get('temperature', 0)
+        humidity = mqtt_data['ac'].get('humidity', 0)
+        person = mqtt_data['camera'].get('person_detected', False)
+        
+        # High temperature alert
+        rule = alert_rules.get('high_temp', {})
+        if rule.get('enabled') and temp > rule.get('threshold', 35):
+            if not rule.get('triggered'):
+                rule['triggered'] = True
+                alert = {'type': 'high_temp', 'message': f'Temperature {temp:.1f}°C exceeds {rule.get("threshold", 35)}°C!', 'level': 'danger', 'time': now.strftime('%H:%M:%S')}
                 active_alerts.append(alert)
                 socketio.emit('alert', alert)
-                rule['last_person_seen'] = now  # Reset to avoid spamming
+        else:
+            rule['triggered'] = False
+        
+        # High humidity alert
+        rule = alert_rules.get('high_humidity', {})
+        if rule.get('enabled') and humidity > rule.get('threshold', 80):
+            if not rule.get('triggered'):
+                rule['triggered'] = True
+                alert = {'type': 'high_humidity', 'message': f'Humidity {humidity:.1f}% exceeds {rule.get("threshold", 80)}%!', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
+                active_alerts.append(alert)
+                socketio.emit('alert', alert)
+        else:
+            rule['triggered'] = False
+        
+        # No person timeout -> suggest turning off AC
+        rule = alert_rules.get('no_person_timeout', {})
+        if rule.get('enabled'):
+            if person:
+                rule['last_person_seen'] = now
+            elif rule.get('last_person_seen') is not None:
+                elapsed = (now - rule['last_person_seen']).total_seconds() / 60
+                ac_timeout = rule.get('ac_timeout_minutes', rule.get('timeout_minutes', 5))
+                if elapsed > ac_timeout and mqtt_data['ac'].get('ac_state') != 'OFF':
+                    alert = {'type': 'no_person', 'message': f'No person detected for {int(elapsed)} min. Consider turning off AC.', 'level': 'warning', 'time': now.strftime('%H:%M:%S')}
+                    active_alerts.append(alert)
+                    socketio.emit('alert', alert)
+                    rule['last_person_seen'] = now  # Reset to avoid spamming
+    except Exception as e:
+        import traceback
+        print(f'[WARN] check_alert_rules error: {e}\n{traceback.format_exc()}')
 
 # ==================== LOGIN TEMPLATE ====================
 LOGIN_TEMPLATE = '''
@@ -5975,19 +5991,19 @@ HTML_TEMPLATE = '''
             const b1 = parseInt(document.getElementById('brightness-slider-1').value);
             const b2 = parseInt(document.getElementById('brightness-slider-2').value);
             
-            // Auto-switch to MANUAL mode so PI controller doesn't override
+            // Switch to MANUAL mode FIRST, then send brightness only after mode confirmed
             fetch('/api/lamp/mode', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: 'MANUAL' })
-            }).then(() => {
+            })
+            .then(() => {
                 applyLampModeUI('MANUAL');
-            }).catch(() => {});
-            
-            fetch('/api/lamp/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brightness1: b1, brightness2: b2, source: 'dashboard' })
+                return fetch('/api/lamp/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ brightness1: b1, brightness2: b2, source: 'dashboard' })
+                });
             })
             .then(r => r.json())
             .then(result => showToast('Lamp → MANUAL | L1=' + b1 + '% L2=' + b2 + '%'))
