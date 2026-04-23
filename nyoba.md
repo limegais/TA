@@ -49,20 +49,36 @@ energy_recording = {
     'after': {'active': False, 'start': None, 'end': None}
 }
 
+# Lamp Energy Phase (separate recording from AC)
+lamp_phase = 'idle'
+lamp_recording = {
+    'before': {'active': False, 'start': None, 'end': None},
+    'after': {'active': False, 'start': None, 'end': None}
+}
+
+# Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)
+LAMP_RATED_WATT = 30.0   # Total watt kedua lampu at 100% brightness (2 × 15W LED)
+LAMP_VOLTAGE = 220.0     # Tegangan nominal Indonesia
+_lamp_energy_kwh = 0.0   # Akumulator kWh estimasi lampu (reset setiap server restart)
+_lamp_energy_last_ts = 0.0
+
 # Persist energy_recording to disk so it survives server restart
 ENERGY_RECORDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'energy_recording.json')
 
 def save_energy_recording():
-    """Save energy_recording state to JSON file"""
+    """Save energy_recording and lamp_recording state to JSON file"""
     try:
         with open(ENERGY_RECORDING_FILE, 'w') as f:
-            json.dump({'phase': energy_phase, 'recording': energy_recording}, f)
+            json.dump({
+                'phase': energy_phase, 'recording': energy_recording,
+                'lamp_phase': lamp_phase, 'lamp_recording': lamp_recording
+            }, f)
     except Exception as e:
         print(f"[WARN] Save energy recording failed: {e}")
 
 def load_energy_recording():
-    """Load energy_recording state from JSON file"""
-    global energy_phase, energy_recording
+    """Load energy_recording and lamp_recording state from JSON file"""
+    global energy_phase, energy_recording, lamp_phase, lamp_recording
     try:
         if os.path.exists(ENERGY_RECORDING_FILE):
             with open(ENERGY_RECORDING_FILE, 'r') as f:
@@ -72,7 +88,12 @@ def load_energy_recording():
             for phase in ['before', 'after']:
                 if phase in rec:
                     energy_recording[phase] = rec[phase]
-            print(f"[OK] Loaded energy recording state: phase={energy_phase}")
+            lamp_phase = data.get('lamp_phase', 'idle')
+            lrec = data.get('lamp_recording', {})
+            for phase in ['before', 'after']:
+                if phase in lrec:
+                    lamp_recording[phase] = lrec[phase]
+            print(f"[OK] Loaded energy recording state: ac_phase={energy_phase}, lamp_phase={lamp_phase}")
     except Exception as e:
         print(f"[WARN] Load energy recording failed: {e}")
 
@@ -672,6 +693,7 @@ def save_sensor_data(temperature, humidity, heat_index):
         print(f'[ERROR] save_sensor_data: {e}')
 
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
+    global _lamp_energy_kwh, _lamp_energy_last_ts
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2) / 2.0
@@ -680,6 +702,20 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, moti
             'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
             'motion': bool(motion)
         }, tags={'device': 'esp32_lamp', 'location': 'room'})
+        # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
+        now_ts = time.time()
+        lamp_power = round((bright_avg / 100.0) * LAMP_RATED_WATT, 2)
+        lamp_current = round(lamp_power / LAMP_VOLTAGE, 3) if lamp_power > 0 else 0.0
+        if _lamp_energy_last_ts > 0:
+            dt_h = (now_ts - _lamp_energy_last_ts) / 3600.0
+            _lamp_energy_kwh += lamp_power * dt_h / 1000.0
+        _lamp_energy_last_ts = now_ts
+        write_to_influxdb('energy_monitor', {
+            'power': lamp_power,
+            'current': lamp_current,
+            'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
+            'energy_kwh': round(_lamp_energy_kwh, 4)
+        }, tags={'device': 'esp32_lamp', 'phase': lamp_phase})
     except Exception as e:
         print(f'[ERROR] save_lamp_data: {e}')
 
@@ -2056,11 +2092,15 @@ def energy_compare():
 
 @app.route('/api/energy/history')
 def energy_history():
-    """Get PZEM energy history from InfluxDB — supports 1h to 30 days"""
-    period = request.args.get('period', '24h')  # 1h, 6h, 24h, 7d, 30d
-    field = request.args.get('field')  # voltage, current, power, energy_kwh, frequency, power_factor
-    
-    # Map period to InfluxDB range and aggregation window
+    """Get energy history from InfluxDB — supports 1h to 30 days.
+    device=ac  → PZEM-016 data (tag device='pzem016')
+    device=lamp → ESP32 Lamp estimated data (tag device='esp32_lamp')
+    device omitted → AC data (backward compat)
+    """
+    period = request.args.get('period', '24h')
+    field = request.args.get('field')
+    device = request.args.get('device', 'ac')  # 'ac' or 'lamp'
+
     period_map = {
         '1h':  {'range': '-1h',  'window': '1m'},
         '6h':  {'range': '-6h',  'window': '5m'},
@@ -2068,29 +2108,31 @@ def energy_history():
         '7d':  {'range': '-7d',  'window': '1h'},
         '30d': {'range': '-30d', 'window': '6h'}
     }
-    
+
     if period not in period_map:
         return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
-    
+
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
-    
+
+    # Map device to InfluxDB tag value
+    device_tag = 'pzem016' if device == 'ac' else 'esp32_lamp'
     p = period_map[period]
-    
+
     try:
         client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         query_api = client.query_api()
-        
-        # Use different time format based on period
+
         time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
-        
+
         def query_field_points(field_name):
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field_name}")
+              |> filter(fn: (r) => r["device"] == "{device_tag}")
               |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
               |> yield(name: "mean")
             '''
@@ -2104,68 +2146,44 @@ def energy_history():
                     })
             return points
 
-        # Support both modes:
-        # 1) /api/energy/history?field=power&period=1h -> {data:[...]}
-        # 2) /api/energy/history?period=24h -> {power:[...], voltage:[...], energy_kwh:[...]}
         if field:
             data_points = query_field_points(field)
-            if not data_points:
+            # Fallback to runtime buffer for AC device
+            if not data_points and device == 'ac':
                 now = datetime.now()
-                lookback = {
-                    '1h': timedelta(hours=1),
-                    '6h': timedelta(hours=6),
-                    '24h': timedelta(hours=24),
-                    '7d': timedelta(days=7),
-                    '30d': timedelta(days=30),
-                }[period]
+                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
                 cutoff = now - lookback
                 runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
                 if runtime:
                     step = max(1, len(runtime) // 120)
-                    data_points = [
-                        {'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)}
-                        for r in runtime[::step]
-                    ]
-
+                    data_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)} for r in runtime[::step]]
             client.close()
-            return jsonify({'period': period, 'field': field, 'data': data_points})
+            return jsonify({'period': period, 'field': field, 'device': device, 'data': data_points})
 
         power_points = query_field_points('power')
         voltage_points = query_field_points('voltage')
         kwh_points = query_field_points('energy_kwh')
 
-        if not power_points and not voltage_points and not kwh_points:
+        if not power_points and not voltage_points and not kwh_points and device == 'ac':
             now = datetime.now()
-            lookback = {
-                '1h': timedelta(hours=1),
-                '6h': timedelta(hours=6),
-                '24h': timedelta(hours=24),
-                '7d': timedelta(days=7),
-                '30d': timedelta(days=30),
-            }[period]
+            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
             cutoff = now - lookback
             runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
             if runtime:
                 step = max(1, len(runtime) // 120)
                 sampled = runtime[::step]
-                power_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sampled]
+                power_points   = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sampled]
                 voltage_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sampled]
-                kwh_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
+                kwh_points     = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
 
         client.close()
-        return jsonify({
-            'period': period,
-            'power': power_points,
-            'voltage': voltage_points,
-            'energy_kwh': kwh_points
-        })
-        
+        return jsonify({'period': period, 'device': device, 'power': power_points, 'voltage': voltage_points, 'energy_kwh': kwh_points})
+
     except Exception as e:
         print(f"[ERROR] Energy history query error: {e}")
-        # Keep response shape compatible with frontend callers.
         if field:
-            return jsonify({'error': str(e), 'period': period, 'field': field, 'data': []}), 500
-        return jsonify({'error': str(e), 'period': period, 'power': [], 'voltage': [], 'energy_kwh': []}), 500
+            return jsonify({'error': str(e), 'period': period, 'field': field, 'device': device, 'data': []}), 500
+        return jsonify({'error': str(e), 'period': period, 'device': device, 'power': [], 'voltage': [], 'energy_kwh': []}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
@@ -2204,6 +2222,115 @@ def ml_run():
         return jsonify({'status': 'success', 'message': f'{algo} optimization triggered'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/lamp/energy/record', methods=['GET', 'POST'])
+def lamp_energy_record_api():
+    """Start/stop recording for lamp before/after comparison"""
+    global lamp_phase, lamp_recording
+    if request.method == 'POST':
+        phase = request.json.get('phase', '').lower()
+        action = request.json.get('action', '').lower()
+        if phase not in ('before', 'after'):
+            return jsonify({'error': 'Phase must be before or after'}), 400
+        if action not in ('start', 'stop'):
+            return jsonify({'error': 'Action must be start or stop'}), 400
+        if action == 'start':
+            other = 'after' if phase == 'before' else 'before'
+            if lamp_recording[other]['active']:
+                lamp_recording[other]['active'] = False
+                lamp_recording[other]['end'] = datetime.utcnow().isoformat()
+            lamp_recording[phase]['active'] = True
+            lamp_recording[phase]['start'] = datetime.utcnow().isoformat()
+            lamp_recording[phase]['end'] = None
+            lamp_phase = phase
+        else:
+            lamp_recording[phase]['active'] = False
+            lamp_recording[phase]['end'] = datetime.utcnow().isoformat()
+            lamp_phase = 'idle'
+        save_energy_recording()
+        socketio.emit('lamp_recording', {'recording': lamp_recording, 'phase': lamp_phase})
+        return jsonify({'recording': lamp_recording, 'phase': lamp_phase})
+    return jsonify({'recording': lamp_recording, 'phase': lamp_phase})
+
+@app.route('/api/lamp/energy/compare')
+def lamp_energy_compare():
+    """Compare lamp estimated energy between before and after adaptive lamp periods"""
+    field = request.args.get('field', 'power')
+    range_param = request.args.get('range', 'all')
+
+    allowed_fields = ['power', 'current', 'energy_kwh']
+    if field not in allowed_fields:
+        return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
+
+    try:
+        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        query_api = client.query_api()
+
+        results = {}
+        for phase in ['before', 'after']:
+            rec = lamp_recording[phase]
+            if not rec['start']:
+                results[phase] = []
+                continue
+            start_dt = datetime.fromisoformat(rec['start'])
+            if rec['end']:
+                end_dt = datetime.fromisoformat(rec['end'])
+            elif rec['active']:
+                end_dt = datetime.utcnow()
+            else:
+                results[phase] = []
+                continue
+
+            if range_param == '7d':
+                clipped = end_dt - timedelta(days=7)
+                if clipped > start_dt: start_dt = clipped
+            elif range_param == '30d':
+                clipped = end_dt - timedelta(days=30)
+                if clipped > start_dt: start_dt = clipped
+
+            dur_h = (end_dt - start_dt).total_seconds() / 3600
+            window = '30s' if dur_h <= 1 else ('10m' if dur_h <= 24 else ('1h' if dur_h <= 168 else '6h'))
+
+            query = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {start_dt.isoformat()}Z, stop: {end_dt.isoformat()}Z)
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["_field"] == "{field}")
+              |> filter(fn: (r) => r["device"] == "esp32_lamp")
+              |> filter(fn: (r) => r["phase"] == "{phase}")
+              |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
+              |> yield(name: "mean")
+            '''
+            result = query_api.query(query=query)
+            data_points = []
+            for table in result:
+                for record in table.records:
+                    rec_time = record.get_time().replace(tzinfo=None)
+                    offset_h = (rec_time - start_dt).total_seconds() / 3600
+                    if dur_h <= 1:       label = f"{int(offset_h * 60)}m"
+                    elif dur_h <= 24:    label = f"{int(offset_h)}:{int((offset_h % 1) * 60):02d}"
+                    elif dur_h <= 168:   label = f"Day {int(offset_h/24)+1} {int(offset_h%24):02d}:00"
+                    else:                label = f"Day {int(offset_h/24)+1}"
+                    data_points.append({'offset': round(offset_h, 2), 'label': label, 'value': round(float(record.get_value()), 2)})
+            results[phase] = data_points
+
+        before_vals = [d['value'] for d in results.get('before', [])]
+        after_vals  = [d['value'] for d in results.get('after', [])]
+        avg_before  = round(sum(before_vals) / len(before_vals), 2) if before_vals else 0
+        avg_after   = round(sum(after_vals) / len(after_vals), 2)   if after_vals  else 0
+        savings_pct = round((1 - avg_after / avg_before) * 100, 1)  if avg_before > 0 else 0
+
+        client.close()
+        return jsonify({
+            'field': field,
+            'before': results.get('before', []),
+            'after':  results.get('after', []),
+            'recording': lamp_recording,
+            'summary': {'avg_before': avg_before, 'avg_after': avg_after, 'savings_percent': savings_pct}
+        })
+    except Exception as e:
+        print(f"[ERROR] Lamp energy compare error: {e}")
+        return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
 @app.route('/api/ac/control', methods=['POST'])
 def control_ac():
@@ -3931,10 +4058,10 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- Historical Power Chart -->
+            <!-- Historical Power Chart (AC + Lamp dual-line) -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
-                    <div class="chart-title">Power Consumption (W)</div>
+                    <div class="chart-title">Power Consumption — AC <span style="color:#ef4444;">■</span> &amp; Lamp <span style="color:#10b981;">■</span> (W)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
@@ -3944,18 +4071,22 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyPowerChart" height="80"></canvas>
-                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
-                    <span>Latest: <strong id="energy-power-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span>Min: <strong id="energy-power-min" style="color:var(--text-primary);">--</strong></span>
-                    <span>Max: <strong id="energy-power-max" style="color:var(--text-primary);">--</strong></span>
-                    <span>Avg: <strong id="energy-power-avg" style="color:var(--text-primary);">--</strong></span>
+                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
+                    <span style="color:#ef4444; font-weight:600;">AC</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-power-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:#10b981; font-weight:600; margin-left:10px;">Lamp</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text-primary);">--</strong></span>
                 </div>
             </div>
 
-            <!-- Historical Voltage Chart -->
+            <!-- Historical Voltage Chart (AC only — lamp voltage is grid ~220V) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title">Voltage (V)</div>
+                    <div class="chart-title">Voltage — AC (V)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
@@ -3973,10 +4104,10 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- Historical Current Chart -->
+            <!-- Historical Current Chart (AC + Lamp dual-line) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title">Current (A)</div>
+                    <div class="chart-title">Current — AC <span style="color:#f59e0b;">■</span> &amp; Lamp <span style="color:#06b6d4;">■</span> (A)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
@@ -3986,18 +4117,20 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyCurrentChart" height="80"></canvas>
-                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
-                    <span>Latest: <strong id="energy-current-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span>Min: <strong id="energy-current-min" style="color:var(--text-primary);">--</strong></span>
-                    <span>Max: <strong id="energy-current-max" style="color:var(--text-primary);">--</strong></span>
-                    <span>Avg: <strong id="energy-current-avg" style="color:var(--text-primary);">--</strong></span>
+                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
+                    <span style="color:#f59e0b; font-weight:600;">AC</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:#06b6d4; font-weight:600; margin-left:10px;">Lamp</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text-primary);">--</strong></span>
                 </div>
             </div>
 
-            <!-- Historical Energy kWh Chart -->
+            <!-- Historical Energy kWh Chart (AC + Lamp dual-line) -->
             <div class="chart-container" style="margin-top: 20px;">
                 <div class="chart-header">
-                    <div class="chart-title">Cumulative Energy (kWh)</div>
+                    <div class="chart-title">Cumulative Energy — AC <span style="color:#10b981;">■</span> &amp; Lamp <span style="color:#a855f7;">■</span> (kWh)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                         <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
@@ -4005,11 +4138,13 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="energyKwhChart" height="80"></canvas>
-                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
-                    <span>Latest: <strong id="energy-kwh-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span>Min: <strong id="energy-kwh-min" style="color:var(--text-primary);">--</strong></span>
-                    <span>Max: <strong id="energy-kwh-max" style="color:var(--text-primary);">--</strong></span>
-                    <span>Avg: <strong id="energy-kwh-avg" style="color:var(--text-primary);">--</strong></span>
+                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
+                    <span style="color:#10b981; font-weight:600;">AC</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-kwh-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-kwh-avg" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:#a855f7; font-weight:600; margin-left:10px;">Lamp</span>
+                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-kwh-latest" style="color:var(--text-primary);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-kwh-avg" style="color:var(--text-primary);">--</strong></span>
                 </div>
             </div>
 
@@ -4127,6 +4262,106 @@ HTML_TEMPLATE = '''
                             </div>
                         </div>
                         <canvas id="energyCompareKwhAfterChart" height="120"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== BEFORE vs AFTER Adaptive LAMP Comparison ===== -->
+            <div style="margin-top: 24px; padding: 20px; border-radius: 18px; border: 1px solid rgba(16,185,129,0.25); background: linear-gradient(160deg, rgba(16,185,129,0.07), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
+                        Before vs After Adaptive Lamp
+                    </h2>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare lamp power usage before and after installing the adaptive dimming system</p>
+                </div>
+
+                <!-- Lamp Recording Controls -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
+                    <div style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">BEFORE Adaptive Lamp</div>
+                        <div id="lamp-status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">&#9675; Not started</div>
+                        <button id="lamp-btn-record-before" onclick="toggleLampRecording('before')"
+                            style="width:100%;padding:12px;border-radius:10px;border:none;background:linear-gradient(135deg,#f59e0b,#d97706);color:white;font-size:14px;font-weight:700;cursor:pointer;transition:all 0.3s;">
+                            START RECORDING
+                        </button>
+                    </div>
+                    <div style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
+                        <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">AFTER Adaptive Lamp</div>
+                        <div id="lamp-status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">&#9675; Not started</div>
+                        <button id="lamp-btn-record-after" onclick="toggleLampRecording('after')"
+                            style="width:100%;padding:12px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:white;font-size:14px;font-weight:700;cursor:pointer;transition:all 0.3s;">
+                            START RECORDING
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Lamp Savings Summary -->
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+                    <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">Range:</span>
+                    <button class="chart-option-btn" id="lamp-compare-range-7d" onclick="setLampCompareRange('7d',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">7 Days</button>
+                    <button class="chart-option-btn" id="lamp-compare-range-30d" onclick="setLampCompareRange('30d',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">30 Days</button>
+                    <button class="chart-option-btn active" id="lamp-compare-range-all" onclick="setLampCompareRange('all',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">All</button>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,minmax(130px,1fr));gap:12px;margin-bottom:20px;">
+                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.26);">
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Avg Before</div>
+                        <div style="font-size:22px;font-weight:700;color:#f59e0b;"><span id="lamp-compare-avg-before">--</span> W</div>
+                    </div>
+                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.26);">
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Avg After</div>
+                        <div style="font-size:22px;font-weight:700;color:#10b981;"><span id="lamp-compare-avg-after">--</span> W</div>
+                    </div>
+                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(99,102,241,0.10);border:1px solid rgba(99,102,241,0.26);">
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Power Savings</div>
+                        <div style="font-size:22px;font-weight:700;color:#6366f1;"><span id="lamp-compare-savings">--</span>%</div>
+                    </div>
+                </div>
+
+                <!-- Lamp Power Comparison Charts -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                    <div class="chart-container" style="border:none;padding:0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color:#f59e0b;">BEFORE — Lamp Power (W)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadLampEnergyCompare('power')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('lampCompareBefore','Lamp Power Before (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="lampCompareBeforeChart" height="120"></canvas>
+                    </div>
+                    <div class="chart-container" style="border:none;padding:0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color:#10b981;">AFTER — Lamp Power (W)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadLampEnergyCompare('power')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('lampCompareAfter','Lamp Power After (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="lampCompareAfterChart" height="120"></canvas>
+                    </div>
+                </div>
+
+                <!-- Lamp kWh Comparison Charts -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px;">
+                    <div class="chart-container" style="border:none;padding:0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color:#f59e0b;">BEFORE — Lamp Energy (kWh)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadLampEnergyCompare('energy_kwh')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('lampCompareKwhBefore','Lamp Energy Before (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="lampCompareKwhBeforeChart" height="120"></canvas>
+                    </div>
+                    <div class="chart-container" style="border:none;padding:0;">
+                        <div class="chart-header">
+                            <div class="chart-title" style="color:#10b981;">AFTER — Lamp Energy (kWh)</div>
+                            <div style="display:flex;gap:6px;">
+                                <button onclick="loadLampEnergyCompare('energy_kwh')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
+                                <button class="chart-option-btn" onclick="exportChartData('lampCompareKwhAfter','Lamp Energy After (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            </div>
+                        </div>
+                        <canvas id="lampCompareKwhAfterChart" height="120"></canvas>
                     </div>
                 </div>
             </div>
@@ -4912,22 +5147,33 @@ HTML_TEMPLATE = '''
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 type: 'line', options: makeEnergyOpts('W'),
-                data: { labels: [], datasets: [{ label: 'Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+                data: { labels: [], datasets: [
+                    { label: 'AC Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Power (W)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                ]}
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
                 type: 'line', options: makeEnergyOpts('V'),
-                data: { labels: [], datasets: [{ label: 'Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+                data: { labels: [], datasets: [
+                    { label: 'AC Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                ]}
             });
 
             charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
                 type: 'line', options: makeEnergyOpts('A'),
-                data: { labels: [], datasets: [{ label: 'Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+                data: { labels: [], datasets: [
+                    { label: 'AC Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Current (A)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                ]}
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 type: 'line', options: makeEnergyOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
+                data: { labels: [], datasets: [
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                ]}
             });
 
             // Energy Comparison: 4 separate charts (Before/After x Power/kWh) for side-by-side view
@@ -4959,6 +5205,24 @@ HTML_TEMPLATE = '''
             charts.energyCompareKwhAfter = new Chart(document.getElementById('energyCompareKwhAfterChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
                 data: { labels: [], datasets: [{ label: 'After — Energy', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+
+            // Lamp Comparison Charts
+            charts.lampCompareBefore = new Chart(document.getElementById('lampCompareBeforeChart'), {
+                type: 'line', options: compareLineOpts('W'),
+                data: { labels: [], datasets: [{ label: 'Before — Lamp Power', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.lampCompareAfter = new Chart(document.getElementById('lampCompareAfterChart'), {
+                type: 'line', options: compareLineOpts('W'),
+                data: { labels: [], datasets: [{ label: 'After — Lamp Power', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.lampCompareKwhBefore = new Chart(document.getElementById('lampCompareKwhBeforeChart'), {
+                type: 'line', options: compareLineOpts('kWh'),
+                data: { labels: [], datasets: [{ label: 'Before — Lamp Energy', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+            });
+            charts.lampCompareKwhAfter = new Chart(document.getElementById('lampCompareKwhAfterChart'), {
+                type: 'line', options: compareLineOpts('kWh'),
+                data: { labels: [], datasets: [{ label: 'After — Lamp Energy', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
@@ -5191,43 +5455,63 @@ HTML_TEMPLATE = '''
             const chartName = energyChartMap[field];
             if (!chartName) return;
 
-            fetch('/api/energy/history?field=' + field + '&period=' + period)
-                .then(r => {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    return r.json();
-                })
-                .then(result => {
-                    const data = result.data || [];
-                    const chart = charts[chartName];
+            // Fetch AC and Lamp in parallel
+            Promise.all([
+                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=ac').then(r => r.json()),
+                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=lamp').then(r => r.json())
+            ])
+            .then(function(results) {
+                var acResult = results[0];
+                var lampResult = results[1];
+                var acData = acResult.data || [];
+                var lampData = lampResult.data || [];
+                var chart = charts[chartName];
 
-                    if (chart && chart.data && chart.data.datasets && chart.data.datasets[0]) {
-                        chart.data.labels = data.map(d => d.time);
-                        const values = data.map(d => parseFloat(d.value || 0));
-                        chart.data.datasets[0].data = values;
-                        chart.update('none');
-                        updateEnergyStats(field, values.filter(v => Number.isFinite(v)));
-                    } else {
-                        drawEnergyFallback(field, data);
+                if (chart && chart.data && chart.data.datasets) {
+                    chart.data.labels = acData.map(function(d){ return d.time; });
+                    var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
+                    chart.data.datasets[0].data = acValues;
+                    // Only update lamp dataset if chart has 2nd dataset (power, current, kwh; not voltage)
+                    if (chart.data.datasets[1]) {
+                        var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
+                        chart.data.datasets[1].data = lampValues;
+                        updateLampEnergyStats(field, lampValues.filter(function(v){ return Number.isFinite(v); }));
                     }
+                    chart.update('none');
+                    updateEnergyStats(field, acValues.filter(function(v){ return Number.isFinite(v); }));
+                } else {
+                    drawEnergyFallback(field, acData);
+                }
 
-                    // Show "No Data" overlay on canvas if empty
-                    var canvasId = energyCanvasMap[field];
-                    var noDataId = 'nodata-' + canvasId;
-                    var existingOverlay = document.getElementById(noDataId);
-                    if (existingOverlay) existingOverlay.remove();
-                    if (data.length === 0 && canvasId) {
-                        var canvas = document.getElementById(canvasId);
-                        if (canvas && canvas.parentElement) {
-                            var overlay = document.createElement('div');
-                            overlay.id = noDataId;
-                            overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
-                            overlay.textContent = 'No data — waiting for PZEM-016';
-                            canvas.parentElement.style.position = 'relative';
-                            canvas.parentElement.appendChild(overlay);
-                        }
+                // Show "No Data" overlay on canvas if empty
+                var canvasId = energyCanvasMap[field];
+                var noDataId = 'nodata-' + canvasId;
+                var existingOverlay = document.getElementById(noDataId);
+                if (existingOverlay) existingOverlay.remove();
+                if (acData.length === 0 && canvasId) {
+                    var canvas = document.getElementById(canvasId);
+                    if (canvas && canvas.parentElement) {
+                        var overlay = document.createElement('div');
+                        overlay.id = noDataId;
+                        overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
+                        overlay.textContent = 'No data — waiting for PZEM-016';
+                        canvas.parentElement.style.position = 'relative';
+                        canvas.parentElement.appendChild(overlay);
                     }
-                })
-                .catch(e => console.error('Energy history error:', e));
+                }
+            })
+            .catch(function(e){ console.error('Energy history error:', e); });
+        }
+
+        function updateLampEnergyStats(field, values) {
+            if (!values || values.length === 0) return;
+            var avg = values.reduce(function(a,b){ return a+b; }, 0) / values.length;
+            var latest = values[values.length - 1];
+            var unit = {power:'W', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
+            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v.toFixed(field==='energy_kwh'?4:2) + ' ' + unit; };
+            if (field === 'power') { setEl('lamp-power-latest', latest); setEl('lamp-power-avg', avg); }
+            else if (field === 'current') { setEl('lamp-current-latest', latest); setEl('lamp-current-avg', avg); }
+            else if (field === 'energy_kwh') { setEl('lamp-kwh-latest', latest); setEl('lamp-kwh-avg', avg); }
         }
 
         function loadAllEnergyCharts() {
@@ -5237,7 +5521,10 @@ HTML_TEMPLATE = '''
             loadEnergyHistory('energy_kwh', '24h', null);
             loadEnergyCompare('power');
             loadEnergyCompare('energy_kwh');
+            loadLampEnergyCompare('power');
+            loadLampEnergyCompare('energy_kwh');
             loadRecordingState();
+            loadLampRecordingState();
         }
 
         // ==================== BEFORE vs AFTER RECORDING ====================
@@ -5381,6 +5668,132 @@ HTML_TEMPLATE = '''
         // Listen for recording state changes from server
         socket.on('energy_recording', function(data) {
             updateRecordingUI(data.recording);
+        });
+
+        // ==================== LAMP BEFORE/AFTER RECORDING ====================
+        var lampRecording = { before: {active:false, start:null, end:null}, after: {active:false, start:null, end:null} };
+        var compareLampRange = 'all';
+
+        function loadLampRecordingState() {
+            fetch('/api/lamp/energy/record')
+                .then(function(r){ return r.json(); })
+                .then(function(data){ updateLampRecordingUI(data.recording); })
+                .catch(function(e){ console.error('Load lamp recording state error:', e); });
+        }
+
+        function toggleLampRecording(phase) {
+            var rec = lampRecording[phase];
+            var action = rec.active ? 'stop' : 'start';
+            fetch('/api/lamp/energy/record', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({phase: phase, action: action})
+            })
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                updateLampRecordingUI(data.recording);
+                loadLampEnergyCompare('power');
+                loadLampEnergyCompare('energy_kwh');
+                showToast(action === 'start'
+                    ? 'Lamp recording ' + phase.toUpperCase() + ' started'
+                    : 'Lamp recording ' + phase.toUpperCase() + ' stopped', 'success');
+            })
+            .catch(function(e){ console.error('Lamp record error:', e); });
+        }
+
+        function updateLampRecordingUI(rec) {
+            if (!rec) return;
+            lampRecording = rec;
+            ['before', 'after'].forEach(function(phase) {
+                var r = rec[phase];
+                var statusEl = document.getElementById('lamp-status-' + phase);
+                var btnEl = document.getElementById('lamp-btn-record-' + phase);
+                if (!statusEl || !btnEl) return;
+
+                var baseColor = phase === 'before' ? '#f59e0b' : '#10b981';
+                var darkColor = phase === 'before' ? '#d97706' : '#059669';
+
+                if (r.active) {
+                    var start = new Date(r.start + 'Z');
+                    var elapsed = Math.round((Date.now() - start.getTime()) / 3600000);
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color:#ef4444;font-size:8px;animation:blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + '<br>Duration: ' + Math.floor(elapsed/24) + 'd ' + (elapsed%24) + 'h';
+                    btnEl.textContent = 'STOP RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)';
+                } else if (r.start && r.end) {
+                    var start = new Date(r.start + 'Z');
+                    var end = new Date(r.end + 'Z');
+                    var dur = Math.round((end - start) / 3600000);
+                    statusEl.innerHTML = '<strong>Completed</strong><br>' + start.toLocaleDateString() + ' &rarr; ' + end.toLocaleDateString() + '<br>Duration: ' + Math.floor(dur/24) + 'd ' + (dur%24) + 'h';
+                    btnEl.textContent = 'RESET & RE-RECORD';
+                    btnEl.style.background = 'linear-gradient(135deg,' + baseColor + ',' + darkColor + ')';
+                } else {
+                    statusEl.innerHTML = '&#9675; Not started';
+                    btnEl.textContent = 'START RECORDING';
+                    btnEl.style.background = 'linear-gradient(135deg,' + baseColor + ',' + darkColor + ')';
+                }
+            });
+        }
+
+        function loadLampEnergyCompare(field, range) {
+            if (range) compareLampRange = range;
+            var beforeChart, afterChart;
+            if (field === 'energy_kwh') {
+                beforeChart = charts.lampCompareKwhBefore;
+                afterChart = charts.lampCompareKwhAfter;
+            } else {
+                beforeChart = charts.lampCompareBefore;
+                afterChart = charts.lampCompareAfter;
+            }
+            if (!beforeChart || !afterChart) return;
+
+            fetch('/api/lamp/energy/compare?field=' + field + '&range=' + compareLampRange)
+                .then(function(r){ return r.json(); })
+                .then(function(result){
+                    var beforeData = result.before || [];
+                    var afterData = result.after || [];
+                    var summary = result.summary || {};
+
+                    beforeChart.data.labels = beforeData.map(function(d){ return d.label; });
+                    beforeChart.data.datasets[0].data = beforeData.map(function(d){ return d.value; });
+                    beforeChart.update('none');
+
+                    afterChart.data.labels = afterData.map(function(d){ return d.label; });
+                    afterChart.data.datasets[0].data = afterData.map(function(d){ return d.value; });
+                    afterChart.update('none');
+
+                    var allVals = beforeData.map(function(d){return d.value;}).concat(afterData.map(function(d){return d.value;}));
+                    if (allVals.length > 0) {
+                        var maxVal = Math.max.apply(null, allVals) * 1.1;
+                        beforeChart.options.scales.y.max = maxVal;
+                        afterChart.options.scales.y.max = maxVal;
+                        beforeChart.update('none');
+                        afterChart.update('none');
+                    }
+
+                    if (field === 'power') {
+                        var el = document.getElementById('lamp-compare-avg-before'); if (el) el.textContent = summary.avg_before || '--';
+                        el = document.getElementById('lamp-compare-avg-after'); if (el) el.textContent = summary.avg_after || '--';
+                        el = document.getElementById('lamp-compare-savings');
+                        if (el) {
+                            el.textContent = summary.savings_percent || '--';
+                            el.style.color = summary.savings_percent > 0 ? '#10b981' : (summary.savings_percent < 0 ? '#ef4444' : '');
+                        }
+                    }
+                    if (result.recording) updateLampRecordingUI(result.recording);
+                })
+                .catch(function(e){ console.error('Lamp compare error:', e); });
+        }
+
+        function setLampCompareRange(range, btn) {
+            compareLampRange = range;
+            document.querySelectorAll('#lamp-compare-range-7d,#lamp-compare-range-30d,#lamp-compare-range-all').forEach(function(b){ b.classList.remove('active'); });
+            if (btn) btn.classList.add('active');
+            loadLampEnergyCompare('power');
+            loadLampEnergyCompare('energy_kwh');
+        }
+
+        socket.on('lamp_recording', function(data) {
+            updateLampRecordingUI(data.recording);
         });
 
         // ==================== THEME TOGGLE ====================
