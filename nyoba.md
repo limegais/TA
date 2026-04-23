@@ -654,6 +654,8 @@ mqtt_status = {
 
 # Runtime energy history fallback (used when Influx query returns no points)
 energy_runtime_history = deque(maxlen=5000)
+# Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
+lamp_runtime_history = deque(maxlen=5000)
 
 # ==================== INFLUXDB WRITE FUNCTIONS ====================
 def write_to_influxdb(measurement, fields, tags=None):
@@ -716,6 +718,15 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, moti
             'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
             'energy_kwh': round(_lamp_energy_kwh, 4)
         }, tags={'device': 'esp32_lamp', 'phase': lamp_phase})
+        # Fill runtime buffer for immediate chart display (fallback when InfluxDB has no data yet)
+        lamp_runtime_history.append({
+            'ts': datetime.now(),
+            'phase': lamp_phase,
+            'power': lamp_power,
+            'current': lamp_current,
+            'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
+            'energy_kwh': round(_lamp_energy_kwh, 4)
+        })
     except Exception as e:
         print(f'[ERROR] save_lamp_data: {e}')
 
@@ -2148,12 +2159,13 @@ def energy_history():
 
         if field:
             data_points = query_field_points(field)
-            # Fallback to runtime buffer for AC device
-            if not data_points and device == 'ac':
+            # Fallback to runtime buffer when InfluxDB has no data yet
+            if not data_points:
                 now = datetime.now()
                 lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
                 cutoff = now - lookback
-                runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+                buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
+                runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
                 if runtime:
                     step = max(1, len(runtime) // 120)
                     data_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)} for r in runtime[::step]]
@@ -2164,11 +2176,12 @@ def energy_history():
         voltage_points = query_field_points('voltage')
         kwh_points = query_field_points('energy_kwh')
 
-        if not power_points and not voltage_points and not kwh_points and device == 'ac':
+        if not power_points and not voltage_points and not kwh_points:
             now = datetime.now()
             lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
             cutoff = now - lookback
-            runtime = [r for r in energy_runtime_history if r.get('ts') and r['ts'] >= cutoff]
+            buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
+            runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
             if runtime:
                 step = max(1, len(runtime) // 120)
                 sampled = runtime[::step]
