@@ -372,10 +372,6 @@ def calculate_lamp_fitness_2d(brightness1, brightness2):
 
     return max(0.0, round(fitness, 2))
 
-# Keep backward compat wrapper for single-brightness calls
-def calculate_lamp_fitness(brightness):
-    return calculate_lamp_fitness_2d(brightness, brightness)
-
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
         if v is not None and k in opt_sensor_data:
@@ -885,14 +881,14 @@ def save_sensor_data(temperature, humidity, heat_index):
     except Exception as e:
         print(f'[ERROR] save_sensor_data: {e}')
 
-def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
+def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
     global _lamp_energy_kwh, _lamp_energy_last_ts
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2) / 2.0
         write_to_influxdb('lamp_sensor', {
             'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
-            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
+            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
             'motion': bool(motion)
         }, tags={'device': 'esp32_lamp', 'location': 'room'})
         # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
@@ -952,8 +948,6 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
 def load_yolo_model():
     global yolo_model
     try:
-        import os
-        
         yolo_dir = '/home/iotlab/smartroom/yolo'
         model_path = f'{yolo_dir}/yolov8n.pt'
         
@@ -1591,7 +1585,7 @@ def on_message(client, userdata, msg):
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(l1, l2, l3, b1, b2, 0, mqtt_data['lamp']['motion'])
+            save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3)
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
@@ -1608,33 +1602,7 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            write_to_influxdb('energy_monitor', {
-                'voltage': float(mqtt_data['energy']['voltage']),
-                'current': float(mqtt_data['energy']['current']),
-                'power': float(mqtt_data['energy']['power']),
-                'energy_kwh': float(mqtt_data['energy']['energy']),
-                'frequency': float(mqtt_data['energy']['frequency']),
-                'power_factor': float(mqtt_data['energy']['pf'])
-            }, tags={'device': 'pzem016', 'phase': energy_phase})
-
-            # Keep runtime ring-buffer so charts still work even if Influx has no data yet.
-            try:
-                energy_runtime_history.append({
-                    'ts': datetime.now(),
-                    'phase': energy_phase,
-                    'voltage': float(mqtt_data['energy']['voltage']),
-                    'current': float(mqtt_data['energy']['current']),
-                    'power': float(mqtt_data['energy']['power']),
-                    'energy_kwh': float(mqtt_data['energy']['energy']),
-                    'frequency': float(mqtt_data['energy']['frequency']),
-                    'power_factor': float(mqtt_data['energy']['pf'])
-                })
-            except Exception:
-                pass
-
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
-            # Track device status
-            device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
 
         elif 'camera/detection' in topic:
             person_from_mqtt = payload.get('person_detected', False)
@@ -1766,7 +1734,6 @@ def on_message(client, userdata, msg):
                 save_ir_command(device, button_name, len(ir_code))
                 
                 try:
-                    import os
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -2298,9 +2265,9 @@ def energy_compare():
 @app.route('/api/energy/history')
 def energy_history():
     """Get energy history from InfluxDB — supports 1h to 30 days.
-    device=ac  → PZEM-016 data (tag device='pzem016')
-    device=lamp → ESP32 Lamp estimated data (tag device='esp32_lamp')
-    device omitted → AC data (backward compat)
+    device=ac  -> MySQL AC data (tag device='mysql_ac')
+    device=lamp -> MySQL Lamp data (tag device='mysql_lamp')
+    device omitted -> AC data (backward compat)
     """
     period = request.args.get('period', '24h')
     field = request.args.get('field')
@@ -2322,7 +2289,7 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    device_tag = 'pzem016' if device == 'ac' else 'esp32_lamp'
+    device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
     p = period_map[period]
 
     try:
@@ -2598,15 +2565,15 @@ def energy_daily_summary():
             elapsed_h = now_local.hour + now_local.minute / 60.0
             return round(elapsed_h * (on_count / total_today), 2)
 
-        # AC metrics (pzem016)
-        ac_kwh     = _query_today('pzem016', 'energy_kwh', 'max')  # cumulative, so max is total
-        ac_power_avg = _query_today('pzem016', 'power', 'mean')
-        ac_power_peak = _query_today_max('pzem016', 'power')
+        # AC metrics (mysql_ac)
+        ac_kwh     = _query_today('mysql_ac', 'energy_kwh', 'max')  # cumulative, so max is total
+        ac_power_avg = _query_today('mysql_ac', 'power', 'mean')
+        ac_power_peak = _query_today_max('mysql_ac', 'power')
 
-        # Lamp metrics (esp32_lamp)
-        lamp_kwh     = _query_today('esp32_lamp', 'energy_kwh', 'max')
-        lamp_power_avg = _query_today('esp32_lamp', 'power', 'mean')
-        lamp_power_peak = _query_today_max('esp32_lamp', 'power')
+        # Lamp metrics (mysql_lamp)
+        lamp_kwh     = _query_today('mysql_lamp', 'energy_kwh', 'max')
+        lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
+        lamp_power_peak = _query_today_max('mysql_lamp', 'power')
 
         # Runtime from ring buffers (fallback when InfluxDB has no data yet today)
         ac_runtime_h   = _runtime_hours_from_buffer(energy_runtime_history, threshold_power=50.0)
@@ -2907,7 +2874,6 @@ def delete_ir_code():
             
             # Update file
             try:
-                import os
                 ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                 with open(ir_file, 'w') as f:
                     json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -2951,7 +2917,6 @@ def manual_save_ir():
         
         # Save to file
         try:
-            import os
             ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
             with open(ir_file, 'w') as f:
                 json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -3943,13 +3908,13 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- MySQL Energy Monitor: AC + Lamp -->
+                <!-- Energy Usage: AC + Lamp -->
                 <div class="stat-card" id="mysql-energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
                             <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 12px;">DB</div>
                             <div>
-                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">MySQL Energy Monitor</div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Usage</div>
                                 <div style="font-size: 11px; color: var(--text-secondary);">AC (id_kwh=1) + Lampu (id_kwh=2) — Jagoan Hosting</div>
                             </div>
                         </div>
@@ -4263,10 +4228,10 @@ HTML_TEMPLATE = '''
                             PSO
                         </div>
                     </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="pso-fitness">0.00</span></div>
+                    <div class="stat-value" style="font-size: 24px;"><span>0.00</span></div>
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
+                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
             </div>
@@ -4429,33 +4394,49 @@ HTML_TEMPLATE = '''
         <div id="energy" class="page">
             <div class="header">
                 <h1>Energy Usage</h1>
-                <p>Real-time & historical energy monitoring from PZEM-016</p>
+                <p>Real-time &amp; historical energy monitoring &mdash; MySQL Database (iotlabun_sbms)</p>
             </div>
 
-            <!-- Real-time summary cards -->
+            <!-- Real-time summary cards (data from MySQL via mysql_energy_update socket) -->
             <div class="power-grid">
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Day</div>
-                    <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
+                <div class="power-card" style="border-top: 3px solid #ef4444;">
+                    <div style="color: var(--text-secondary); margin-bottom: 6px; font-size:12px;"><i class="fas fa-snowflake" style="color:#ef4444;margin-right:4px;"></i>AC &mdash; Live</div>
+                    <div class="power-value" style="color:#ef4444;"><span id="ac-power">--</span> <span style="font-size:14px;">W</span></div>
+                    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;">
+                        <span style="color:var(--text-secondary);">Tegangan</span><span style="font-weight:600;"><span id="ac-voltage-card">--</span> V</span>
+                        <span style="color:var(--text-secondary);">Arus</span><span style="font-weight:600;"><span id="ac-current-card">--</span> A</span>
+                        <span style="color:var(--text-secondary);">Energi</span><span style="font-weight:600;color:#10b981;"><span id="ac-energy-kwh">--</span> kWh</span>
+                        <span style="color:var(--text-secondary);">PF</span><span style="font-weight:600;"><span id="ac-pf-card">--</span></span>
+                    </div>
                 </div>
 
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Day</div>
-                    <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
+                <div class="power-card" style="border-top: 3px solid #eab308;">
+                    <div style="color: var(--text-secondary); margin-bottom: 6px; font-size:12px;"><i class="fas fa-lightbulb" style="color:#eab308;margin-right:4px;"></i>Lampu &mdash; Live</div>
+                    <div class="power-value" style="color:#eab308;"><span id="lamp-power">--</span> <span style="font-size:14px;">W</span></div>
+                    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;">
+                        <span style="color:var(--text-secondary);">Tegangan</span><span style="font-weight:600;"><span id="lamp-voltage-card">--</span> V</span>
+                        <span style="color:var(--text-secondary);">Arus</span><span style="font-weight:600;"><span id="lamp-current-card">--</span> A</span>
+                        <span style="color:var(--text-secondary);">Energi</span><span style="font-weight:600;color:#10b981;"><span id="lamp-energy-kwh">--</span> kWh</span>
+                        <span style="color:var(--text-secondary);">PF</span><span style="font-weight:600;"><span id="lamp-pf-card">--</span></span>
+                    </div>
                 </div>
 
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
-                    <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W | Current: <span id="total-current">0</span> A</div>
+                <div class="power-card" style="border-top: 3px solid #6366f1;">
+                    <div style="color: var(--text-secondary); margin-bottom: 6px; font-size:12px;"><i class="fas fa-bolt" style="color:#6366f1;margin-right:4px;"></i>Total &mdash; Live</div>
+                    <div class="power-value" style="color:#6366f1;"><span id="total-power">--</span> <span style="font-size:14px;">W</span></div>
+                    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;">
+                        <span style="color:var(--text-secondary);">Arus Total</span><span style="font-weight:600;"><span id="total-current">--</span> A</span>
+                        <span style="color:var(--text-secondary);">Frekuensi</span><span style="font-weight:600;"><span id="total-freq-card">--</span> Hz</span>
+                        <span style="color:var(--text-secondary);">Energi Total</span><span style="font-weight:600;color:#10b981;"><span id="total-energy-kwh">--</span> kWh</span>
+                        <span style="color:var(--text-secondary);">Sumber</span><span style="font-weight:600;color:#6366f1;">MySQL</span>
+                    </div>
                 </div>
 
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Daily Cost</div>
-                    <div class="power-value">Rp<span id="daily-cost">0</span></div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">@ Rp 1,500/kWh</div>
+                <div class="power-card" style="border-top: 3px solid #f59e0b;">
+                    <div style="color: var(--text-secondary); margin-bottom: 6px; font-size:12px;"><i class="fas fa-coins" style="color:#f59e0b;margin-right:4px;"></i>Estimasi Biaya</div>
+                    <div class="power-value" style="color:#f59e0b;">Rp<span id="daily-cost">--</span></div>
+                    <div style="color: var(--text-secondary); font-size: 11px; margin-top: 8px;">@ Rp 1.500/kWh (perhari)</div>
+                    <div style="margin-top:4px;font-size:11px;">Update: <span id="energy-last-update" style="color:var(--text-primary);">--</span></div>
                 </div>
             </div>
 
@@ -5576,7 +5557,7 @@ HTML_TEMPLATE = '''
                         document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
                     }
                     
-                    for (let i = 1; i <= 3; i++) {
+                    for (let i = 1; i <= 2; i++) {
                         const slider = document.getElementById('brightness-slider-' + i);
                         if (slider) {
                             slider.value = settings['lampBrightness' + i] || 0;
@@ -6082,7 +6063,7 @@ HTML_TEMPLATE = '''
                         var overlay = document.createElement('div');
                         overlay.id = noDataId;
                         overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
-                        overlay.textContent = 'No data — waiting for PZEM-016';
+                        overlay.textContent = 'Menunggu data MySQL (polling setiap 5 detik)...';
                         canvas.parentElement.style.position = 'relative';
                         canvas.parentElement.appendChild(overlay);
                     }
@@ -7214,16 +7195,6 @@ HTML_TEMPLATE = '''
                     if (gaTemp) gaTemp.textContent = (data.system.ga_temp || 0) > 0 ? data.system.ga_temp + '°C' : '--';
                     if (gaFan) gaFan.textContent = (data.system.ga_fan || 0) > 0 ? 'Lv ' + data.system.ga_fan : '--';
                     if (gaFitness) gaFitness.textContent = (data.system.ga_fitness || 0) > 0 ? parseFloat(data.system.ga_fitness).toFixed(2) : '--';
-                });
-        }
-
-        // Keep old function name for backward compat (called elsewhere)
-        function toggleACMode() {
-            fetch('/api/data')
-                .then(r => r.json())
-                .then(data => {
-                    const newMode = data.ac.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    setACMode(newMode);
                 });
         }
 
@@ -8427,10 +8398,30 @@ HTML_TEMPLATE = '''
             s('eu-lamp-ts',      lamp.updated_at || '--');
 
             // ── Update power-grid summary cards ──
-            s('ac-power',   f(ac.power));
-            s('lamp-power', f(lamp.power));
-            s('total-power',   (parseFloat(ac.power||0) + parseFloat(lamp.power||0)).toFixed(1));
+            var acPow  = parseFloat(ac.power||0);
+            var lampPow = parseFloat(lamp.power||0);
+            var acKwh  = parseFloat(ac.energy||0);
+            var lampKwh = parseFloat(lamp.energy||0);
+            var totPow = acPow + lampPow;
+            var totKwh = acKwh + lampKwh;
+            s('ac-power',   acPow.toFixed(1));
+            s('lamp-power', lampPow.toFixed(1));
+            s('total-power',   totPow.toFixed(1));
             s('total-current', (parseFloat(ac.current||0) + parseFloat(lamp.current||0)).toFixed(2));
+            s('ac-energy-kwh',   acKwh.toFixed(4));
+            s('lamp-energy-kwh', lampKwh.toFixed(4));
+            s('total-energy-kwh', totKwh.toFixed(4));
+            s('ac-voltage-card',  f(ac.voltage));
+            s('ac-current-card',  f(ac.current, 2));
+            s('ac-pf-card',       f(ac.pf, 2));
+            s('lamp-voltage-card', f(lamp.voltage));
+            s('lamp-current-card', f(lamp.current, 2));
+            s('lamp-pf-card',      f(lamp.pf, 2));
+            s('total-freq-card',   f(ac.frequency, 2));
+            s('energy-last-update', ac.updated_at ? ac.updated_at.substring(11,19) : '--');
+            // Estimasi biaya harian: power rata-rata * jam berjalan / 1000 * 1500
+            var costEst = Math.round(totKwh * 1500);
+            s('daily-cost', costEst > 0 ? costEst.toLocaleString() : '0');
 
             // ── Ring buffer ──
             var now = new Date();
@@ -9032,7 +9023,6 @@ if __name__ == '__main__':
 
     # Load saved IR codes from file
     try:
-        import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
         if os.path.exists(ir_file):
             with open(ir_file, 'r') as f:
