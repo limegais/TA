@@ -4459,6 +4459,74 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
+            <!-- ====== MYSQL REALTIME ENERGY PANEL ====== -->
+            <div style="margin-top:20px;padding:20px;border-radius:16px;border:1px solid rgba(99,102,241,0.25);background:linear-gradient(160deg,rgba(99,102,241,0.06),rgba(241,245,249,0.95));">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <div>
+                        <h2 style="font-size:17px;font-weight:700;color:var(--text-primary);margin:0 0 4px;"><i class="fas fa-database" style="margin-right:8px;color:#6366f1;"></i>Live MySQL Energy</h2>
+                        <p style="font-size:11px;color:var(--text-secondary);margin:0;">Data langsung dari database iotlabun_sbms &mdash; update tiap 5 detik</p>
+                    </div>
+                    <div id="mysql-live-badge" style="padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                        <i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Waiting...
+                    </div>
+                </div>
+
+                <!-- AC + Lamp live values -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px;">
+                    <!-- AC -->
+                    <div style="padding:14px;border-radius:12px;background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);">
+                        <div style="font-size:13px;font-weight:700;color:#ef4444;margin-bottom:10px;"><i class="fas fa-snowflake" style="margin-right:6px;"></i>AC (id_kwh=1)</div>
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Tegangan</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-ac-voltage">--</span><span style="font-size:10px;"> V</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Arus</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-ac-current">--</span><span style="font-size:10px;"> A</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Daya</div><div style="font-size:20px;font-weight:700;color:#f59e0b;"><span id="eu-ac-power">--</span><span style="font-size:10px;"> W</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Energi</div><div style="font-size:20px;font-weight:700;color:#10b981;"><span id="eu-ac-kwh">--</span><span style="font-size:10px;"> kWh</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-ac-freq">--</span><span style="font-size:10px;"> Hz</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">PF</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-ac-pf">--</span></div></div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-ac-ts">--</span></div>
+                    </div>
+                    <!-- Lamp -->
+                    <div style="padding:14px;border-radius:12px;background:rgba(234,179,8,0.07);border:1px solid rgba(234,179,8,0.2);">
+                        <div style="font-size:13px;font-weight:700;color:#eab308;margin-bottom:10px;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lampu (id_kwh=2)</div>
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Tegangan</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-lamp-voltage">--</span><span style="font-size:10px;"> V</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Arus</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-lamp-current">--</span><span style="font-size:10px;"> A</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Daya</div><div style="font-size:20px;font-weight:700;color:#f59e0b;"><span id="eu-lamp-power">--</span><span style="font-size:10px;"> W</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Energi</div><div style="font-size:20px;font-weight:700;color:#10b981;"><span id="eu-lamp-kwh">--</span><span style="font-size:10px;"> kWh</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-lamp-freq">--</span><span style="font-size:10px;"> Hz</span></div></div>
+                            <div style="text-align:center;"><div style="font-size:10px;color:var(--text-secondary);">PF</div><div style="font-size:20px;font-weight:700;color:var(--text);"><span id="eu-lamp-pf">--</span></div></div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-lamp-ts">--</span></div>
+                    </div>
+                </div>
+
+                <!-- Chart 1: Tegangan + Frekuensi (1 grafik, dual Y-axis) -->
+                <div class="chart-container" style="margin-bottom:16px;">
+                    <div class="chart-header">
+                        <div class="chart-title">Tegangan <span style="color:#6366f1;">&#9632;</span> AC &amp; <span style="color:#22d3ee;">&#9632;</span> Lampu (V) &nbsp;|&nbsp; Frekuensi <span style="color:#f59e0b;">- -</span> (Hz)</div>
+                    </div>
+                    <canvas id="mysqlVoltFreqChart" height="80"></canvas>
+                </div>
+
+                <!-- Charts 2 & 3: Power + Current (masing-masing AC vs Lamp) -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Daya &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lampu <span style="color:#eab308;">&#9632;</span> (W)</div>
+                        </div>
+                        <canvas id="mysqlPowerChart" height="100"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Arus &mdash; AC <span style="color:#f59e0b;">&#9632;</span> &amp; Lampu <span style="color:#06b6d4;">&#9632;</span> (A)</div>
+                        </div>
+                        <canvas id="mysqlCurrentChart" height="100"></canvas>
+                    </div>
+                </div>
+            </div>
+            <!-- ====== END MYSQL REALTIME PANEL ====== -->
+
             <!-- Historical Power Chart (AC + Lamp dual-line) -->
             <div class="chart-container" style="margin-top: 30px;">
                 <div class="chart-header">
@@ -5634,6 +5702,66 @@ HTML_TEMPLATE = '''
                     { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
                     { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
+            });
+
+            // MySQL Real-time Charts (ring buffer, 30 points)
+            charts.mysqlVoltFreq = new Chart(document.getElementById('mysqlVoltFreqChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Tegangan AC (V)', data: [], borderColor: '#6366f1', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yV' },
+                        { label: 'Tegangan Lampu (V)', data: [], borderColor: '#22d3ee', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yV' },
+                        { label: 'Frekuensi (Hz)', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [6,3], pointRadius: 0, tension: 0.3, yAxisID: 'yF' }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        yV: { type: 'linear', position: 'left', title: { display: true, text: 'V', color: '#94a3b8' }, suggestedMin: 210, suggestedMax: 240, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+                        yF: { type: 'linear', position: 'right', title: { display: true, text: 'Hz', color: '#94a3b8' }, suggestedMin: 49, suggestedMax: 51, ticks: { color: '#94a3b8' }, grid: { drawOnChartArea: false } }
+                    }
+                }
+            });
+
+            charts.mysqlPower = new Chart(document.getElementById('mysqlPowerChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'AC (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true },
+                        { label: 'Lampu (W)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        y: { beginAtZero: true, title: { display: true, text: 'W', color: '#94a3b8' }, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } }
+                    }
+                }
+            });
+
+            charts.mysqlCurrent = new Chart(document.getElementById('mysqlCurrentChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'AC (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true },
+                        { label: 'Lampu (A)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        y: { beginAtZero: true, title: { display: true, text: 'A', color: '#94a3b8' }, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } }
+                    }
+                }
             });
 
             // Energy Comparison: 4 separate charts (Before/After x Power/kWh) for side-by-side view
@@ -8257,45 +8385,87 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== SOCKET.IO EVENTS ====================
-        socket.on('mysql_energy_update', function(data) {
-            const badge = document.getElementById('mysql-energy-badge');
-            function setMysql(prefix, d) {
-                if (!d || !d.voltage) return;
-                const s = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-                s(prefix+'-voltage', parseFloat(d.voltage||0).toFixed(1));
-                s(prefix+'-current', parseFloat(d.current||0).toFixed(2));
-                s(prefix+'-power',   parseFloat(d.power||0).toFixed(1));
-                s(prefix+'-kwh',     parseFloat(d.energy||0).toFixed(4));
-                s(prefix+'-freq',    parseFloat(d.frequency||0).toFixed(2));
-                s(prefix+'-pf',      parseFloat(d.pf||0).toFixed(2));
-                s(prefix+'-ts',      d.updated_at || '--');
-            }
-            setMysql('mysql-ac',   data.ac);
-            setMysql('mysql-lamp', data.lamp);
-            if (badge) {
-                badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
-                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
-            }
-        });
+        // Ring buffer untuk chart MySQL realtime
+        var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
+        var _MYSQL_MAX = 30;
 
         socket.on('mysql_energy_update', function(data) {
-            const badge = document.getElementById('mysql-energy-badge');
-            function setMysql(prefix, d) {
-                if (!d || d.voltage === undefined) return;
-                const s = function(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; };
-                s(prefix+'-voltage', parseFloat(d.voltage||0).toFixed(1));
-                s(prefix+'-current', parseFloat(d.current||0).toFixed(2));
-                s(prefix+'-power',   parseFloat(d.power||0).toFixed(1));
-                s(prefix+'-kwh',     parseFloat(d.energy||0).toFixed(4));
-                s(prefix+'-freq',    parseFloat(d.frequency||0).toFixed(2));
-                s(prefix+'-pf',      parseFloat(d.pf||0).toFixed(2));
-                s(prefix+'-ts',      d.updated_at || '--');
-            }
-            setMysql('mysql-ac',   data.ac);
-            setMysql('mysql-lamp', data.lamp);
+            var ac   = data.ac   || {};
+            var lamp = data.lamp || {};
+
+            var s = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+            var f = function(v, d) { return parseFloat(v || 0).toFixed(d !== undefined ? d : 1); };
+
+            // ── Overview page badge + mini cards ──
+            var badge = document.getElementById('mysql-energy-badge');
             if (badge) {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
                 badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+            s('mysql-ac-voltage', f(ac.voltage));       s('mysql-ac-current', f(ac.current, 2));
+            s('mysql-ac-power',   f(ac.power));         s('mysql-ac-kwh',     f(ac.energy, 4));
+            s('mysql-ac-freq',    f(ac.frequency, 2));  s('mysql-ac-pf',      f(ac.pf, 2));
+            s('mysql-ac-ts',      ac.updated_at || '--');
+            s('mysql-lamp-voltage', f(lamp.voltage));     s('mysql-lamp-current', f(lamp.current, 2));
+            s('mysql-lamp-power',   f(lamp.power));       s('mysql-lamp-kwh',     f(lamp.energy, 4));
+            s('mysql-lamp-freq',    f(lamp.frequency, 2)); s('mysql-lamp-pf',     f(lamp.pf, 2));
+            s('mysql-lamp-ts',      lamp.updated_at || '--');
+
+            // ── Energy Usage page live values ──
+            var liveBadge = document.getElementById('mysql-live-badge');
+            if (liveBadge) {
+                liveBadge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Live';
+                liveBadge.style.cssText = 'padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+            s('eu-ac-voltage', f(ac.voltage));       s('eu-ac-current', f(ac.current, 2));
+            s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     f(ac.energy, 4));
+            s('eu-ac-freq',    f(ac.frequency, 2));  s('eu-ac-pf',      f(ac.pf, 2));
+            s('eu-ac-ts',      ac.updated_at || '--');
+            s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
+            s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     f(lamp.energy, 4));
+            s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
+            s('eu-lamp-ts',      lamp.updated_at || '--');
+
+            // ── Update power-grid summary cards ──
+            s('ac-power',   f(ac.power));
+            s('lamp-power', f(lamp.power));
+            s('total-power',   (parseFloat(ac.power||0) + parseFloat(lamp.power||0)).toFixed(1));
+            s('total-current', (parseFloat(ac.current||0) + parseFloat(lamp.current||0)).toFixed(2));
+
+            // ── Ring buffer ──
+            var now = new Date();
+            var ts  = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
+            _mysqlBuf.labels.push(ts);
+            _mysqlBuf.acV.push(parseFloat(ac.voltage||0));
+            _mysqlBuf.lampV.push(parseFloat(lamp.voltage||0));
+            _mysqlBuf.freq.push(parseFloat(ac.frequency||0));
+            _mysqlBuf.acP.push(parseFloat(ac.power||0));
+            _mysqlBuf.lampP.push(parseFloat(lamp.power||0));
+            _mysqlBuf.acA.push(parseFloat(ac.current||0));
+            _mysqlBuf.lampA.push(parseFloat(lamp.current||0));
+            if (_mysqlBuf.labels.length > _MYSQL_MAX) {
+                ['labels','acV','lampV','freq','acP','lampP','acA','lampA'].forEach(function(k){ _mysqlBuf[k].shift(); });
+            }
+
+            // ── Chart updates ──
+            if (charts.mysqlVoltFreq) {
+                charts.mysqlVoltFreq.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlVoltFreq.data.datasets[0].data = _mysqlBuf.acV.slice();
+                charts.mysqlVoltFreq.data.datasets[1].data = _mysqlBuf.lampV.slice();
+                charts.mysqlVoltFreq.data.datasets[2].data = _mysqlBuf.freq.slice();
+                charts.mysqlVoltFreq.update('none');
+            }
+            if (charts.mysqlPower) {
+                charts.mysqlPower.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlPower.data.datasets[0].data = _mysqlBuf.acP.slice();
+                charts.mysqlPower.data.datasets[1].data = _mysqlBuf.lampP.slice();
+                charts.mysqlPower.update('none');
+            }
+            if (charts.mysqlCurrent) {
+                charts.mysqlCurrent.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlCurrent.data.datasets[0].data = _mysqlBuf.acA.slice();
+                charts.mysqlCurrent.data.datasets[1].data = _mysqlBuf.lampA.slice();
+                charts.mysqlCurrent.update('none');
             }
         });
 
