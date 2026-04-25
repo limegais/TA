@@ -3943,6 +3943,86 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- MySQL Energy Monitor: AC + Lamp -->
+                <div class="stat-card" id="mysql-energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 12px;">DB</div>
+                            <div>
+                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">MySQL Energy Monitor</div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">AC (id_kwh=1) + Lampu (id_kwh=2) — Jagoan Hosting</div>
+                            </div>
+                        </div>
+                        <div id="mysql-energy-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(107,114,128,0.15); color: #6b7280; border: 1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Waiting...
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <!-- AC -->
+                        <div style="background: linear-gradient(135deg, rgba(239,68,68,0.06), rgba(220,38,38,0.03)); border: 1px solid rgba(239,68,68,0.2); border-radius: 12px; padding: 14px;">
+                            <div style="font-size: 12px; font-weight: 700; color: #ef4444; margin-bottom: 10px;"><i class="fas fa-snowflake" style="margin-right: 6px;"></i>AC (id_kwh=1)</div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Voltage</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-voltage">--</span><span style="font-size:10px;"> V</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Current</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-current">--</span><span style="font-size:10px;"> A</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Power</div>
+                                    <div style="font-size:18px; font-weight:700; color:#f59e0b;"><span id="mysql-ac-power">--</span><span style="font-size:10px;"> W</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Energy</div>
+                                    <div style="font-size:18px; font-weight:700; color:#10b981;"><span id="mysql-ac-kwh">--</span><span style="font-size:10px;"> kWh</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Freq</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-freq">--</span><span style="font-size:10px;"> Hz</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">PF</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-pf">--</span></div>
+                                </div>
+                            </div>
+                            <div style="margin-top:8px; font-size:10px; color:var(--text-secondary);">Updated: <span id="mysql-ac-ts">--</span></div>
+                        </div>
+                        <!-- Lamp -->
+                        <div style="background: linear-gradient(135deg, rgba(234,179,8,0.06), rgba(202,138,4,0.03)); border: 1px solid rgba(234,179,8,0.2); border-radius: 12px; padding: 14px;">
+                            <div style="font-size: 12px; font-weight: 700; color: #eab308; margin-bottom: 10px;"><i class="fas fa-lightbulb" style="margin-right: 6px;"></i>Lampu (id_kwh=2)</div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Voltage</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-voltage">--</span><span style="font-size:10px;"> V</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Current</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-current">--</span><span style="font-size:10px;"> A</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Power</div>
+                                    <div style="font-size:18px; font-weight:700; color:#f59e0b;"><span id="mysql-lamp-power">--</span><span style="font-size:10px;"> W</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Energy</div>
+                                    <div style="font-size:18px; font-weight:700; color:#10b981;"><span id="mysql-lamp-kwh">--</span><span style="font-size:10px;"> kWh</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">Freq</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-freq">--</span><span style="font-size:10px;"> Hz</span></div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px; color:var(--text-secondary);">PF</div>
+                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-pf">--</span></div>
+                                </div>
+                            </div>
+                            <div style="margin-top:8px; font-size:10px; color:var(--text-secondary);">Updated: <span id="mysql-lamp-ts">--</span></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Person Detection - Enhanced Card -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
                     <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
@@ -8177,6 +8257,48 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== SOCKET.IO EVENTS ====================
+        socket.on('mysql_energy_update', function(data) {
+            const badge = document.getElementById('mysql-energy-badge');
+            function setMysql(prefix, d) {
+                if (!d || !d.voltage) return;
+                const s = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+                s(prefix+'-voltage', parseFloat(d.voltage||0).toFixed(1));
+                s(prefix+'-current', parseFloat(d.current||0).toFixed(2));
+                s(prefix+'-power',   parseFloat(d.power||0).toFixed(1));
+                s(prefix+'-kwh',     parseFloat(d.energy||0).toFixed(4));
+                s(prefix+'-freq',    parseFloat(d.frequency||0).toFixed(2));
+                s(prefix+'-pf',      parseFloat(d.pf||0).toFixed(2));
+                s(prefix+'-ts',      d.updated_at || '--');
+            }
+            setMysql('mysql-ac',   data.ac);
+            setMysql('mysql-lamp', data.lamp);
+            if (badge) {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
+                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+        });
+
+        socket.on('mysql_energy_update', function(data) {
+            const badge = document.getElementById('mysql-energy-badge');
+            function setMysql(prefix, d) {
+                if (!d || d.voltage === undefined) return;
+                const s = function(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; };
+                s(prefix+'-voltage', parseFloat(d.voltage||0).toFixed(1));
+                s(prefix+'-current', parseFloat(d.current||0).toFixed(2));
+                s(prefix+'-power',   parseFloat(d.power||0).toFixed(1));
+                s(prefix+'-kwh',     parseFloat(d.energy||0).toFixed(4));
+                s(prefix+'-freq',    parseFloat(d.frequency||0).toFixed(2));
+                s(prefix+'-pf',      parseFloat(d.pf||0).toFixed(2));
+                s(prefix+'-ts',      d.updated_at || '--');
+            }
+            setMysql('mysql-ac',   data.ac);
+            setMysql('mysql-lamp', data.lamp);
+            if (badge) {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
+                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+        });
+
         socket.on('mqtt_update', function(data) {
             updateDashboard();
             
