@@ -8765,5 +8765,17 @@ if __name__ == '__main__':
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
-    
+
+    # Start MySQL energy polling (Jagoan Hosting)
+    # Edit MYSQL_HOST di mysql_energy.py ke hostname hosting sebelum deploy ke RPi
+    import mysql_energy
+    mysql_energy.start_polling({
+        'mqtt_data':              mqtt_data,
+        'energy_runtime_history': energy_runtime_history,
+        'get_energy_phase':       lambda: energy_phase,
+        'write_influx':           write_to_influxdb,
+        'socketio':               socketio,
+    })
+    print("  [MySQL] Energy polling thread started")
+
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
