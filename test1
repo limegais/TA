@@ -6151,7 +6151,7 @@ HTML_TEMPLATE = '''
                             banner = document.createElement('div');
                             banner.id = 'tz-warning-banner';
                             banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#1e293b;padding:8px 20px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;gap:12px;';
-                            banner.innerHTML = '<span>⚠ Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.style.display=\'none\'" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;">✕</button>';
+                            banner.innerHTML = '<span>⚠ Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.remove()" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;">✕</button>';
                             document.body.prepend(banner);
                         }
                     }
