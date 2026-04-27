@@ -8562,11 +8562,11 @@ HTML_TEMPLATE = '''
                 showToast('Belum ada data yang direkam', 'error');
                 return;
             }
-            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\n';
+            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
             var body = _recRows.map(function(r) {
                 return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'energy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -8587,7 +8587,8 @@ HTML_TEMPLATE = '''
             }
         };
 
-
+        // ==================== MQTT REAL-TIME UPDATE HANDLER ====================
+        socket.on('mqtt_update', function(data) {
             updateDashboard();
             
             if (data.type === 'ac') {
