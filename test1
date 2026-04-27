@@ -2074,7 +2074,27 @@ def rec_state_api():
         return jsonify({'ok': True, 'state': _rec_state})
     return jsonify(_rec_state)
 
-@app.route('/api/chart/<measurement>/<field>/<int:hours>')
+# ── Server-side recorded data (shared across all devices, in-memory) ──
+_rec_data = {'energy': [], 'temp': [], 'lux': []}
+
+@app.route('/api/rec/data', methods=['GET', 'POST', 'DELETE'])
+def rec_data_api():
+    global _rec_data
+    dtype = request.args.get('type', 'energy')
+    if dtype not in ('energy', 'temp', 'lux'):
+        return jsonify({'error': 'invalid type'}), 400
+    if request.method == 'DELETE':
+        _rec_data[dtype] = []
+        return jsonify({'ok': True})
+    if request.method == 'POST':
+        body = request.get_json(force=True) or {}
+        rows = body.get('rows', [])
+        if isinstance(rows, list) and len(rows) <= 50000:
+            _rec_data[dtype] = rows   # replace (not append) to stay idempotent
+        return jsonify({'ok': True, 'count': len(_rec_data[dtype])})
+    return jsonify({'rows': _rec_data[dtype], 'count': len(_rec_data[dtype])})
+
+
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
@@ -4748,15 +4768,20 @@ HTML_TEMPLATE = '''
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
                         <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Rekam Data &amp; Export CSV</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data energi, daya, arus, tegangan secara realtime lalu export ke CSV</p>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data energi realtime &mdash; terlihat di semua device &mdash; bisa export per perangkat</p>
                     </div>
-                    <div id="rec-status-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
-                        <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <div id="rec-status-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        </div>
+                        <div id="rec-sync-badge" style="padding:5px 12px;border-radius:20px;font-size:10px;font-weight:600;background:rgba(99,102,241,0.1);color:#6366f1;border:1px solid rgba(99,102,241,0.2);">
+                            <i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync
+                        </div>
                     </div>
                 </div>
 
                 <!-- Tombol kontrol -->
-                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
                     <button id="btn-rec-start" onclick="energyRecStart()"
                         style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
                         <i class="fas fa-circle" style="font-size:9px;color:#fff;"></i> Mulai Rekam
@@ -4769,20 +4794,42 @@ HTML_TEMPLATE = '''
                         style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
                         <i class="fas fa-trash-alt"></i> Hapus
                     </button>
-                    <button onclick="energyExportCSV()"
-                        style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
-                        <i class="fas fa-download"></i> Export CSV
-                    </button>
+                    <!-- Export split buttons -->
+                    <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+                        <button onclick="energyExportCSV('all')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> Semua
+                        </button>
+                        <button onclick="energyExportCSV('AC')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> AC
+                        </button>
+                        <button onclick="energyExportCSV('Lampu')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> Lampu
+                        </button>
+                    </div>
                 </div>
 
-                <!-- Counter info -->
-                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
-                    <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
-                    <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
-                    <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
+                <!-- Counter info + filter tabs -->
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
+                    </div>
+                    <!-- Filter tabs -->
+                    <div style="display:flex;gap:4px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
+                        <button id="rec-tab-all" onclick="recSetFilter('all')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#fff;color:#6366f1;box-shadow:0 1px 3px rgba(0,0,0,0.1);">Semua</button>
+                        <button id="rec-tab-ac" onclick="recSetFilter('AC')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">AC</button>
+                        <button id="rec-tab-lamp" onclick="recSetFilter('Lampu')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">Lampu</button>
+                    </div>
                 </div>
 
-                <!-- Preview tabel 5 baris terakhir -->
+                <!-- Preview tabel 10 baris terakhir (filtered) -->
                 <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
@@ -4804,7 +4851,7 @@ HTML_TEMPLATE = '''
                         </tbody>
                     </table>
                 </div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk melihat semua data.</div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 10 baris terakhir sesuai filter. Export CSV untuk semua data.</div>
             </div>
 
             <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
@@ -8633,8 +8680,43 @@ HTML_TEMPLATE = '''
         var _recActive  = false;  // never auto-resume active state; user must press start
         var _recStartTs = null;
         var _recTimer   = null;
+        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lampu'
 
         function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
+
+        // ── Server-side data sync ──
+        function _recServerPush() {
+            fetch('/api/rec/data?type=energy', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _recRows})
+            }).then(function(r){ return r.json(); }).then(function(d){
+                var b = document.getElementById('rec-sync-badge');
+                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#10b981'; b.style.borderColor='rgba(16,185,129,0.3)'; }
+            }).catch(function(){});
+        }
+        function _recServerFetch() {
+            fetch('/api/rec/data?type=energy').then(function(r){ return r.json(); }).then(function(d){
+                if (d.rows && d.rows.length > _recRows.length) {
+                    _recRows = d.rows; _ssSave('_recRows', _recRows); _recUpdatePreview();
+                    var b = document.getElementById('rec-sync-badge');
+                    if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
+                }
+            }).catch(function(){});
+        }
+        function _recServerDelete() { fetch('/api/rec/data?type=energy', {method:'DELETE'}).catch(function(){}); }
+        // Poll server for new rows every 10 s (for passive devices)
+        setInterval(function(){ if (!_recActive) _recServerFetch(); }, 10000);
+
+        function recSetFilter(f) {
+            _recFilter = f;
+            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lampu:'rec-tab-lamp'};
+            Object.keys(map).forEach(function(k) {
+                var el = document.getElementById(map[k]); if (!el) return;
+                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lampu'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
+                else { el.style.background='transparent'; el.style.fontWeight='600'; el.style.color='var(--text-secondary)'; el.style.boxShadow='none'; }
+            });
+            _recUpdatePreview();
+        }
 
         function _recUpdateBadge() {
             var badge = document.getElementById('rec-status-badge');
@@ -8653,12 +8735,14 @@ HTML_TEMPLATE = '''
             var countEl = document.getElementById('rec-count');
             if (countEl) countEl.textContent = _recRows.length;
             if (!tbody) return;
-            if (_recRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+            var filtered = _recFilter === 'all' ? _recRows : _recRows.filter(function(r){ return r.device === _recFilter; });
+            if (filtered.length === 0) {
+                var msg = _recRows.length > 0 ? 'Tidak ada data untuk filter <strong>' + _recFilter + '</strong>.' : 'Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.';
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
                 return;
             }
-            var last5 = _recRows.slice(-5).reverse();
-            tbody.innerHTML = last5.map(function(r) {
+            var last10 = filtered.slice(-10).reverse();
+            tbody.innerHTML = last10.map(function(r) {
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
@@ -8712,9 +8796,8 @@ HTML_TEMPLATE = '''
             });
             _recUpdatePreview();
             _ssSave('_recRows', _recRows);
-        }
-
-        function energyRecStart() {
+            _recServerPush();
+        } {
             _recActive  = true;
             _recStartTs = Date.now();
             var startEl = document.getElementById('rec-start-time');
@@ -8738,6 +8821,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-rec-stop').style.opacity = '0.5';
             _recUpdateBadge();
             _recStatePush({energy: false});
+            _recServerPush();
             showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
         }
 
@@ -8746,6 +8830,7 @@ HTML_TEMPLATE = '''
             _recActive = false;
             clearInterval(_recTimer);
             sessionStorage.removeItem('_recRows');
+            _recServerDelete();
             var countEl = document.getElementById('rec-count');
             var durEl   = document.getElementById('rec-duration');
             var startEl = document.getElementById('rec-start-time');
@@ -8758,25 +8843,26 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-rec-stop').style.opacity = '0.5';
             _recUpdateBadge();
             _recUpdatePreview();
+            var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
             showToast('Data rekaman dihapus', 'info');
         }
 
-        function energyExportCSV() {
-            if (_recRows.length === 0) {
-                showToast('Belum ada data yang direkam', 'error');
-                return;
-            }
+        function energyExportCSV(device) {
+            if (_recRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
+            if (rows.length === 0) { showToast('Tidak ada data untuk ' + device, 'error'); return; }
             var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
-            var body = _recRows.map(function(r) {
+            var body = rows.map(function(r) {
                 return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
             }).join('\\n');
             var now = new Date();
-            var fname = 'energy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+            var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
+            var fname = 'energy' + suffix + '_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_recRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(rows.length + ' baris berhasil diekspor: ' + fname, 'success');
         }
 
         // Hook ke _applyEnergyData — rekam setiap 6 menit (360 detik)
@@ -8792,6 +8878,23 @@ HTML_TEMPLATE = '''
         };
 
         // ==================== REKAM SUHU & HUMIDITY ====================
+        function _tempServerPush() {
+            fetch('/api/rec/data?type=temp', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _tempRows})
+            }).catch(function(){});
+        }
+        function _tempServerFetch() {
+            fetch('/api/rec/data?type=temp').then(function(r){ return r.json(); }).then(function(d){
+                if (d.rows && d.rows.length > _tempRows.length) {
+                    _tempRows = d.rows; _ssSave('_tempRows', _tempRows); _tempUpdatePreview();
+                    var c = document.getElementById('temp-rec-count'); if (c) c.textContent = _tempRows.length;
+                }
+            }).catch(function(){});
+        }
+        function _tempServerDelete() { fetch('/api/rec/data?type=temp', {method:'DELETE'}).catch(function(){}); }
+        setInterval(function(){ if (!_tempActive) _tempServerFetch(); }, 10000);
+
         var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
         var _tempTimer = null, _lastTempRecTime = 0;
         var _TEMP_REC_MS = 60000; // 1 menit
@@ -8810,6 +8913,7 @@ HTML_TEMPLATE = '''
             var c = document.getElementById('temp-rec-count');
             if (c) c.textContent = _tempRows.length;
             _ssSave('_tempRows', _tempRows);
+            _tempServerPush();
         }
 
         function _tempTick() {
@@ -8876,12 +8980,14 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-temp-stop').style.opacity = '0.5';
             _tempUpdateBadge();
             _recStatePush({temp: false});
+            _tempServerPush();
             showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
         }
 
         function tempRecClear() {
             _tempRows = []; _tempActive = false; clearInterval(_tempTimer);
             sessionStorage.removeItem('_tempRows');
+            _tempServerDelete();
             ['temp-rec-count','temp-rec-duration','temp-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
             document.getElementById('btn-temp-start').disabled = false;
             document.getElementById('btn-temp-start').style.opacity = '1';
@@ -8906,6 +9012,23 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== REKAM LUX & BRIGHTNESS ====================
+        function _luxServerPush() {
+            fetch('/api/rec/data?type=lux', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _luxRows})
+            }).catch(function(){});
+        }
+        function _luxServerFetch() {
+            fetch('/api/rec/data?type=lux').then(function(r){ return r.json(); }).then(function(d){
+                if (d.rows && d.rows.length > _luxRows.length) {
+                    _luxRows = d.rows; _ssSave('_luxRows', _luxRows); _luxUpdatePreview();
+                    var c = document.getElementById('lux-rec-count'); if (c) c.textContent = _luxRows.length;
+                }
+            }).catch(function(){});
+        }
+        function _luxServerDelete() { fetch('/api/rec/data?type=lux', {method:'DELETE'}).catch(function(){}); }
+        setInterval(function(){ if (!_luxActive) _luxServerFetch(); }, 10000);
+
         var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
         var _luxTimer = null, _lastLuxRecTime = 0;
         var _LUX_REC_MS = 60000; // 1 menit
@@ -8922,6 +9045,7 @@ HTML_TEMPLATE = '''
             var c = document.getElementById('lux-rec-count');
             if (c) c.textContent = _luxRows.length;
             _ssSave('_luxRows', _luxRows);
+            _luxServerPush();
         }
 
         function _luxTick() {
@@ -8989,12 +9113,14 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-lux-stop').style.opacity = '0.5';
             _luxUpdateBadge();
             _recStatePush({lux: false});
+            _luxServerPush();
             showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
         }
 
         function luxRecClear() {
             _luxRows = []; _luxActive = false; clearInterval(_luxTimer);
             sessionStorage.removeItem('_luxRows');
+            _luxServerDelete();
             ['lux-rec-count','lux-rec-duration','lux-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
             document.getElementById('btn-lux-start').disabled = false;
             document.getElementById('btn-lux-start').style.opacity = '1';
@@ -9571,6 +9697,10 @@ HTML_TEMPLATE = '''
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
             try { _luxUpdatePreview(); } catch(e) {}
+            // Fetch server-side recorded data (cross-device sync)
+            try { _recServerFetch(); } catch(e) {}
+            try { _tempServerFetch(); } catch(e) {}
+            try { _luxServerFetch(); } catch(e) {}
             try { _occInitChart(); } catch(e) {}
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
             try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
