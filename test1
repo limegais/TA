@@ -8794,10 +8794,10 @@ HTML_TEMPLATE = '''
 
         function tempExportCSV() {
             if (_tempRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\n';
+            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
             var body = _tempRows.map(function(r) {
                 return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'suhu_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -8903,10 +8903,10 @@ HTML_TEMPLATE = '''
 
         function luxExportCSV() {
             if (_luxRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
+            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
             var body = _luxRows.map(function(r) {
                 return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'lux_brightness_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
