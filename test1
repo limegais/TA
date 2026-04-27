@@ -4629,13 +4629,6 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- Real-time trend -->
-                <div class="chart-container" style="margin-top:16px;">
-                    <div class="chart-header">
-                        <div class="chart-title">Tren Energi Realtime (estimasi kWh/hari)</div>
-                    </div>
-                    <canvas id="energyChart" height="80"></canvas>
-                </div>
             </div>
 
 
@@ -5680,11 +5673,6 @@ HTML_TEMPLATE = '''
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
-            });
-
-            charts.energy = new Chart(document.getElementById('energyChart'), {
-                type: 'line', options: makeEnergyOpts('kWh/day'),
-                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
             });
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
@@ -8175,18 +8163,6 @@ HTML_TEMPLATE = '''
                     setText('total-energy-kwh', totalEnergyKwh.toFixed(3));
                     setText('daily-cost',       dailyCost.toFixed(0));
 
-                    if (charts.energy) {
-                        const now = new Date();
-                        const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                        if (charts.energy.data.labels.length >= 50) {
-                            charts.energy.data.labels.shift();
-                            charts.energy.data.datasets[0].data.shift();
-                        }
-                        charts.energy.data.labels.push(timeLabel);
-                        charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
-                        charts.energy.update('none');
-                    }
-                    
                     // Energy Monitor (PZEM-016) data
                     if (energy) {
                         const e = energy;
@@ -8600,51 +8576,6 @@ HTML_TEMPLATE = '''
                     showEnergyBubble(pwr, vlt, cur);
                 }
 
-                // Real-time push to energy charts (so charts work even without InfluxDB)
-                // Remove "No Data" overlays once data arrives
-                ['powerChart','voltageChart','currentChart','kwhChart'].forEach(function(cid){
-                    var ov = document.getElementById('nodata-' + cid);
-                    if (ov) ov.remove();
-                });
-                var now = new Date();
-                var tStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                if (charts.energyPower && pwr >= 0) {
-                    if (charts.energyPower.data.labels.length > 120) {
-                        charts.energyPower.data.labels.shift();
-                        charts.energyPower.data.datasets[0].data.shift();
-                    }
-                    charts.energyPower.data.labels.push(tStr);
-                    charts.energyPower.data.datasets[0].data.push(pwr);
-                    charts.energyPower.update('none');
-                }
-                if (charts.energyVoltage && vlt >= 0) {
-                    if (charts.energyVoltage.data.labels.length > 120) {
-                        charts.energyVoltage.data.labels.shift();
-                        charts.energyVoltage.data.datasets[0].data.shift();
-                    }
-                    charts.energyVoltage.data.labels.push(tStr);
-                    charts.energyVoltage.data.datasets[0].data.push(vlt);
-                    charts.energyVoltage.update('none');
-                }
-                if (charts.energyCurrent && cur >= 0) {
-                    if (charts.energyCurrent.data.labels.length > 120) {
-                        charts.energyCurrent.data.labels.shift();
-                        charts.energyCurrent.data.datasets[0].data.shift();
-                    }
-                    charts.energyCurrent.data.labels.push(tStr);
-                    charts.energyCurrent.data.datasets[0].data.push(cur);
-                    charts.energyCurrent.update('none');
-                }
-                var kwhVal = parseFloat(e.energy || 0);
-                if (charts.energyKwh && kwhVal >= 0) {
-                    if (charts.energyKwh.data.labels.length > 120) {
-                        charts.energyKwh.data.labels.shift();
-                        charts.energyKwh.data.datasets[0].data.shift();
-                    }
-                    charts.energyKwh.data.labels.push(tStr);
-                    charts.energyKwh.data.datasets[0].data.push(kwhVal);
-                    charts.energyKwh.update('none');
-                }
             }
 
             // Real-time optimization (GA->AC / PSO->Lamp) updates
