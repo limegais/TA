@@ -3942,6 +3942,60 @@ HTML_TEMPLATE = '''
 
                 <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
 
+                <!-- ===== PANEL REKAM TEMP & HUMIDITY ===== -->
+                <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                        <div>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-thermometer-half" style="color:#3b82f6;margin-right:8px;"></i>Rekam Suhu &amp; Kelembaban</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data suhu &amp; humidity realtime — interval 1 menit, export ke CSV</p>
+                        </div>
+                        <div id="temp-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                        <button id="btn-temp-start" onclick="tempRecStart()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
+                        </button>
+                        <button id="btn-temp-stop" onclick="tempRecStop()" disabled
+                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                            <i class="fas fa-stop"></i> Stop
+                        </button>
+                        <button onclick="tempRecClear()"
+                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                            <i class="fas fa-trash-alt"></i> Hapus
+                        </button>
+                        <button onclick="tempExportCSV()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris: <strong id="temp-rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="temp-rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="temp-rec-start" style="color:var(--text);">--</strong></span>
+                    </div>
+                    <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                            <thead>
+                                <tr style="background:rgba(59,130,246,0.08);">
+                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#3b82f6;font-weight:600;">Temp Rata2 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#06b6d4;font-weight:600;">Humidity (%)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T1 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T2 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T3 (°C)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="temp-rec-preview">
+                                <tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk semua data.</div>
+                </div>
+
             </div>
         </div>
 
@@ -4072,6 +4126,61 @@ HTML_TEMPLATE = '''
                         <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
+                <!-- ===== PANEL REKAM LUX & BRIGHTNESS ===== -->
+                <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(234,179,8,0.25);background:linear-gradient(160deg,rgba(234,179,8,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                        <div>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-lightbulb" style="color:#eab308;margin-right:8px;"></i>Rekam Lux &amp; Kecerahan Lampu</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data lux 3 sensor, rata-rata &amp; brightness lampu — interval 1 menit, export ke CSV</p>
+                        </div>
+                        <div id="lux-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                        <button id="btn-lux-start" onclick="luxRecStart()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
+                        </button>
+                        <button id="btn-lux-stop" onclick="luxRecStop()" disabled
+                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                            <i class="fas fa-stop"></i> Stop
+                        </button>
+                        <button onclick="luxRecClear()"
+                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                            <i class="fas fa-trash-alt"></i> Hapus
+                        </button>
+                        <button onclick="luxExportCSV()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris: <strong id="lux-rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="lux-rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="lux-rec-start" style="color:var(--text);">--</strong></span>
+                    </div>
+                    <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                            <thead>
+                                <tr style="background:rgba(234,179,8,0.08);">
+                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 1 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 2 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 3 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Avg Lux (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright1 (%)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright2 (%)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="lux-rec-preview">
+                                <tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk semua data.</div>
+                </div>
+
             </div>
         </div>
 
@@ -8586,6 +8695,225 @@ HTML_TEMPLATE = '''
                 _recAddRow(ac, lamp);
             }
         };
+
+        // ==================== REKAM SUHU & HUMIDITY ====================
+        var _tempRows = [], _tempActive = false, _tempStartTs = 0;
+        var _tempTimer = null, _lastTempRecTime = 0;
+        var _TEMP_REC_MS = 60000; // 1 menit
+
+        function _tempFmt(v, d) { var n = parseFloat(v); return Number.isFinite(n) ? n.toFixed(d != null ? d : 1) : '--'; }
+
+        function _tempAddRow() {
+            var ts = new Date().toLocaleString('id-ID');
+            var temp = document.getElementById('dash-ac-room-temp') ? document.getElementById('dash-ac-room-temp').textContent : '--';
+            var hum  = document.getElementById('dash-ac-room-hum')  ? document.getElementById('dash-ac-room-hum').textContent  : '--';
+            var t1   = document.getElementById('dash-ac-temp1')      ? document.getElementById('dash-ac-temp1').textContent      : '--';
+            var t2   = document.getElementById('dash-ac-temp2')      ? document.getElementById('dash-ac-temp2').textContent      : '--';
+            var t3   = document.getElementById('dash-ac-temp3')      ? document.getElementById('dash-ac-temp3').textContent      : '--';
+            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3 });
+            _tempUpdatePreview();
+            var c = document.getElementById('temp-rec-count');
+            if (c) c.textContent = _tempRows.length;
+        }
+
+        function _tempTick() {
+            if (!_tempActive) return;
+            var sec = Math.floor((Date.now() - _tempStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var d = document.getElementById('temp-rec-duration');
+            if (d) d.textContent = m + ':' + String(s).padStart(2, '0');
+            if (Date.now() - _lastTempRecTime >= _TEMP_REC_MS) {
+                _lastTempRecTime = Date.now();
+                _tempAddRow();
+            }
+        }
+
+        function _tempUpdateBadge() {
+            var b = document.getElementById('temp-rec-badge');
+            if (!b) return;
+            if (_tempActive) {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+            } else {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
+            }
+        }
+
+        function _tempUpdatePreview() {
+            var tbody = document.getElementById('temp-rec-preview');
+            if (!tbody) return;
+            if (_tempRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                return;
+            }
+            var last5 = _tempRows.slice(-5).reverse();
+            tbody.innerHTML = last5.map(function(r, i) {
+                var bg = i % 2 === 0 ? 'background:rgba(59,130,246,0.03);' : '';
+                return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#3b82f6;">' + r.temp + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#06b6d4;">' + r.hum + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t2 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t3 + '</td></tr>';
+            }).join('');
+        }
+
+        function tempRecStart() {
+            _tempActive = true; _tempStartTs = Date.now(); _lastTempRecTime = 0;
+            var s = document.getElementById('temp-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-temp-start').disabled = true;
+            document.getElementById('btn-temp-start').style.opacity = '0.5';
+            document.getElementById('btn-temp-stop').disabled = false;
+            document.getElementById('btn-temp-stop').style.opacity = '1';
+            _tempTimer = setInterval(_tempTick, 1000);
+            _tempUpdateBadge();
+            showToast('Rekam suhu & humidity dimulai', 'success');
+        }
+
+        function tempRecStop() {
+            _tempActive = false; clearInterval(_tempTimer);
+            document.getElementById('btn-temp-start').disabled = false;
+            document.getElementById('btn-temp-start').style.opacity = '1';
+            document.getElementById('btn-temp-stop').disabled = true;
+            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            _tempUpdateBadge();
+            showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
+        }
+
+        function tempRecClear() {
+            _tempRows = []; _tempActive = false; clearInterval(_tempTimer);
+            ['temp-rec-count','temp-rec-duration','temp-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
+            document.getElementById('btn-temp-start').disabled = false;
+            document.getElementById('btn-temp-start').style.opacity = '1';
+            document.getElementById('btn-temp-stop').disabled = true;
+            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            _tempUpdateBadge(); _tempUpdatePreview();
+            showToast('Data suhu dihapus', 'info');
+        }
+
+        function tempExportCSV() {
+            if (_tempRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\n';
+            var body = _tempRows.map(function(r) {
+                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
+            }).join('\n');
+            var now = new Date();
+            var fname = 'suhu_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_tempRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
+
+        // ==================== REKAM LUX & BRIGHTNESS ====================
+        var _luxRows = [], _luxActive = false, _luxStartTs = 0;
+        var _luxTimer = null, _lastLuxRecTime = 0;
+        var _LUX_REC_MS = 60000; // 1 menit
+
+        function _luxAddRow() {
+            var ts = new Date().toLocaleString('id-ID');
+            var get = function(id) { var e = document.getElementById(id); return e ? e.textContent : '--'; };
+            _luxRows.push({
+                ts: ts,
+                lux1: get('dash-lux1'), lux2: get('dash-lux2'), lux3: get('dash-lux3'),
+                avg: get('dash-lux-avg'), b1: get('dash-bright1'), b2: get('dash-bright2')
+            });
+            _luxUpdatePreview();
+            var c = document.getElementById('lux-rec-count');
+            if (c) c.textContent = _luxRows.length;
+        }
+
+        function _luxTick() {
+            if (!_luxActive) return;
+            var sec = Math.floor((Date.now() - _luxStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var d = document.getElementById('lux-rec-duration');
+            if (d) d.textContent = m + ':' + String(s).padStart(2, '0');
+            if (Date.now() - _lastLuxRecTime >= _LUX_REC_MS) {
+                _lastLuxRecTime = Date.now();
+                _luxAddRow();
+            }
+        }
+
+        function _luxUpdateBadge() {
+            var b = document.getElementById('lux-rec-badge');
+            if (!b) return;
+            if (_luxActive) {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+            } else {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
+            }
+        }
+
+        function _luxUpdatePreview() {
+            var tbody = document.getElementById('lux-rec-preview');
+            if (!tbody) return;
+            if (_luxRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                return;
+            }
+            var last5 = _luxRows.slice(-5).reverse();
+            tbody.innerHTML = last5.map(function(r, i) {
+                var bg = i % 2 === 0 ? 'background:rgba(234,179,8,0.03);' : '';
+                return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux2 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux3 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#f59e0b;">' + r.avg + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b2 + '</td></tr>';
+            }).join('');
+        }
+
+        function luxRecStart() {
+            _luxActive = true; _luxStartTs = Date.now(); _lastLuxRecTime = 0;
+            var s = document.getElementById('lux-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-lux-start').disabled = true;
+            document.getElementById('btn-lux-start').style.opacity = '0.5';
+            document.getElementById('btn-lux-stop').disabled = false;
+            document.getElementById('btn-lux-stop').style.opacity = '1';
+            _luxTimer = setInterval(_luxTick, 1000);
+            _luxUpdateBadge();
+            showToast('Rekam lux & brightness dimulai', 'success');
+        }
+
+        function luxRecStop() {
+            _luxActive = false; clearInterval(_luxTimer);
+            document.getElementById('btn-lux-start').disabled = false;
+            document.getElementById('btn-lux-start').style.opacity = '1';
+            document.getElementById('btn-lux-stop').disabled = true;
+            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            _luxUpdateBadge();
+            showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
+        }
+
+        function luxRecClear() {
+            _luxRows = []; _luxActive = false; clearInterval(_luxTimer);
+            ['lux-rec-count','lux-rec-duration','lux-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
+            document.getElementById('btn-lux-start').disabled = false;
+            document.getElementById('btn-lux-start').style.opacity = '1';
+            document.getElementById('btn-lux-stop').disabled = true;
+            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            _luxUpdateBadge(); _luxUpdatePreview();
+            showToast('Data lux dihapus', 'info');
+        }
+
+        function luxExportCSV() {
+            if (_luxRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
+            var body = _luxRows.map(function(r) {
+                return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
+            }).join('\n');
+            var now = new Date();
+            var fname = 'lux_brightness_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_luxRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
 
         // ==================== MQTT REAL-TIME UPDATE HANDLER ====================
         socket.on('mqtt_update', function(data) {
