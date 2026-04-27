@@ -8304,10 +8304,10 @@ HTML_TEMPLATE = '''
         var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
         var _MYSQL_MAX = 30;
 
-        socket.on('mysql_energy_update', function(data) {
-            var ac   = data.ac   || {};
-            var lamp = data.lamp || {};
-
+        // ── Fungsi update DOM energi (dipakai socket DAN direct-poll) ──
+        var _lastEnergyUpdate = 0;
+        function _applyEnergyData(ac, lamp) {
+            _lastEnergyUpdate = Date.now();
             var s = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
             var f = function(v, d) { return parseFloat(v || 0).toFixed(d !== undefined ? d : 1); };
 
@@ -8386,14 +8386,13 @@ HTML_TEMPLATE = '''
             s('lamp-pf-card',      f(lamp.pf, 2));
             s('total-freq-card',   f(ac.frequency, 2));
             s('energy-last-update', ac.updated_at ? ac.updated_at.substring(11,19) : '--');
-            // Estimasi biaya harian: power rata-rata * jam berjalan / 1000 * 1500
             var costEst = Math.round(totKwh * 1500);
             s('daily-cost', costEst > 0 ? costEst.toLocaleString() : '0');
 
-            // ── Ring buffer ──
-            var now = new Date();
-            var ts  = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
-            _mysqlBuf.labels.push(ts);
+            // ── Ring buffer & chart ──
+            var now2 = new Date();
+            var ts2  = now2.getHours() + ':' + String(now2.getMinutes()).padStart(2,'0') + ':' + String(now2.getSeconds()).padStart(2,'0');
+            _mysqlBuf.labels.push(ts2);
             _mysqlBuf.acV.push(parseFloat(ac.voltage||0));
             _mysqlBuf.lampV.push(parseFloat(lamp.voltage||0));
             _mysqlBuf.freq.push(parseFloat(ac.frequency||0));
@@ -8404,8 +8403,6 @@ HTML_TEMPLATE = '''
             if (_mysqlBuf.labels.length > _MYSQL_MAX) {
                 ['labels','acV','lampV','freq','acP','lampP','acA','lampA'].forEach(function(k){ _mysqlBuf[k].shift(); });
             }
-
-            // ── Chart updates ──
             if (charts.mysqlVoltFreq) {
                 charts.mysqlVoltFreq.data.labels = _mysqlBuf.labels.slice();
                 charts.mysqlVoltFreq.data.datasets[0].data = _mysqlBuf.acV.slice();
@@ -8425,7 +8422,49 @@ HTML_TEMPLATE = '''
                 charts.mysqlCurrent.data.datasets[1].data = _mysqlBuf.lampA.slice();
                 charts.mysqlCurrent.update('none');
             }
+        }
+
+        // ── Socket handler ──
+        socket.on('mysql_energy_update', function(data) {
+            _applyEnergyData(data.ac || {}, data.lamp || {});
         });
+
+        // ── Direct PHP polling fallback ──
+        // Jika socket tidak kirim data dalam 10 detik, browser fetch langsung ke PHP
+        var _PHP_ENERGY_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024';
+        var _phpPollErr = 0;
+        function _phpDirectPoll() {
+            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket masih aktif, skip
+            fetch(_PHP_ENERGY_URL)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data || data.error) { _phpPollErr++; return; }
+                    _phpPollErr = 0;
+                    var ac   = data.ac   || {};
+                    var lamp = data.lamp || {};
+                    // Hitung pf karena PHP tidak kirim pf langsung
+                    var acAp = parseFloat(ac.apparent_power||0);
+                    var lpAp = parseFloat(lamp.apparent_power||0);
+                    ac.pf   = acAp > 0 ? parseFloat((parseFloat(ac.active_power||0) / acAp).toFixed(3)) : 0;
+                    lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
+                    // Sesuaikan nama field: active_power → power, frekuensi → frequency
+                    ac.power       = ac.active_power;
+                    ac.energy      = ac.total_energy;
+                    ac.frequency   = ac.frekuensi;
+                    ac.voltage     = ac.tegangan;
+                    ac.current     = ac.arus;
+                    lamp.power     = lamp.active_power;
+                    lamp.energy    = lamp.total_energy;
+                    lamp.frequency = lamp.frekuensi;
+                    lamp.voltage   = lamp.tegangan;
+                    lamp.current   = lamp.arus;
+                    _applyEnergyData(ac, lamp);
+                })
+                .catch(function(e) { _phpPollErr++; console.warn('[PHP-poll] error:', e); });
+        }
+        setInterval(_phpDirectPoll, 6000);
+        // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
+        setTimeout(_phpDirectPoll, 3000);
 
         socket.on('mqtt_update', function(data) {
             updateDashboard();
