@@ -8128,74 +8128,9 @@ HTML_TEMPLATE = '''
                         optRunsEl.textContent = num(system.optimization_runs);
                     }
                     
-                    // Calculate AC power based on temperature logic
-                    let acPower = 0;
-                    const actualACState = temperature < 30 ? 'ON' : 'OFF';
-                    
-                    if (actualACState === 'ON') {
-                        acPower = fanSpeed === 1 ? 100 : (fanSpeed === 2 ? 200 : 300);
-                    }
-                    let lampPower = (num(lamp.brightness1) + num(lamp.brightness2) + num(lamp.brightness3)) / 255 * 10;
-                    let totalPower = acPower + lampPower;
-
-                    // Use real PZEM data if available, otherwise estimate
-                    let realPower = null;
-                    let realEnergyKwh = null;
-                    let realCurrent = null;
-                    if (energy && energy.connected) {
-                        realPower = num(energy.power);
-                        realEnergyKwh = num(energy.energy);
-                        realCurrent = num(energy.current);
-                    }
-
-                    let acEnergyKwh = (acPower / 1000) * 24;
-                    let lampEnergyKwh = (lampPower / 1000) * 24;
-                    let totalEnergyKwh = realEnergyKwh !== null ? realEnergyKwh : (acEnergyKwh + lampEnergyKwh);
-                    let displayPower = realPower !== null ? realPower : totalPower;
-                    let dailyCost = totalEnergyKwh * 1500;
-                    
-                    setText('ac-power',        acPower.toFixed(0));
-                    setText('lamp-power',       lampPower.toFixed(1));
-                    setText('total-power',      displayPower.toFixed(1));
-                    setText('total-current',    realCurrent !== null ? realCurrent.toFixed(2) : '0');
-                    setText('ac-energy-kwh',    acEnergyKwh.toFixed(2));
-                    setText('lamp-energy-kwh',  lampEnergyKwh.toFixed(2));
-                    setText('total-energy-kwh', totalEnergyKwh.toFixed(3));
-                    setText('daily-cost',       dailyCost.toFixed(0));
-
-                    // Energy Monitor (PZEM-016) data
-                    if (energy) {
-                        const e = energy;
-                        const eVolt = document.getElementById('energy-voltage');
-                        const eCurr = document.getElementById('energy-current');
-                        const ePow = document.getElementById('energy-power');
-                        const eKwh = document.getElementById('energy-kwh');
-                        const eFreq = document.getElementById('energy-freq');
-                        const ePf = document.getElementById('energy-pf');
-                        const eCost = document.getElementById('energy-cost');
-                        const eBadge = document.getElementById('energy-status-badge');
-                        if (eVolt) eVolt.textContent = parseFloat(e.voltage || 0).toFixed(1);
-                        if (eCurr) eCurr.textContent = parseFloat(e.current || 0).toFixed(2);
-                        if (ePow) ePow.textContent = parseFloat(e.power || 0).toFixed(1);
-                        if (eKwh) eKwh.textContent = parseFloat(e.energy || 0).toFixed(3);
-                        if (eFreq) eFreq.textContent = parseFloat(e.frequency || 0).toFixed(1);
-                        if (ePf) ePf.textContent = parseFloat(e.pf || 0).toFixed(2);
-                        if (eCost) {
-                            const cost = parseFloat(e.energy || 0) * 1500;
-                            eCost.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
-                        }
-                        if (eBadge) {
-                            if (e.connected) {
-                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
-                                eBadge.style.background = 'rgba(16, 185, 129, 0.15)';
-                                eBadge.style.color = '#10b981';
-                            } else {
-                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
-                                eBadge.style.background = 'rgba(107, 114, 128, 0.15)';
-                                eBadge.style.color = '#6b7280';
-                            }
-                        }
-                    }
+                    // Energy data dihandle oleh mysql_energy_update event
+                    // (ac-power, lamp-power, total-power, total-current, total-energy-kwh,
+                    //  daily-cost diisi langsung dari MySQL via socket)
 
                     updateModeBadges();
                 } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
@@ -8532,50 +8467,13 @@ HTML_TEMPLATE = '''
             
             if (data.type === 'energy') {
                 const e = data.data;
-                const voltEl = document.getElementById('energy-voltage');
-                const currEl = document.getElementById('energy-current');
-                const powEl = document.getElementById('energy-power');
-                const kwhEl = document.getElementById('energy-kwh');
-                const freqEl = document.getElementById('energy-freq');
-                const pfEl = document.getElementById('energy-pf');
-                const costEl = document.getElementById('energy-cost');
-                const badge = document.getElementById('energy-status-badge');
-                
-                if (voltEl) voltEl.textContent = parseFloat(e.voltage || 0).toFixed(1);
-                if (currEl) currEl.textContent = parseFloat(e.current || 0).toFixed(2);
-                if (powEl) powEl.textContent = parseFloat(e.power || 0).toFixed(1);
-                if (kwhEl) kwhEl.textContent = parseFloat(e.energy || 0).toFixed(3);
-                if (freqEl) freqEl.textContent = parseFloat(e.frequency || 0).toFixed(1);
-                if (pfEl) pfEl.textContent = parseFloat(e.pf || 0).toFixed(2);
-                
-                // Estimasi biaya: tarif PLN R1/1300VA = Rp 1.444,70/kWh
-                if (costEl) {
-                    const cost = parseFloat(e.energy || 0) * 1444.70;
-                    costEl.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
-                }
-                
-                if (badge) {
-                    if (e.connected) {
-                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
-                        badge.style.background = 'rgba(16, 185, 129, 0.15)';
-                        badge.style.color = '#10b981';
-                        badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    } else {
-                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
-                        badge.style.background = 'rgba(107, 114, 128, 0.15)';
-                        badge.style.color = '#6b7280';
-                        badge.style.borderColor = 'rgba(107, 114, 128, 0.3)';
-                    }
-                }
-                
-                // Show energy data bubble notification
+                // Tampilkan bubble notifikasi jika ada daya
                 const pwr = parseFloat(e.power || 0);
                 const vlt = parseFloat(e.voltage || 0);
                 const cur = parseFloat(e.current || 0);
                 if (pwr > 0 || vlt > 0) {
                     showEnergyBubble(pwr, vlt, cur);
                 }
-
             }
 
             // Real-time optimization (GA->AC / PSO->Lamp) updates
