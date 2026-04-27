@@ -1,14 +1,14 @@
 """
 mysql_energy.py — HTTP Energy Polling untuk Smart Room Dashboard
 ================================================================
-Fetch AC (id_kwh=1) + Lamp (id_kwh=2) dari PHP proxy Jagoan Hosting.
+Fetch AC (id_kwh=1) + Lamp (id_kwh=3) dari PHP proxy Jagoan Hosting.
 
 Arsitektur:
   RPi (Flask) -> HTTP GET -> api_energy.php -> MySQL -> JSON -> RPi
 
 Response PHP: {"ac": {...}, "lamp": {...}}
   id_kwh=1 -> AC   : tegangan/arus/active_power/frekuensi/total_energy
-  id_kwh=2 -> Lampu: tegangan/arus/active_power/frekuensi/total_energy
+  id_kwh=3 -> Lampu: tegangan/arus/active_power/frekuensi/total_energy
 """
 
 import threading
@@ -242,7 +242,7 @@ def test_connection():
         if not data:
             print('Koneksi OK tapi data kosong.')
             return True
-        for label, row in [('AC  (id_kwh=1)', data.get('ac')), ('Lamp (id_kwh=2)', data.get('lamp'))]:
+        for label, row in [('AC  (id_kwh=1)', data.get('ac')), ('Lamp (id_kwh=3)', data.get('lamp'))]:
             print(f'\n--- {label} ---')
             if row:
                 for k, v in row.items():
