@@ -2060,6 +2060,20 @@ def occupancy_feedback_submit():
 def occupancy_feedback_list():
     return jsonify({'feedback': list(occupancy_feedback)[:20]})
 
+# ── Server-side recording state (shared across all devices) ──
+_rec_state = {'energy': False, 'temp': False, 'lux': False}
+
+@app.route('/api/rec/state', methods=['GET', 'POST'])
+def rec_state_api():
+    global _rec_state
+    if request.method == 'POST':
+        data = request.get_json(force=True) or {}
+        for k in ('energy', 'temp', 'lux'):
+            if k in data:
+                _rec_state[k] = bool(data[k])
+        return jsonify({'ok': True, 'state': _rec_state})
+    return jsonify(_rec_state)
+
 @app.route('/api/chart/<measurement>/<field>/<int:hours>')
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
@@ -8558,12 +8572,13 @@ HTML_TEMPLATE = '''
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
                     // Sesuaikan nama field: active_power → power, frekuensi → frequency
                     ac.power       = ac.active_power;
-                    ac.energy      = ac.total_energy;
+                    // total_energy dari DB dalam satuan Wh → bagi 1000 untuk kWh
+                    ac.energy      = parseFloat(ac.total_energy || 0) / 1000;
                     ac.frequency   = ac.frekuensi;
                     ac.voltage     = ac.tegangan;
                     ac.current     = ac.arus;
                     lamp.power     = lamp.active_power;
-                    lamp.energy    = lamp.total_energy;
+                    lamp.energy    = parseFloat(lamp.total_energy || 0) / 1000;
                     lamp.frequency = lamp.frekuensi;
                     lamp.voltage   = lamp.tegangan;
                     lamp.current   = lamp.arus;
@@ -8575,10 +8590,43 @@ HTML_TEMPLATE = '''
         // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
         setTimeout(_phpDirectPoll, 3000);
 
-        // ==================== SESSION STORAGE PERSISTENCE ====================
-        // Save/restore recording state across page refresh using sessionStorage
+        // ==================== SESSION STORAGE + SERVER STATE PERSISTENCE ====================
         function _ssSave(key, val) { try { sessionStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
         function _ssLoad(key, def) { try { var v = sessionStorage.getItem(key); return v !== null ? JSON.parse(v) : def; } catch(e) { return def; } }
+        // Push recording state to server so other devices see badges
+        function _recStatePush(obj) {
+            fetch('/api/rec/state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj) }).catch(function(){});
+        }
+        // Poll server state every 5 s to update badges on all devices
+        function _recStatePoll() {
+            fetch('/api/rec/state').then(function(r){ return r.json(); }).then(function(st) {
+                // Only update badge if this device is not the one recording (to avoid overwriting active timer)
+                if (!_recActive) {
+                    var badge = document.getElementById('rec-status-badge');
+                    if (badge) {
+                        if (st.energy) {
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                            badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                        } else { _recUpdateBadge(); }
+                    }
+                }
+                if (!_tempActive) {
+                    var tb = document.getElementById('temp-rec-badge');
+                    if (tb && st.temp) {
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                    } else if (tb && !st.temp) { _tempUpdateBadge(); }
+                }
+                if (!_luxActive) {
+                    var lb = document.getElementById('lux-rec-badge');
+                    if (lb && st.lux) {
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                    } else if (lb && !st.lux) { _luxUpdateBadge(); }
+                }
+            }).catch(function(){});
+        }
+        setInterval(_recStatePoll, 5000);
 
         // ==================== ENERGY RECORDING & CSV EXPORT ====================
         var _recRows    = _ssLoad('_recRows', []);
@@ -8677,6 +8725,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-rec-stop').style.opacity = '1';
             _recTimer = setInterval(_recTick, 1000);
             _recUpdateBadge();
+            _recStatePush({energy: true});
             showToast('Rekam data dimulai', 'success');
         }
 
@@ -8688,6 +8737,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-rec-stop').disabled = true;
             document.getElementById('btn-rec-stop').style.opacity = '0.5';
             _recUpdateBadge();
+            _recStatePush({energy: false});
             showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
         }
 
@@ -8814,6 +8864,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-temp-stop').style.opacity = '1';
             _tempTimer = setInterval(_tempTick, 1000);
             _tempUpdateBadge();
+            _recStatePush({temp: true});
             showToast('Rekam suhu & humidity dimulai', 'success');
         }
 
@@ -8824,6 +8875,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-temp-stop').disabled = true;
             document.getElementById('btn-temp-stop').style.opacity = '0.5';
             _tempUpdateBadge();
+            _recStatePush({temp: false});
             showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
         }
 
@@ -8925,6 +8977,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-lux-stop').style.opacity = '1';
             _luxTimer = setInterval(_luxTick, 1000);
             _luxUpdateBadge();
+            _recStatePush({lux: true});
             showToast('Rekam lux & brightness dimulai', 'success');
         }
 
@@ -8935,6 +8988,7 @@ HTML_TEMPLATE = '''
             document.getElementById('btn-lux-stop').disabled = true;
             document.getElementById('btn-lux-stop').style.opacity = '0.5';
             _luxUpdateBadge();
+            _recStatePush({lux: false});
             showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
         }
 
