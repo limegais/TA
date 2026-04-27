@@ -6051,7 +6051,12 @@ HTML_TEMPLATE = '''
             var avg = values.reduce(function(a,b){ return a+b; }, 0) / values.length;
             var latest = values[values.length - 1];
             var unit = {power:'W', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
-            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v.toFixed(field==='energy_kwh'?4:2) + ' ' + unit; };
+            var fmt = function(v) {
+                return field === 'energy_kwh'
+                    ? v.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+                    : v.toFixed(2);
+            };
+            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
             if (field === 'power') { setEl('lamp-power-latest', latest); setEl('lamp-power-avg', avg); }
             else if (field === 'current') { setEl('lamp-current-latest', latest); setEl('lamp-current-avg', avg); }
             else if (field === 'energy_kwh') { setEl('lamp-kwh-latest', latest); setEl('lamp-kwh-avg', avg); }
@@ -6079,10 +6084,15 @@ HTML_TEMPLATE = '''
                 .then(d => {
                     if (d.error) return;
                     var setText = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; };
+                    var fmtKwh = function(v) {
+                        var num = parseFloat(v || 0);
+                        if (!Number.isFinite(num)) return '--';
+                        return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+                    };
                     setText('daily-summary-date', d.date || '--');
-                    setText('ds-ac-kwh',       d.ac ? d.ac.kwh.toFixed(4) : '--');
-                    setText('ds-lamp-kwh',     d.lamp ? d.lamp.kwh.toFixed(4) : '--');
-                    setText('ds-total-kwh',    d.total_kwh !== undefined ? d.total_kwh.toFixed(4) : '--');
+                    setText('ds-ac-kwh',       d.ac ? fmtKwh(d.ac.kwh) : '--');
+                    setText('ds-lamp-kwh',     d.lamp ? fmtKwh(d.lamp.kwh) : '--');
+                    setText('ds-total-kwh',    d.total_kwh !== undefined ? fmtKwh(d.total_kwh) : '--');
                     setText('ds-cost',         d.cost_rp !== undefined ? d.cost_rp.toLocaleString() : '--');
                     setText('ds-ac-peak',      d.ac ? d.ac.power_peak_w.toFixed(1) : '--');
                     setText('ds-lamp-peak',    d.lamp ? d.lamp.power_peak_w.toFixed(1) : '--');
@@ -8263,6 +8273,11 @@ HTML_TEMPLATE = '''
             _lastEnergyUpdate = Date.now();
             var s = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
             var f = function(v, d) { return parseFloat(v || 0).toFixed(d !== undefined ? d : 1); };
+            var fkwh = function(v) {
+                var num = parseFloat(v || 0);
+                if (!Number.isFinite(num)) return '0';
+                return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+            };
 
             // ── Overview page badge + mini cards ──
             var badge = document.getElementById('mysql-energy-badge');
@@ -8271,11 +8286,11 @@ HTML_TEMPLATE = '''
                 badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
             }
             s('mysql-ac-voltage', f(ac.voltage));       s('mysql-ac-current', f(ac.current, 2));
-            s('mysql-ac-power',   f(ac.power));         s('mysql-ac-kwh',     f(ac.energy, 4));
+            s('mysql-ac-power',   f(ac.power));         s('mysql-ac-kwh',     fkwh(ac.energy));
             s('mysql-ac-freq',    f(ac.frequency, 2));  s('mysql-ac-pf',      f(ac.pf, 2));
             s('mysql-ac-ts',      ac.updated_at || '--');
             s('mysql-lamp-voltage', f(lamp.voltage));     s('mysql-lamp-current', f(lamp.current, 2));
-            s('mysql-lamp-power',   f(lamp.power));       s('mysql-lamp-kwh',     f(lamp.energy, 4));
+            s('mysql-lamp-power',   f(lamp.power));       s('mysql-lamp-kwh',     fkwh(lamp.energy));
             s('mysql-lamp-freq',    f(lamp.frequency, 2)); s('mysql-lamp-pf',     f(lamp.pf, 2));
             s('mysql-lamp-ts',      lamp.updated_at || '--');
 
@@ -8286,11 +8301,11 @@ HTML_TEMPLATE = '''
                 liveBadge.style.cssText = 'padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
             }
             s('eu-ac-voltage', f(ac.voltage));       s('eu-ac-current', f(ac.current, 2));
-            s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     f(ac.energy, 4));
+            s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     fkwh(ac.energy));
             s('eu-ac-freq',    f(ac.frequency, 2));  s('eu-ac-pf',      f(ac.pf, 2));
             s('eu-ac-ts',      ac.updated_at || '--');
             s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
-            s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     f(lamp.energy, 4));
+            s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     fkwh(lamp.energy));
             s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
             s('eu-lamp-ts',      lamp.updated_at || '--');
 
@@ -8328,9 +8343,9 @@ HTML_TEMPLATE = '''
             s('lamp-power', lampPow.toFixed(1));
             s('total-power',   totPow.toFixed(1));
             s('total-current', (parseFloat(ac.current||0) + parseFloat(lamp.current||0)).toFixed(2));
-            s('ac-energy-kwh',   acKwh.toFixed(4));
-            s('lamp-energy-kwh', lampKwh.toFixed(4));
-            s('total-energy-kwh', totKwh.toFixed(4));
+            s('ac-energy-kwh',   fkwh(acKwh));
+            s('lamp-energy-kwh', fkwh(lampKwh));
+            s('total-energy-kwh', fkwh(totKwh));
             s('ac-voltage-card',  f(ac.voltage));
             s('ac-current-card',  f(ac.current, 2));
             s('ac-pf-card',       f(ac.pf, 2));
@@ -8410,13 +8425,13 @@ HTML_TEMPLATE = '''
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
                     // Sesuaikan nama field: active_power → power, frekuensi → frequency
                     ac.power       = ac.active_power;
-                    // total_energy dari DB dalam satuan Wh → bagi 1000 untuk kWh
-                    ac.energy      = parseFloat(ac.total_energy || 0) / 1000;
+                    // total_energy dari DB sudah dalam kWh (tabel energy_kwh)
+                    ac.energy      = parseFloat(ac.total_energy || 0);
                     ac.frequency   = ac.frekuensi;
                     ac.voltage     = ac.tegangan;
                     ac.current     = ac.arus;
                     lamp.power     = lamp.active_power;
-                    lamp.energy    = parseFloat(lamp.total_energy || 0) / 1000;
+                    lamp.energy    = parseFloat(lamp.total_energy || 0);
                     lamp.frequency = lamp.frekuensi;
                     lamp.voltage   = lamp.tegangan;
                     lamp.current   = lamp.arus;
