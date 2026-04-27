@@ -8166,14 +8166,14 @@ HTML_TEMPLATE = '''
                     let displayPower = realPower !== null ? realPower : totalPower;
                     let dailyCost = totalEnergyKwh * 1500;
                     
-                    document.getElementById('ac-power').textContent = acPower.toFixed(0);
-                    document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
-                    document.getElementById('total-power').textContent = displayPower.toFixed(1);
-                    document.getElementById('total-current').textContent = realCurrent !== null ? realCurrent.toFixed(2) : '0';
-                    document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
-                    document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
-                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
-                    document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
+                    setText('ac-power',        acPower.toFixed(0));
+                    setText('lamp-power',       lampPower.toFixed(1));
+                    setText('total-power',      displayPower.toFixed(1));
+                    setText('total-current',    realCurrent !== null ? realCurrent.toFixed(2) : '0');
+                    setText('ac-energy-kwh',    acEnergyKwh.toFixed(2));
+                    setText('lamp-energy-kwh',  lampEnergyKwh.toFixed(2));
+                    setText('total-energy-kwh', totalEnergyKwh.toFixed(3));
+                    setText('daily-cost',       dailyCost.toFixed(0));
 
                     if (charts.energy) {
                         const now = new Date();
