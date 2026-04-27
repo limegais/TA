@@ -8696,16 +8696,20 @@ HTML_TEMPLATE = '''
         }
         function _recServerFetch() {
             fetch('/api/rec/data?type=energy').then(function(r){ return r.json(); }).then(function(d){
-                if (d.rows && d.rows.length > _recRows.length) {
+                if (!d.rows) return;
+                // Always sync from server when not recording — server is source of truth
+                // This fixes stale sessionStorage showing wrong data on other devices
+                if (d.rows.length !== _recRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_recRows[_recRows.length-1])) {
                     _recRows = d.rows; _ssSave('_recRows', _recRows); _recUpdatePreview();
-                    var b = document.getElementById('rec-sync-badge');
-                    if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
                 }
+                var b = document.getElementById('rec-sync-badge');
+                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
             }).catch(function(){});
         }
         function _recServerDelete() { fetch('/api/rec/data?type=energy', {method:'DELETE'}).catch(function(){}); }
-        // Poll server for new rows every 10 s (for passive devices)
-        setInterval(function(){ if (!_recActive) _recServerFetch(); }, 10000);
+        // Poll server for rows every 5 s on passive devices (matches badge poll speed)
+        setInterval(function(){ if (!_recActive) _recServerFetch(); }, 5000);
 
         function recSetFilter(f) {
             _recFilter = f;
@@ -8886,14 +8890,16 @@ HTML_TEMPLATE = '''
         }
         function _tempServerFetch() {
             fetch('/api/rec/data?type=temp').then(function(r){ return r.json(); }).then(function(d){
-                if (d.rows && d.rows.length > _tempRows.length) {
+                if (!d.rows) return;
+                if (d.rows.length !== _tempRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_tempRows[_tempRows.length-1])) {
                     _tempRows = d.rows; _ssSave('_tempRows', _tempRows); _tempUpdatePreview();
                     var c = document.getElementById('temp-rec-count'); if (c) c.textContent = _tempRows.length;
                 }
             }).catch(function(){});
         }
         function _tempServerDelete() { fetch('/api/rec/data?type=temp', {method:'DELETE'}).catch(function(){}); }
-        setInterval(function(){ if (!_tempActive) _tempServerFetch(); }, 10000);
+        setInterval(function(){ if (!_tempActive) _tempServerFetch(); }, 5000);
 
         var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
         var _tempTimer = null, _lastTempRecTime = 0;
@@ -9020,14 +9026,16 @@ HTML_TEMPLATE = '''
         }
         function _luxServerFetch() {
             fetch('/api/rec/data?type=lux').then(function(r){ return r.json(); }).then(function(d){
-                if (d.rows && d.rows.length > _luxRows.length) {
+                if (!d.rows) return;
+                if (d.rows.length !== _luxRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_luxRows[_luxRows.length-1])) {
                     _luxRows = d.rows; _ssSave('_luxRows', _luxRows); _luxUpdatePreview();
                     var c = document.getElementById('lux-rec-count'); if (c) c.textContent = _luxRows.length;
                 }
             }).catch(function(){});
         }
         function _luxServerDelete() { fetch('/api/rec/data?type=lux', {method:'DELETE'}).catch(function(){}); }
-        setInterval(function(){ if (!_luxActive) _luxServerFetch(); }, 10000);
+        setInterval(function(){ if (!_luxActive) _luxServerFetch(); }, 5000);
 
         var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
         var _luxTimer = null, _lastLuxRecTime = 0;
