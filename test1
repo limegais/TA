@@ -4335,6 +4335,44 @@ HTML_TEMPLATE = '''
                     </button>
                 </div>
             </div>
+
+            <!-- ===== PANEL OCCUPANCY HARIAN ===== -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Grafik Occupancy Harian</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Jumlah orang terdeteksi per jam (otomatis direkam setiap jam) &mdash; max 24 data/hari</p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
+                        <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-size:12px;">
+                    <span style="color:var(--text-secondary);">Data hari ini: <strong id="occ-count" style="color:#a855f7;">0</strong> jam tercatat</span>
+                    <span style="color:var(--text-secondary);">Jam berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total terdeteksi hari ini: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang/jam</span>
+                </div>
+                <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
+                    <canvas id="occChart"></canvas>
+                </div>
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                        <thead>
+                            <tr style="background:rgba(168,85,247,0.08);">
+                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Waktu</th>
+                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Jam</th>
+                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Jumlah Orang</th>
+                                <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="occ-preview-body">
+                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Energy Usage Page -->
@@ -8537,9 +8575,14 @@ HTML_TEMPLATE = '''
         // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
         setTimeout(_phpDirectPoll, 3000);
 
+        // ==================== SESSION STORAGE PERSISTENCE ====================
+        // Save/restore recording state across page refresh using sessionStorage
+        function _ssSave(key, val) { try { sessionStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+        function _ssLoad(key, def) { try { var v = sessionStorage.getItem(key); return v !== null ? JSON.parse(v) : def; } catch(e) { return def; } }
+
         // ==================== ENERGY RECORDING & CSV EXPORT ====================
-        var _recRows    = [];       // array baris yang direkam
-        var _recActive  = false;
+        var _recRows    = _ssLoad('_recRows', []);
+        var _recActive  = false;  // never auto-resume active state; user must press start
         var _recStartTs = null;
         var _recTimer   = null;
 
@@ -8620,6 +8663,7 @@ HTML_TEMPLATE = '''
                 pf:       _recFmt(lamp.pf, 3),
             });
             _recUpdatePreview();
+            _ssSave('_recRows', _recRows);
         }
 
         function energyRecStart() {
@@ -8651,6 +8695,7 @@ HTML_TEMPLATE = '''
             _recRows = [];
             _recActive = false;
             clearInterval(_recTimer);
+            sessionStorage.removeItem('_recRows');
             var countEl = document.getElementById('rec-count');
             var durEl   = document.getElementById('rec-duration');
             var startEl = document.getElementById('rec-start-time');
@@ -8697,7 +8742,7 @@ HTML_TEMPLATE = '''
         };
 
         // ==================== REKAM SUHU & HUMIDITY ====================
-        var _tempRows = [], _tempActive = false, _tempStartTs = 0;
+        var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
         var _tempTimer = null, _lastTempRecTime = 0;
         var _TEMP_REC_MS = 60000; // 1 menit
 
@@ -8714,6 +8759,7 @@ HTML_TEMPLATE = '''
             _tempUpdatePreview();
             var c = document.getElementById('temp-rec-count');
             if (c) c.textContent = _tempRows.length;
+            _ssSave('_tempRows', _tempRows);
         }
 
         function _tempTick() {
@@ -8783,6 +8829,7 @@ HTML_TEMPLATE = '''
 
         function tempRecClear() {
             _tempRows = []; _tempActive = false; clearInterval(_tempTimer);
+            sessionStorage.removeItem('_tempRows');
             ['temp-rec-count','temp-rec-duration','temp-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
             document.getElementById('btn-temp-start').disabled = false;
             document.getElementById('btn-temp-start').style.opacity = '1';
@@ -8807,7 +8854,7 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== REKAM LUX & BRIGHTNESS ====================
-        var _luxRows = [], _luxActive = false, _luxStartTs = 0;
+        var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
         var _luxTimer = null, _lastLuxRecTime = 0;
         var _LUX_REC_MS = 60000; // 1 menit
 
@@ -8822,6 +8869,7 @@ HTML_TEMPLATE = '''
             _luxUpdatePreview();
             var c = document.getElementById('lux-rec-count');
             if (c) c.textContent = _luxRows.length;
+            _ssSave('_luxRows', _luxRows);
         }
 
         function _luxTick() {
@@ -8892,6 +8940,7 @@ HTML_TEMPLATE = '''
 
         function luxRecClear() {
             _luxRows = []; _luxActive = false; clearInterval(_luxTimer);
+            sessionStorage.removeItem('_luxRows');
             ['lux-rec-count','lux-rec-duration','lux-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
             document.getElementById('btn-lux-start').disabled = false;
             document.getElementById('btn-lux-start').style.opacity = '1';
@@ -8914,6 +8963,151 @@ HTML_TEMPLATE = '''
             downloadCSV(fname, header + body);
             showToast(_luxRows.length + ' baris berhasil diekspor: ' + fname, 'success');
         }
+
+        // ==================== OCCUPANCY DAILY RECORDING ====================
+        var _occRows    = _ssLoad('_occRows', []);   // {ts, hour, count, conf}
+        var _occLastHour = -1;                        // last recorded hour (-1 = none yet)
+        var _OCC_REC_LABEL = Array.from({length:24}, function(_,i){ return String(i).padStart(2,'0') + ':00'; });
+        var _occChart   = null;
+
+        // Restore last recorded hour from session
+        if (_occRows.length > 0) {
+            _occLastHour = _occRows[_occRows.length - 1].hour;
+        }
+
+        function _occInitChart() {
+            var ctx = document.getElementById('occChart');
+            if (!ctx || _occChart) return;
+            _occChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: _OCC_REC_LABEL,
+                    datasets: [{
+                        label: 'Jumlah Orang',
+                        data: new Array(24).fill(null),
+                        backgroundColor: 'rgba(168,85,247,0.5)',
+                        borderColor: '#a855f7',
+                        borderWidth: 1,
+                        borderRadius: 5,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false }, tooltip: {
+                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' orang' : 'Belum direkam'; } }
+                    }},
+                    scales: {
+                        x: { ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', maxRotation: 0 } },
+                        y: { beginAtZero: true, ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', stepSize: 1 },
+                             title: { display: true, text: 'Jumlah Orang', font: {size:10}, color: '#a855f7' } }
+                    }
+                }
+            });
+            _occRefreshChart();
+        }
+
+        function _occRefreshChart() {
+            if (!_occChart) return;
+            var data = new Array(24).fill(null);
+            _occRows.forEach(function(r) { if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
+            _occChart.data.datasets[0].data = data;
+            _occChart.update('none');
+            var total = _occRows.reduce(function(s,r){ return s + (r.count || 0); }, 0);
+            var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = total;
+            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = _occRows.length;
+            _occUpdatePreview();
+        }
+
+        function _occUpdatePreview() {
+            var tbody = document.getElementById('occ-preview-body');
+            if (!tbody) return;
+            if (_occRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>';
+                return;
+            }
+            tbody.innerHTML = _occRows.slice().reverse().map(function(r) {
+                return '<tr style="border-bottom:1px solid var(--border);">' +
+                    '<td style="padding:6px 12px;color:var(--text-secondary);">' + r.ts + '</td>' +
+                    '<td style="padding:6px 12px;text-align:center;font-weight:700;color:#a855f7;">' + String(r.hour).padStart(2,'0') + ':00</td>' +
+                    '<td style="padding:6px 12px;text-align:right;font-weight:700;color:#10b981;">' + r.count + '</td>' +
+                    '<td style="padding:6px 12px;text-align:right;color:var(--text-secondary);">' + r.conf + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function _occTryRecord() {
+            var now = new Date();
+            var h = now.getHours();
+            if (h === _occLastHour) return;   // already recorded this hour
+            // Check if it's a new day → reset
+            if (_occRows.length > 0) {
+                var lastDate = _occRows[0].ts.substring(0, 10);
+                var today    = now.toISOString().substring(0, 10);
+                if (lastDate !== today) {
+                    _occRows = [];
+                    _occLastHour = -1;
+                    sessionStorage.removeItem('_occRows');
+                    if (_occChart) {
+                        _occChart.data.datasets[0].data = new Array(24).fill(null);
+                        _occChart.update('none');
+                    }
+                }
+            }
+            var countEl = document.getElementById('cam-count-display');
+            var confEl  = document.getElementById('cam-confidence-display');
+            var count   = parseInt((countEl ? countEl.textContent : '0') || '0', 10);
+            var confStr = confEl ? confEl.textContent.replace('%','').trim() : '0';
+            var conf    = parseFloat(confStr) || 0;
+            var ts = now.toISOString().replace('T',' ').substring(0,19);
+            _occRows.push({ ts: ts, hour: h, count: count, conf: conf.toFixed(1) + '%' });
+            _occLastHour = h;
+            _ssSave('_occRows', _occRows);
+            _occRefreshChart();
+            showToast('Occupancy jam ' + String(h).padStart(2,'0') + ':00 direkam — ' + count + ' orang', 'info');
+        }
+
+        function occClear() {
+            _occRows = []; _occLastHour = -1;
+            sessionStorage.removeItem('_occRows');
+            if (_occChart) { _occChart.data.datasets[0].data = new Array(24).fill(null); _occChart.update('none'); }
+            _occUpdatePreview();
+            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = '0';
+            var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = '0';
+            showToast('Data occupancy dihapus', 'info');
+        }
+
+        function occExportCSV() {
+            if (_occRows.length === 0) { showToast('Belum ada data occupancy', 'error'); return; }
+            var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+            var body = _occRows.map(function(r) {
+                return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
+            }).join('\\n');
+            var now = new Date();
+            var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_occRows.length + ' data berhasil diekspor: ' + fname, 'success');
+        }
+
+        // Run occupancy check every 60 seconds; reset and record new hour
+        setInterval(function() {
+            try { _occTryRecord(); } catch(e) {}
+        }, 60000);
+        // Update "next record in" countdown every second
+        setInterval(function() {
+            try {
+                var now = new Date();
+                var minsLeft = 59 - now.getMinutes();
+                var secsLeft = 59 - now.getSeconds();
+                var el = document.getElementById('occ-next-in');
+                if (el) el.textContent = minsLeft + ' mnt ' + String(secsLeft).padStart(2,'0') + ' dtk';
+            } catch(e) {}
+        }, 1000);
+        // Also init chart once DOM is ready (delayed)
+        setTimeout(function() {
+            try { _occInitChart(); _occRefreshChart(); } catch(e) {}
+        }, 500);
 
         // ==================== MQTT REAL-TIME UPDATE HANDLER ====================
         socket.on('mqtt_update', function(data) {
@@ -9319,6 +9513,11 @@ HTML_TEMPLATE = '''
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
             try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
+            // Restore recording previews from sessionStorage
+            try { _recUpdatePreview(); } catch(e) {}
+            try { _tempUpdatePreview(); } catch(e) {}
+            try { _luxUpdatePreview(); } catch(e) {}
+            try { _occInitChart(); } catch(e) {}
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
             try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
             try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
