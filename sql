@@ -54,24 +54,27 @@ def _build_energy_dict(row, label='ac'):
     """Konversi row PHP JSON -> dict energy."""
     if not row:
         return None
-    tegangan       = _safe_float(row.get('tegangan'))
-    arus           = _safe_float(row.get('arus'))
-    active_power   = _safe_float(row.get('active_power'))
-    apparent_power = _safe_float(row.get('apparent_power'))
-    total_energy   = _safe_float(row.get('total_energy'))
-    frekuensi      = _safe_float(row.get('frekuensi'))
+    tegangan        = _safe_float(row.get('tegangan'))
+    arus            = _safe_float(row.get('arus'))
+    active_power    = _safe_float(row.get('active_power'))
+    reactive_power  = _safe_float(row.get('reactive_power'))
+    apparent_power  = _safe_float(row.get('apparent_power'))
+    total_energy    = _safe_float(row.get('total_energy'))
+    frekuensi       = _safe_float(row.get('frekuensi'))
     pf = round(active_power / apparent_power, 3) if apparent_power > 0.001 else 0.0
     return {
-        'label':     label,
-        'voltage':   tegangan,
-        'current':   arus,
-        'power':     active_power,
-        'energy':    total_energy,
-        'frequency': frekuensi,
-        'pf':        pf,
-        'connected': True,
-        'source':    'mysql',
-        'updated_at': str(row.get('created_at', '')),
+        'label':          label,
+        'voltage':        tegangan,
+        'current':        arus,
+        'power':          active_power,
+        'reactive_power': reactive_power,
+        'apparent_power': apparent_power,
+        'energy':         total_energy,
+        'frequency':      frekuensi,
+        'pf':             pf,
+        'connected':      True,
+        'source':         'mysql',
+        'updated_at':     str(row.get('created_at', '')),
     }
 
 
