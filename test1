@@ -2262,6 +2262,89 @@ def energy_compare():
         print(f"[ERROR] Energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
+@app.route('/api/energy/export-csv')
+def energy_export_csv():
+    """Export data energi sebagai CSV — dari ring buffer realtime atau PHP proxy.
+    ?device=ac|lamp|all   (default: all)
+    ?source=realtime|php  (default: php — ambil dari PHP proxy)
+    """
+    import io, csv as csv_mod
+
+    device = request.args.get('device', 'all')   # ac, lamp, all
+    source = request.args.get('source', 'php')   # php atau realtime
+
+    rows = []
+
+    if source == 'realtime':
+        # Ambil dari ring buffer _mysqlBuf yang ada di JS — tidak bisa langsung.
+        # Gunakan energy_runtime_history yang ada di Python.
+        with _recording_lock:
+            hist = list(energy_runtime_history)
+        for rec in hist:
+            rows.append({
+                'timestamp': rec.get('ts', '').strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec.get('ts',''), 'strftime') else str(rec.get('ts','')),
+                'device':    'AC',
+                'tegangan':  rec.get('voltage', 0),
+                'arus':      rec.get('current', 0),
+                'daya_aktif':rec.get('power', 0),
+                'energi_kwh':rec.get('energy_kwh', 0),
+                'frekuensi': rec.get('frequency', 0),
+                'pf':        rec.get('power_factor', 0),
+                'reaktif':   '',
+                'semu':      '',
+            })
+    else:
+        # Ambil langsung dari PHP proxy (fresh data)
+        import urllib.request as _ureq, json as _json
+        PHP_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024'
+        try:
+            req = _ureq.Request(PHP_URL, headers={'User-Agent': 'SmartRoom-Export/1.0'})
+            with _ureq.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+        except Exception as ex:
+            return jsonify({'error': f'Gagal ambil data PHP: {ex}'}), 502
+
+        if 'error' in data:
+            return jsonify({'error': data['error']}), 500
+
+        def _row(d, label):
+            ap = float(d.get('apparent_power') or 0)
+            p  = float(d.get('active_power') or 0)
+            pf = round(p / ap, 3) if ap > 0.001 else 0.0
+            return {
+                'timestamp':  str(d.get('created_at', '')),
+                'device':     label,
+                'tegangan':   float(d.get('tegangan')   or 0),
+                'arus':       float(d.get('arus')       or 0),
+                'daya_aktif': p,
+                'energi_kwh': float(d.get('total_energy') or 0),
+                'frekuensi':  float(d.get('frekuensi')  or 0),
+                'pf':         pf,
+                'reaktif':    float(d.get('reactive_power') or 0),
+                'semu':       ap,
+            }
+
+        if device in ('ac', 'all') and data.get('ac'):
+            rows.append(_row(data['ac'], 'AC'))
+        if device in ('lamp', 'all') and data.get('lamp'):
+            rows.append(_row(data['lamp'], 'Lampu'))
+
+    # Buat CSV
+    output = io.StringIO()
+    fields = ['timestamp','device','tegangan','arus','daya_aktif','energi_kwh','frekuensi','pf','reaktif','semu']
+    writer = csv_mod.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    csv_text = output.getvalue()
+
+    from flask import Response
+    now_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return Response(
+        csv_text,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=energy_{device}_{now_str}.csv'}
+    )
+
 @app.route('/api/energy/history')
 def energy_history():
     """Get energy history from InfluxDB — supports 1h to 30 days.
@@ -3857,202 +3940,8 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- Energy Usage: AC + Lamp -->
-                <div class="stat-card" id="mysql-energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 12px;">DB</div>
-                            <div>
-                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Usage</div>
-                                <div style="font-size: 11px; color: var(--text-secondary);">AC (id_kwh=1) + Lampu (id_kwh=2) — Jagoan Hosting</div>
-                            </div>
-                        </div>
-                        <div id="mysql-energy-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(107,114,128,0.15); color: #6b7280; border: 1px solid rgba(107,114,128,0.3);">
-                            <i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Waiting...
-                        </div>
-                    </div>
-                    <div style="padding: 16px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                        <!-- AC -->
-                        <div style="background: linear-gradient(135deg, rgba(239,68,68,0.06), rgba(220,38,38,0.03)); border: 1px solid rgba(239,68,68,0.2); border-radius: 12px; padding: 14px;">
-                            <div style="font-size: 12px; font-weight: 700; color: #ef4444; margin-bottom: 10px;"><i class="fas fa-snowflake" style="margin-right: 6px;"></i>AC (id_kwh=1)</div>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Voltage</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-voltage">--</span><span style="font-size:10px;"> V</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Current</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-current">--</span><span style="font-size:10px;"> A</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Power</div>
-                                    <div style="font-size:18px; font-weight:700; color:#f59e0b;"><span id="mysql-ac-power">--</span><span style="font-size:10px;"> W</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Energy</div>
-                                    <div style="font-size:18px; font-weight:700; color:#10b981;"><span id="mysql-ac-kwh">--</span><span style="font-size:10px;"> kWh</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Freq</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-freq">--</span><span style="font-size:10px;"> Hz</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">PF</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-ac-pf">--</span></div>
-                                </div>
-                            </div>
-                            <div style="margin-top:8px; font-size:10px; color:var(--text-secondary);">Updated: <span id="mysql-ac-ts">--</span></div>
-                        </div>
-                        <!-- Lamp -->
-                        <div style="background: linear-gradient(135deg, rgba(234,179,8,0.06), rgba(202,138,4,0.03)); border: 1px solid rgba(234,179,8,0.2); border-radius: 12px; padding: 14px;">
-                            <div style="font-size: 12px; font-weight: 700; color: #eab308; margin-bottom: 10px;"><i class="fas fa-lightbulb" style="margin-right: 6px;"></i>Lampu (id_kwh=2)</div>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Voltage</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-voltage">--</span><span style="font-size:10px;"> V</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Current</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-current">--</span><span style="font-size:10px;"> A</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Power</div>
-                                    <div style="font-size:18px; font-weight:700; color:#f59e0b;"><span id="mysql-lamp-power">--</span><span style="font-size:10px;"> W</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Energy</div>
-                                    <div style="font-size:18px; font-weight:700; color:#10b981;"><span id="mysql-lamp-kwh">--</span><span style="font-size:10px;"> kWh</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">Freq</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-freq">--</span><span style="font-size:10px;"> Hz</span></div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:10px; color:var(--text-secondary);">PF</div>
-                                    <div style="font-size:18px; font-weight:700; color:var(--text);"><span id="mysql-lamp-pf">--</span></div>
-                                </div>
-                            </div>
-                            <div style="margin-top:8px; font-size:10px; color:var(--text-secondary);">Updated: <span id="mysql-lamp-ts">--</span></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
 
-                <!-- Person Detection - Enhanced Card -->
-                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #ef4444; font-size: 14px;">
-                                PD
-                            </div>
-                            <div>
-                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
-                                <div style="font-size: 11px; color: var(--text-secondary);">YOLOv8n — Camera Real-time</div>
-                            </div>
-                        </div>
-                        <div id="cam-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
-                            <i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person
-                        </div>
-                    </div>
-                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Person Count
-                            </div>
-                            <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
-                        </div>
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Confidence
-                            </div>
-                            <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
-                        </div>
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Auto Control
-                            </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status">ON</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
-                        </div>
-                    </div>
-                    <!-- Last Person Detection + Auto-OFF Timer -->
-                    <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                        <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
-                            <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
-                                Last Person Detection
-                            </div>
-                            <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
-                        </div>
-                        <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                            <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
-                                Auto-OFF AC
-                            </div>
-                            <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- GA + PSO Optimization - Full Width -->
-                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #10b981; font-size: 14px;">
-                                ML
-                        </div>
-                        <div>
-                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm -> AC | PSO -> Lamp</div>
-                        </div>
-                    </div>
-                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
-                        <!-- GA Section -->
-                        <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                            <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                GA -> AC Control
-                            </div>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #10b981;" id="ga-fitness">0.00</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Temp</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #3b82f6;" id="ga-temp">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">°C</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fan</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #8b5cf6;" id="ga-fan">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">speed</div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- PSO Section -->
-                        <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                            <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                PSO -> Lamp Control
-                            </div>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #f59e0b;" id="pso-fitness">0.00</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Brightness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #eab308;" id="pso-brightness">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">%</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Runs</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #a855f7;" id="dash-opt-runs">0</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">cycle</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
 
@@ -4692,6 +4581,71 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
             </div>
+
+            <!-- ===== PANEL REKAM DATA & EXPORT CSV ===== -->
+            <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Rekam Data &amp; Export CSV</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data energi, daya, arus, tegangan secara realtime lalu export ke CSV</p>
+                    </div>
+                    <div id="rec-status-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                        <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                    </div>
+                </div>
+
+                <!-- Tombol kontrol -->
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                    <button id="btn-rec-start" onclick="energyRecStart()"
+                        style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-circle" style="font-size:9px;color:#fff;"></i> Mulai Rekam
+                    </button>
+                    <button id="btn-rec-stop" onclick="energyRecStop()" disabled
+                        style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                    <button id="btn-rec-clear" onclick="energyRecClear()"
+                        style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                        <i class="fas fa-trash-alt"></i> Hapus
+                    </button>
+                    <button onclick="energyExportCSV()"
+                        style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
+                        <i class="fas fa-download"></i> Export CSV
+                    </button>
+                </div>
+
+                <!-- Counter info -->
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
+                    <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
+                    <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
+                    <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
+                </div>
+
+                <!-- Preview tabel 5 baris terakhir -->
+                <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                        <thead>
+                            <tr style="background:rgba(99,102,241,0.08);">
+                                <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                <th style="padding:8px 10px;text-align:center;color:var(--text-secondary);font-weight:600;">Perangkat</th>
+                                <th style="padding:8px 10px;text-align:right;color:#6366f1;font-weight:600;">Tegangan (V)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Arus (A)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#ef4444;font-weight:600;">Daya (W)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#10b981;font-weight:600;">Energi (kWh)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Reaktif (VAR)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Semu (VA)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Freq (Hz)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">PF</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rec-preview-body">
+                            <tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk melihat semua data.</div>
+            </div>
+
             <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
                 <div style="text-align: center; margin-bottom: 20px;">
                     <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
@@ -8436,9 +8390,17 @@ HTML_TEMPLATE = '''
         function _phpDirectPoll() {
             if (Date.now() - _lastEnergyUpdate < 10000) return; // socket masih aktif, skip
             fetch(_PHP_ENERGY_URL)
-                .then(function(r) { return r.json(); })
+                .then(function(r) {
+                    if (!r.ok) { console.error('[PHP-poll] HTTP ' + r.status); return null; }
+                    return r.json();
+                })
                 .then(function(data) {
-                    if (!data || data.error) { _phpPollErr++; return; }
+                    if (!data) { _phpPollErr++; return; }
+                    if (data.error) {
+                        _phpPollErr++;
+                        console.error('[PHP-poll] Server error:', data.error, data.file + ':' + data.line);
+                        return;
+                    }
                     _phpPollErr = 0;
                     var ac   = data.ac   || {};
                     var lamp = data.lamp || {};
@@ -8466,7 +8428,166 @@ HTML_TEMPLATE = '''
         // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
         setTimeout(_phpDirectPoll, 3000);
 
-        socket.on('mqtt_update', function(data) {
+        // ==================== ENERGY RECORDING & CSV EXPORT ====================
+        var _recRows    = [];       // array baris yang direkam
+        var _recActive  = false;
+        var _recStartTs = null;
+        var _recTimer   = null;
+
+        function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
+
+        function _recUpdateBadge() {
+            var badge = document.getElementById('rec-status-badge');
+            if (!badge) return;
+            if (_recActive) {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam';
+                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
+            } else {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);';
+            }
+        }
+
+        function _recUpdatePreview() {
+            var tbody = document.getElementById('rec-preview-body');
+            var countEl = document.getElementById('rec-count');
+            if (countEl) countEl.textContent = _recRows.length;
+            if (!tbody) return;
+            if (_recRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                return;
+            }
+            var last5 = _recRows.slice(-5).reverse();
+            tbody.innerHTML = last5.map(function(r) {
+                return '<tr style="border-bottom:1px solid var(--border);">' +
+                    '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#6366f1;font-weight:600;">' + r.tegangan + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#f59e0b;font-weight:600;">' + r.arus + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#ef4444;font-weight:600;">' + r.daya + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#10b981;font-weight:600;">' + r.energi + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.reaktif + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.semu + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.freq + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.pf + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function _recTick() {
+            if (!_recStartTs) return;
+            var sec = Math.floor((Date.now() - _recStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var el = document.getElementById('rec-duration');
+            if (el) el.textContent = m + ':' + String(s).padStart(2,'0');
+        }
+
+        function _recAddRow(ac, lamp) {
+            if (!_recActive) return;
+            var now = new Date();
+            var ts  = now.toISOString().replace('T',' ').substring(0,19);
+            // AC row
+            _recRows.push({
+                ts: ts, device: 'AC',
+                tegangan: _recFmt(ac.voltage || ac.tegangan),
+                arus:     _recFmt(ac.current || ac.arus, 3),
+                daya:     _recFmt(ac.power   || ac.active_power, 2),
+                energi:   _recFmt(ac.energy  || ac.total_energy, 4),
+                reaktif:  _recFmt(ac.reactive_power, 2),
+                semu:     _recFmt(ac.apparent_power, 2),
+                freq:     _recFmt(ac.frequency || ac.frekuensi, 2),
+                pf:       _recFmt(ac.pf, 3),
+            });
+            // Lamp row
+            _recRows.push({
+                ts: ts, device: 'Lampu',
+                tegangan: _recFmt(lamp.voltage || lamp.tegangan),
+                arus:     _recFmt(lamp.current || lamp.arus, 3),
+                daya:     _recFmt(lamp.power   || lamp.active_power, 2),
+                energi:   _recFmt(lamp.energy  || lamp.total_energy, 4),
+                reaktif:  _recFmt(lamp.reactive_power, 2),
+                semu:     _recFmt(lamp.apparent_power, 2),
+                freq:     _recFmt(lamp.frequency || lamp.frekuensi, 2),
+                pf:       _recFmt(lamp.pf, 3),
+            });
+            _recUpdatePreview();
+        }
+
+        function energyRecStart() {
+            _recActive  = true;
+            _recStartTs = Date.now();
+            var startEl = document.getElementById('rec-start-time');
+            if (startEl) startEl.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-rec-start').disabled = true;
+            document.getElementById('btn-rec-start').style.opacity = '0.5';
+            document.getElementById('btn-rec-stop').disabled = false;
+            document.getElementById('btn-rec-stop').style.opacity = '1';
+            _recTimer = setInterval(_recTick, 1000);
+            _recUpdateBadge();
+            showToast('Rekam data dimulai', 'success');
+        }
+
+        function energyRecStop() {
+            _recActive = false;
+            clearInterval(_recTimer);
+            document.getElementById('btn-rec-start').disabled = false;
+            document.getElementById('btn-rec-start').style.opacity = '1';
+            document.getElementById('btn-rec-stop').disabled = true;
+            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            _recUpdateBadge();
+            showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
+        }
+
+        function energyRecClear() {
+            _recRows = [];
+            _recActive = false;
+            clearInterval(_recTimer);
+            var countEl = document.getElementById('rec-count');
+            var durEl   = document.getElementById('rec-duration');
+            var startEl = document.getElementById('rec-start-time');
+            if (countEl)  countEl.textContent  = '0';
+            if (durEl)    durEl.textContent    = '0:00';
+            if (startEl)  startEl.textContent  = '--';
+            document.getElementById('btn-rec-start').disabled = false;
+            document.getElementById('btn-rec-start').style.opacity = '1';
+            document.getElementById('btn-rec-stop').disabled = true;
+            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            _recUpdateBadge();
+            _recUpdatePreview();
+            showToast('Data rekaman dihapus', 'info');
+        }
+
+        function energyExportCSV() {
+            if (_recRows.length === 0) {
+                showToast('Belum ada data yang direkam', 'error');
+                return;
+            }
+            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\n';
+            var body = _recRows.map(function(r) {
+                return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
+                       r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
+            }).join('\n');
+            var now = new Date();
+            var fname = 'energy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_recRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
+
+        // Hook ke _applyEnergyData — rekam setiap 6 menit (360 detik)
+        var _lastRecTime = 0;
+        var _REC_INTERVAL_MS = 360000; // 6 menit
+        var _origApply = _applyEnergyData;
+        _applyEnergyData = function(ac, lamp) {
+            _origApply(ac, lamp);
+            if (Date.now() - _lastRecTime >= _REC_INTERVAL_MS) {
+                _lastRecTime = Date.now();
+                _recAddRow(ac, lamp);
+            }
+        };
+
+
             updateDashboard();
             
             if (data.type === 'ac') {
