@@ -879,7 +879,8 @@ def write_to_influxdb(measurement, fields, tags=None):
                 _reset_influx_client()   # recreate connection, then retry once
     return False
 
-def save_sensor_data(temperature, humidity, heat_index):
+def save_sensor_data(temperature, humidity, heat_index,
+                     temp1=0, hum1=0, temp2=0, hum2=0, temp3=0, hum3=0):
     global _last_sensor_influx_ts
     now = time.time()
     if now - _last_sensor_influx_ts < INFLUX_WRITE_INTERVAL:
@@ -887,7 +888,10 @@ def save_sensor_data(temperature, humidity, heat_index):
     _last_sensor_influx_ts = now
     try:
         write_to_influxdb('ac_sensor', {
-            'temperature': float(temperature), 'humidity': float(humidity), 'heat_index': float(heat_index)
+            'temperature': float(temperature), 'humidity': float(humidity), 'heat_index': float(heat_index),
+            'temp1': float(temp1), 'hum1': float(hum1),
+            'temp2': float(temp2), 'hum2': float(hum2),
+            'temp3': float(temp3), 'hum3': float(hum3),
         }, tags={'device': 'esp32_ac', 'location': 'room'})
     except Exception as e:
         print(f'[ERROR] save_sensor_data: {e}')
@@ -1571,7 +1575,12 @@ def on_message(client, userdata, msg):
                 'turbo': payload.get('turbo', False),
                 'econo': payload.get('econo', False),
             })
-            save_sensor_data(mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'])
+            save_sensor_data(
+                mqtt_data['ac']['temperature'], mqtt_data['ac']['humidity'], mqtt_data['ac']['heat_index'],
+                mqtt_data['ac']['temp1'], mqtt_data['ac']['hum1'],
+                mqtt_data['ac']['temp2'], mqtt_data['ac']['hum2'],
+                mqtt_data['ac']['temp3'], mqtt_data['ac']['hum3'],
+            )
             save_ac_control(mqtt_data['ac']['ac_temp'], mqtt_data['ac']['fan_speed'], mqtt_data['ac']['ac_state'])
             # Feed sensor data to optimization engine
             update_opt_sensor_data(
@@ -1833,15 +1842,19 @@ mqtt_thread = threading.Thread(target=start_mqtt, daemon=True)
 mqtt_thread.start()
 
 # ==================== INFLUXDB ====================
-def get_influx_data(measurement, field, hours=1):
+def get_influx_data(measurement, field, hours=1, device_tag=None):
     try:
         _, _, query_api = _get_influx_client()
+        # Use 10-minute windows for occupancy (camera_detection) to reduce noise,
+        # 5-minute windows for all other measurements.
+        window = '10m' if measurement == 'camera_detection' else '5m'
+        device_filter = f'|> filter(fn: (r) => r["device"] == "{device_tag}")\n          ' if device_tag else ''
         query = f'''
         from(bucket: "{INFLUX_BUCKET}")
           |> range(start: -{hours}h)
           |> filter(fn: (r) => r["_measurement"] == "{measurement}")
           |> filter(fn: (r) => r["_field"] == "{field}")
-          |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
+          {device_filter}|> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
           |> yield(name: "mean")
         '''
         result = query_api.query(query=query)
@@ -2160,7 +2173,7 @@ def export_csv_from_db():
     TYPE_MAP = {
         'energy_ac':   ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_ac'),
         'energy_lamp': ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_lamp'),
-        'temp':        ('ac_sensor',      ['temperature','humidity','heat_index'],    None, None),
+        'temp':        ('ac_sensor',      ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3'], None, None),
         'lux':         ('lamp_sensor',    ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'], None, None),
         'occupancy':   ('camera_detection',['person_count','confidence'],             None, None),
     }
@@ -2237,9 +2250,41 @@ from(bucket: "{INFLUX_BUCKET}")
         return jsonify({'error': str(e)}), 500
 
 
-def get_chart_data(measurement, field, hours):
-    data = get_influx_data(measurement, field, hours)
-    return jsonify(data)
+# ==================== GENERIC CHART API ====================
+# Allowed lists prevent InfluxDB injection
+_CHART_ALLOWED_MEAS = {'ac_sensor', 'lamp_sensor', 'camera_detection', 'energy_monitor'}
+_CHART_ALLOWED_FIELDS = {
+    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed',
+    'lux', 'lux_avg', 'lux1', 'lux2', 'lux3',
+    'brightness', 'brightness_avg', 'brightness1', 'brightness2',
+    'person_count', 'confidence',
+    'power', 'voltage', 'current', 'energy_kwh',
+    'temp1', 'hum1', 'temp2', 'hum2', 'temp3', 'hum3',
+}
+
+@app.route('/api/chart/<measurement>/<field>/<int:hours>')
+def chart_data_route(measurement, field, hours):
+    if measurement not in _CHART_ALLOWED_MEAS:
+        return jsonify({'error': 'Invalid measurement'}), 400
+    if field not in _CHART_ALLOWED_FIELDS:
+        return jsonify({'error': 'Invalid field'}), 400
+    if hours not in (1, 6, 24, 48, 72, 168):
+        return jsonify({'error': 'Invalid hours'}), 400
+    return jsonify(get_influx_data(measurement, field, hours))
+
+@app.route('/api/chart/ac_power/<int:hours>')
+def chart_ac_power(hours):
+    """AC power from energy_monitor filtered by device=esp32_ac"""
+    if hours not in (1, 6, 24, 48, 72, 168):
+        return jsonify({'error': 'Invalid hours'}), 400
+    return jsonify(get_influx_data('energy_monitor', 'power', hours, device_tag='esp32_ac'))
+
+@app.route('/api/chart/lamp_power/<int:hours>')
+def chart_lamp_power(hours):
+    """Lamp power from energy_monitor filtered by device=esp32_lamp"""
+    if hours not in (1, 6, 24, 48, 72, 168):
+        return jsonify({'error': 'Invalid hours'}), 400
+    return jsonify(get_influx_data('energy_monitor', 'power', hours, device_tag='esp32_lamp'))
 
 @app.route('/api/energy/phase', methods=['GET', 'POST'])
 def energy_phase_api():
@@ -4385,6 +4430,18 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="acTempChart" height="80"></canvas>
             </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">AC Power Consumption (W)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="changeChartRange('acPower', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acPower', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acPower', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acPowerChart" height="80"></canvas>
+            </div>
         </div>
 
         <!-- Lamp Analytics Page -->
@@ -4421,9 +4478,19 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="lampBrightChart" height="80"></canvas>
             </div>
-        </div>
 
-        <!-- Camera Page -->
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Lamp Power Consumption (W)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="changeChartRange('lampPower', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('lampPower', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('lampPower', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="lampPowerChart" height="80"></canvas>
+            </div>
+        </div>
         <div id="camera" class="page">
             <div class="header">
                 <h1>Live Camera Feed - YOLOv8 Detection</h1>
@@ -5576,8 +5643,10 @@ HTML_TEMPLATE = '''
             temp: 1,
             hum: 1,
             acTemp: 1,
+            acPower: 1,
             lampLux: 1,
             lampBright: 1,
+            lampPower: 1,
             occupancy: 1
         };
 
@@ -5722,6 +5791,16 @@ HTML_TEMPLATE = '''
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.acPower = new Chart(document.getElementById('acPowerChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'AC Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
+            });
+
+            charts.lampPower = new Chart(document.getElementById('lampPowerChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Lamp Power (W)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
             });
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
@@ -5917,6 +5996,8 @@ HTML_TEMPLATE = '''
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
                 case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
+                case 'acPower': endpoint = '/api/chart/ac_power/' + hours; break;
+                case 'lampPower': endpoint = '/api/chart/lamp_power/' + hours; break;
             }
 
             fetch(endpoint)
