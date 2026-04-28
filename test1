@@ -8667,15 +8667,17 @@ HTML_TEMPLATE = '''
             _recUpdatePreview();
             _ssSave('_recRows', _recRows);
             _recServerPush();
-        } {
+        }
+
+        function energyRecStart() {
             _recActive  = true;
             _recStartTs = Date.now();
             var startEl = document.getElementById('rec-start-time');
             if (startEl) startEl.textContent = new Date().toLocaleTimeString('id-ID');
-            document.getElementById('btn-rec-start').disabled = true;
-            document.getElementById('btn-rec-start').style.opacity = '0.5';
-            document.getElementById('btn-rec-stop').disabled = false;
-            document.getElementById('btn-rec-stop').style.opacity = '1';
+            var btnS = document.getElementById('btn-rec-start');
+            var btnE = document.getElementById('btn-rec-stop');
+            if (btnS) { btnS.disabled = true; btnS.style.opacity = '0.5'; }
+            if (btnE) { btnE.disabled = false; btnE.style.opacity = '1'; }
             _recTimer = setInterval(_recTick, 1000);
             _recUpdateBadge();
             _recStatePush({energy: true});
@@ -8685,10 +8687,10 @@ HTML_TEMPLATE = '''
         function energyRecStop() {
             _recActive = false;
             clearInterval(_recTimer);
-            document.getElementById('btn-rec-start').disabled = false;
-            document.getElementById('btn-rec-start').style.opacity = '1';
-            document.getElementById('btn-rec-stop').disabled = true;
-            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            var btnS = document.getElementById('btn-rec-start');
+            var btnE = document.getElementById('btn-rec-stop');
+            if (btnS) { btnS.disabled = false; btnS.style.opacity = '1'; }
+            if (btnE) { btnE.disabled = true; btnE.style.opacity = '0.5'; }
             _recUpdateBadge();
             _recStatePush({energy: false});
             _recServerPush();
@@ -8707,10 +8709,10 @@ HTML_TEMPLATE = '''
             if (countEl)  countEl.textContent  = '0';
             if (durEl)    durEl.textContent    = '0:00';
             if (startEl)  startEl.textContent  = '--';
-            document.getElementById('btn-rec-start').disabled = false;
-            document.getElementById('btn-rec-start').style.opacity = '1';
-            document.getElementById('btn-rec-stop').disabled = true;
-            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            var btnS2 = document.getElementById('btn-rec-start');
+            var btnE2 = document.getElementById('btn-rec-stop');
+            if (btnS2) { btnS2.disabled = false; btnS2.style.opacity = '1'; }
+            if (btnE2) { btnE2.disabled = true; btnE2.style.opacity = '0.5'; }
             _recUpdateBadge();
             _recUpdatePreview();
             var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
@@ -8836,10 +8838,9 @@ HTML_TEMPLATE = '''
         function tempRecStart() {
             _tempActive = true; _tempStartTs = Date.now(); _lastTempRecTime = 0;
             var s = document.getElementById('temp-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
-            document.getElementById('btn-temp-start').disabled = true;
-            document.getElementById('btn-temp-start').style.opacity = '0.5';
-            document.getElementById('btn-temp-stop').disabled = false;
-            document.getElementById('btn-temp-stop').style.opacity = '1';
+            var tS = document.getElementById('btn-temp-start'), tE = document.getElementById('btn-temp-stop');
+            if (tS) { tS.disabled = true; tS.style.opacity = '0.5'; }
+            if (tE) { tE.disabled = false; tE.style.opacity = '1'; }
             _tempTimer = setInterval(_tempTick, 1000);
             _tempUpdateBadge();
             _recStatePush({temp: true});
@@ -8848,10 +8849,9 @@ HTML_TEMPLATE = '''
 
         function tempRecStop() {
             _tempActive = false; clearInterval(_tempTimer);
-            document.getElementById('btn-temp-start').disabled = false;
-            document.getElementById('btn-temp-start').style.opacity = '1';
-            document.getElementById('btn-temp-stop').disabled = true;
-            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            var tS = document.getElementById('btn-temp-start'), tE = document.getElementById('btn-temp-stop');
+            if (tS) { tS.disabled = false; tS.style.opacity = '1'; }
+            if (tE) { tE.disabled = true; tE.style.opacity = '0.5'; }
             _tempUpdateBadge();
             _recStatePush({temp: false});
             _tempServerPush();
@@ -8863,10 +8863,9 @@ HTML_TEMPLATE = '''
             sessionStorage.removeItem('_tempRows');
             _tempServerDelete();
             ['temp-rec-count','temp-rec-duration','temp-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
-            document.getElementById('btn-temp-start').disabled = false;
-            document.getElementById('btn-temp-start').style.opacity = '1';
-            document.getElementById('btn-temp-stop').disabled = true;
-            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            var tS2 = document.getElementById('btn-temp-start'), tE2 = document.getElementById('btn-temp-stop');
+            if (tS2) { tS2.disabled = false; tS2.style.opacity = '1'; }
+            if (tE2) { tE2.disabled = true; tE2.style.opacity = '0.5'; }
             _tempUpdateBadge(); _tempUpdatePreview();
             showToast('Data suhu dihapus', 'info');
         }
@@ -8973,10 +8972,9 @@ HTML_TEMPLATE = '''
         function luxRecStart() {
             _luxActive = true; _luxStartTs = Date.now(); _lastLuxRecTime = 0;
             var s = document.getElementById('lux-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
-            document.getElementById('btn-lux-start').disabled = true;
-            document.getElementById('btn-lux-start').style.opacity = '0.5';
-            document.getElementById('btn-lux-stop').disabled = false;
-            document.getElementById('btn-lux-stop').style.opacity = '1';
+            var lS = document.getElementById('btn-lux-start'), lE = document.getElementById('btn-lux-stop');
+            if (lS) { lS.disabled = true; lS.style.opacity = '0.5'; }
+            if (lE) { lE.disabled = false; lE.style.opacity = '1'; }
             _luxTimer = setInterval(_luxTick, 1000);
             _luxUpdateBadge();
             _recStatePush({lux: true});
@@ -8985,10 +8983,9 @@ HTML_TEMPLATE = '''
 
         function luxRecStop() {
             _luxActive = false; clearInterval(_luxTimer);
-            document.getElementById('btn-lux-start').disabled = false;
-            document.getElementById('btn-lux-start').style.opacity = '1';
-            document.getElementById('btn-lux-stop').disabled = true;
-            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            var lS = document.getElementById('btn-lux-start'), lE = document.getElementById('btn-lux-stop');
+            if (lS) { lS.disabled = false; lS.style.opacity = '1'; }
+            if (lE) { lE.disabled = true; lE.style.opacity = '0.5'; }
             _luxUpdateBadge();
             _recStatePush({lux: false});
             _luxServerPush();
@@ -9000,10 +8997,9 @@ HTML_TEMPLATE = '''
             sessionStorage.removeItem('_luxRows');
             _luxServerDelete();
             ['lux-rec-count','lux-rec-duration','lux-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
-            document.getElementById('btn-lux-start').disabled = false;
-            document.getElementById('btn-lux-start').style.opacity = '1';
-            document.getElementById('btn-lux-stop').disabled = true;
-            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            var lS2 = document.getElementById('btn-lux-start'), lE2 = document.getElementById('btn-lux-stop');
+            if (lS2) { lS2.disabled = false; lS2.style.opacity = '1'; }
+            if (lE2) { lE2.disabled = true; lE2.style.opacity = '0.5'; }
             _luxUpdateBadge(); _luxUpdatePreview();
             showToast('Data lux dihapus', 'info');
         }
