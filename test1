@@ -2095,6 +2095,98 @@ def rec_data_api():
     return jsonify({'rows': _rec_data[dtype], 'count': len(_rec_data[dtype])})
 
 
+# ==================== EXPORT CSV DARI INFLUXDB ====================
+@app.route('/api/export/csv')
+def export_csv_from_db():
+    """
+    Query InfluxDB by date range and stream a CSV file.
+    Params: type=energy_ac|energy_lamp|temp|lux|occupancy
+            from=YYYY-MM-DD  to=YYYY-MM-DD  (local WIB dates)
+    """
+    dtype   = request.args.get('type', 'temp')
+    from_dt = request.args.get('from', '')
+    to_dt   = request.args.get('to', '')
+
+    if not from_dt or not to_dt:
+        return jsonify({'error': 'from and to params required (YYYY-MM-DD)'}), 400
+
+    # Convert local WIB date strings → UTC ISO for InfluxDB
+    # WIB = UTC+7, so YYYY-MM-DD 00:00 WIB = YYYY-MM-DD T17:00:00Z previous day
+    try:
+        from datetime import timezone, timedelta as _td
+        wib = timezone(_td(hours=7))
+        start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
+        # end = to_dt 23:59:59 WIB
+        end_local = datetime.strptime(to_dt, '%Y-%m-%d').replace(hour=23, minute=59, second=59, tzinfo=wib)
+        end_utc   = end_local.astimezone(timezone.utc)
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    # --- Build Flux query per type ---
+    TYPE_MAP = {
+        'energy_ac':   ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_ac'),
+        'energy_lamp': ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_lamp'),
+        'temp':        ('ac_sensor',      ['temperature','humidity','heat_index'],    None, None),
+        'lux':         ('lamp_sensor',    ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'], None, None),
+        'occupancy':   ('camera_detection',['person_count','confidence'],             None, None),
+    }
+    if dtype not in TYPE_MAP:
+        return jsonify({'error': f'Invalid type. Use: {", ".join(TYPE_MAP.keys())}'}), 400
+
+    measurement, fields, tag_key, tag_val = TYPE_MAP[dtype]
+
+    try:
+        _, _, query_api = _get_influx_client()
+        # Query each field separately then merge by timestamp
+        rows_by_ts = {}
+        for field in fields:
+            tag_filter = f'|> filter(fn: (r) => r["{tag_key}"] == "{tag_val}")\n' if tag_key else ''
+            q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_iso}, stop: {end_iso})
+  |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+  |> filter(fn: (r) => r["_field"] == "{field}")
+  {tag_filter}  |> yield(name: "raw")
+'''
+            result = query_api.query(query=q)
+            for table in result:
+                for record in table.records:
+                    # Use WIB time as string key
+                    t_wib = record.get_time().astimezone(timezone(_td(hours=7)))
+                    ts_str = t_wib.strftime('%Y-%m-%d %H:%M:%S')
+                    if ts_str not in rows_by_ts:
+                        rows_by_ts[ts_str] = {'ts': ts_str}
+                    rows_by_ts[ts_str][field] = record.get_value()
+
+        if not rows_by_ts:
+            return jsonify({'error': 'Tidak ada data untuk rentang tanggal tersebut'}), 404
+
+        # Build CSV
+        import io, csv as _csv
+        output = io.StringIO()
+        header = ['Waktu'] + fields
+        writer = _csv.writer(output)
+        writer.writerow(header)
+        for ts_str in sorted(rows_by_ts.keys()):
+            row_d = rows_by_ts[ts_str]
+            row = [ts_str] + [round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '') for f in fields]
+            writer.writerow(row)
+
+        csv_bytes = output.getvalue().encode('utf-8')
+        fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+        from flask import Response
+        return Response(
+            csv_bytes,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename="{fname}"'}
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
@@ -3976,62 +4068,47 @@ HTML_TEMPLATE = '''
 
                 <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
 
-                <!-- ===== PANEL REKAM TEMP & HUMIDITY ===== -->
+                <!-- ===== PANEL EXPORT SUHU & HUMIDITY DARI DATABASE ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-thermometer-half" style="color:#3b82f6;margin-right:8px;"></i>Rekam Suhu &amp; Kelembaban</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data suhu &amp; humidity realtime — interval 1 menit, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Suhu &amp; Kelembaban</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data suhu &amp; humidity dari database — pilih rentang tanggal, export ke CSV</p>
                         </div>
-                        <div id="temp-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
-                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.12);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">
+                            <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                         </div>
                     </div>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
-                        <button id="btn-temp-start" onclick="tempRecStart()"
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
+                        <div>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <input type="date" id="db-temp-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <input type="date" id="db-temp-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                        </div>
+                        <button onclick="dbExportCSV('temp')"
                             style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
-                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
-                        </button>
-                        <button id="btn-temp-stop" onclick="tempRecStop()" disabled
-                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
-                            <i class="fas fa-stop"></i> Stop
-                        </button>
-                        <button onclick="tempRecClear()"
-                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
-                            <i class="fas fa-trash-alt"></i> Hapus
-                        </button>
-                        <button onclick="tempExportCSV()"
-                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
-                        <button onclick="tempExportRange()" title="Export rentang tanggal"
-                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.10);color:#3b82f6;font-size:13px;font-weight:700;cursor:pointer;">
-                            &#128197; Rentang
+                        <button onclick="dbExportSetToday('temp')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                            Hari Ini
+                        </button>
+                        <button onclick="dbExportSet7d('temp')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                            7 Hari
+                        </button>
+                        <button onclick="dbExportSet30d('temp')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                            30 Hari
                         </button>
                     </div>
-                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
-                        <span style="color:var(--text-secondary);">Baris: <strong id="temp-rec-count" style="color:var(--text);">0</strong></span>
-                        <span style="color:var(--text-secondary);">Durasi: <strong id="temp-rec-duration" style="color:var(--text);">0:00</strong></span>
-                        <span style="color:var(--text-secondary);">Mulai: <strong id="temp-rec-start" style="color:var(--text);">--</strong></span>
+                    <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
+                        <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
+                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Temperature (°C), Humidity (%), Heat Index (°C)</strong>
                     </div>
-                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
-                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
-                            <thead>
-                                <tr style="background:rgba(59,130,246,0.08);">
-                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#3b82f6;font-weight:600;">Temp Rata2 (°C)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#06b6d4;font-weight:600;">Humidity (%)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T1 (°C)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T2 (°C)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T3 (°C)</th>
-                                </tr>
-                            </thead>
-                            <tbody id="temp-rec-preview">
-                                <tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="temp-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
                 </div>
 
             </div>
@@ -4164,63 +4241,47 @@ HTML_TEMPLATE = '''
                         <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
-                <!-- ===== PANEL REKAM LUX & BRIGHTNESS ===== -->
+                <!-- ===== PANEL EXPORT LUX & BRIGHTNESS DARI DATABASE ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(234,179,8,0.25);background:linear-gradient(160deg,rgba(234,179,8,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-lightbulb" style="color:#eab308;margin-right:8px;"></i>Rekam Lux &amp; Kecerahan Lampu</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data lux 3 sensor, rata-rata &amp; brightness lampu — interval 1 menit, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#eab308;margin-right:8px;"></i>Export Lux &amp; Kecerahan Lampu</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data lux &amp; brightness dari database — pilih rentang tanggal, export ke CSV</p>
                         </div>
-                        <div id="lux-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
-                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(234,179,8,0.12);color:#ca8a04;border:1px solid rgba(234,179,8,0.3);">
+                            <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                         </div>
                     </div>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
-                        <button id="btn-lux-start" onclick="luxRecStart()"
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
+                        <div>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <input type="date" id="db-lux-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <input type="date" id="db-lux-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                        </div>
+                        <button onclick="dbExportCSV('lux')"
                             style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
-                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
-                        </button>
-                        <button id="btn-lux-stop" onclick="luxRecStop()" disabled
-                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
-                            <i class="fas fa-stop"></i> Stop
-                        </button>
-                        <button onclick="luxRecClear()"
-                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
-                            <i class="fas fa-trash-alt"></i> Hapus
-                        </button>
-                        <button onclick="luxExportCSV()"
-                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
-                        <button onclick="luxExportRange()" title="Export rentang tanggal"
-                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.10);color:#ca8a04;font-size:13px;font-weight:700;cursor:pointer;">
-                            &#128197; Rentang
+                        <button onclick="dbExportSetToday('lux')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
+                            Hari Ini
+                        </button>
+                        <button onclick="dbExportSet7d('lux')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
+                            7 Hari
+                        </button>
+                        <button onclick="dbExportSet30d('lux')"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
+                            30 Hari
                         </button>
                     </div>
-                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
-                        <span style="color:var(--text-secondary);">Baris: <strong id="lux-rec-count" style="color:var(--text);">0</strong></span>
-                        <span style="color:var(--text-secondary);">Durasi: <strong id="lux-rec-duration" style="color:var(--text);">0:00</strong></span>
-                        <span style="color:var(--text-secondary);">Mulai: <strong id="lux-rec-start" style="color:var(--text);">--</strong></span>
+                    <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(234,179,8,0.05);border-radius:8px;border:1px solid rgba(234,179,8,0.12);">
+                        <i class="fas fa-info-circle" style="color:#eab308;margin-right:6px;"></i>
+                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Lux1 (lx), Lux2 (lx), Lux3 (lx), Avg Lux (lx), Brightness1 (%), Brightness2 (%)</strong>
                     </div>
-                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
-                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
-                            <thead>
-                                <tr style="background:rgba(234,179,8,0.08);">
-                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 1 (lx)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 2 (lx)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 3 (lx)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Avg Lux (lx)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright1 (%)</th>
-                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright2 (%)</th>
-                                </tr>
-                            </thead>
-                            <tbody id="lux-rec-preview">
-                                <tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="lux-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
                 </div>
 
             </div>
@@ -4393,6 +4454,7 @@ HTML_TEMPLATE = '''
                     <div style="display:flex;gap:8px;align-items:center;">
                         <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
                         <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="dbExportCSV('occupancy')" title="Export dari InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
                         <button onclick="occExportRange()" title="Export rentang tanggal" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
                         <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
                     </div>
@@ -4403,11 +4465,21 @@ HTML_TEMPLATE = '''
                     <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang</span>
                 </div>
                 <!-- Range filter occupancy -->
-                <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;">
+                <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
                     <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Hari Ini</button>
                     <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Hari</button>
                     <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Hari</button>
                     <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">Semua</button>
+                </div>
+                <!-- DB Export date range for occupancy -->
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);">
+                    <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#6366f1;margin-right:4px;"></i>DB Export:</span>
+                    <input type="date" id="db-occupancy-from" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
+                    <span style="font-size:11px;color:var(--text-secondary);">s/d</span>
+                    <input type="date" id="db-occupancy-to" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
+                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Hari Ini</button>
+                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Hari</button>
+                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Hari</button>
                 </div>
                 <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
                     <canvas id="occChart"></canvas>
@@ -4784,100 +4856,53 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- ===== PANEL REKAM DATA & EXPORT CSV ===== -->
+            <!-- ===== PANEL EXPORT ENERGI DARI DATABASE ===== -->
             <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Rekam Data &amp; Export CSV</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data energi realtime &mdash; terlihat di semua device &mdash; bisa export per perangkat</p>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Data Energi dari Database</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data energi langsung dari InfluxDB — pilih rentang tanggal &amp; perangkat, export ke CSV</p>
                     </div>
-                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                        <div id="rec-status-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
-                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
-                        </div>
-                        <div id="rec-sync-badge" style="padding:5px 12px;border-radius:20px;font-size:10px;font-weight:600;background:rgba(99,102,241,0.1);color:#6366f1;border:1px solid rgba(99,102,241,0.2);">
-                            <i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync
-                        </div>
+                    <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
+                        <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                     </div>
                 </div>
 
-                <!-- Tombol kontrol -->
-                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
-                    <button id="btn-rec-start" onclick="energyRecStart()"
-                        style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
-                        <i class="fas fa-circle" style="font-size:9px;color:#fff;"></i> Mulai Rekam
-                    </button>
-                    <button id="btn-rec-stop" onclick="energyRecStop()" disabled
-                        style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
-                        <i class="fas fa-stop"></i> Stop
-                    </button>
-                    <button id="btn-rec-clear" onclick="energyRecClear()"
-                        style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
-                        <i class="fas fa-trash-alt"></i> Hapus
-                    </button>
-                    <!-- Export split buttons -->
-                    <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
-                        <button onclick="energyExportCSV('all')"
-                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
-                            <i class="fas fa-download"></i> Semua
-                        </button>
-                        <button onclick="energyExportCSV('AC')"
-                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
-                            <i class="fas fa-download"></i> AC
-                        </button>
-                        <button onclick="energyExportCSV('Lampu')"
-                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
-                            <i class="fas fa-download"></i> Lampu
-                        </button>
-                        <button onclick="energyExportRange('all')" title="Export rentang tanggal"
-                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(99,102,241,0.35);background:rgba(99,102,241,0.10);color:#6366f1;font-size:12px;font-weight:700;cursor:pointer;">
-                            &#128197; Rentang
-                        </button>
+                <!-- Baris 1: Tanggal + AC -->
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+                    <div>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                        <input type="date" id="db-energy-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
-                </div>
-
-                <!-- Counter info + filter tabs -->
-                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
-                    <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;">
-                        <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
-                        <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
-                        <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
-                        <span id="rec-date-range" style="display:none;color:var(--text-secondary);">Rentang: <strong id="rec-range-text" style="color:#10b981;"></strong></span>
+                    <div>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                        <input type="date" id="db-energy-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
-                    <!-- Filter tabs -->
-                    <div style="display:flex;gap:4px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
-                        <button id="rec-tab-all" onclick="recSetFilter('all')"
-                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#fff;color:#6366f1;box-shadow:0 1px 3px rgba(0,0,0,0.1);">Semua</button>
-                        <button id="rec-tab-ac" onclick="recSetFilter('AC')"
-                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">AC</button>
-                        <button id="rec-tab-lamp" onclick="recSetFilter('Lampu')"
-                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">Lampu</button>
-                    </div>
+                    <button onclick="dbExportCSV('energy_ac')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export AC
+                    </button>
+                    <button onclick="dbExportCSV('energy_lamp')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Lampu
+                    </button>
+                    <button onclick="dbExportSetToday('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        Hari Ini
+                    </button>
+                    <button onclick="dbExportSet7d('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        7 Hari
+                    </button>
+                    <button onclick="dbExportSet30d('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        30 Hari
+                    </button>
                 </div>
-
-                <!-- Preview tabel semua baris (filtered, scrollable) -->
-                <div style="overflow-x:auto;overflow-y:auto;max-height:320px;border-radius:10px;border:1px solid var(--border);">
-                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
-                        <thead>
-                            <tr style="background:rgba(99,102,241,0.08);">
-                                <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
-                                <th style="padding:8px 10px;text-align:center;color:var(--text-secondary);font-weight:600;">Perangkat</th>
-                                <th style="padding:8px 10px;text-align:right;color:#6366f1;font-weight:600;">Tegangan (V)</th>
-                                <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Arus (A)</th>
-                                <th style="padding:8px 10px;text-align:right;color:#ef4444;font-weight:600;">Daya (W)</th>
-                                <th style="padding:8px 10px;text-align:right;color:#10b981;font-weight:600;">Energi (kWh)</th>
-                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Reaktif (VAR)</th>
-                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Semu (VA)</th>
-                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Freq (Hz)</th>
-                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">PF</th>
-                            </tr>
-                        </thead>
-                        <tbody id="rec-preview-body">
-                            <tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
-                        </tbody>
-                    </table>
+                <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(16,185,129,0.05);border-radius:8px;border:1px solid rgba(16,185,129,0.12);">
+                    <i class="fas fa-info-circle" style="color:#10b981;margin-right:6px;"></i>
+                    Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
                 </div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="rec-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
             </div>
         </div>
 
@@ -9793,6 +9818,44 @@ HTML_TEMPLATE = '''
                     downloadCSV(chartName + '_' + from + '_sd_' + to + '.csv', header + lines.join('\\n') + '\\n');
                     showToast(lines.length + ' poin diekspor', 'success');
                 });
+            };
+
+            // ==================== DB EXPORT HELPERS ====================
+            function _dbDateToday() {
+                var d = new Date(); 
+                return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+            }
+            function _dbDateNdAgo(n) {
+                var d = new Date(); d.setDate(d.getDate() - n + 1);
+                return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+            }
+            window.dbExportSetToday = function(prefix) {
+                var t = _dbDateToday();
+                var fi = document.getElementById('db-' + prefix + '-from');
+                var ti = document.getElementById('db-' + prefix + '-to');
+                if (fi) fi.value = t; if (ti) ti.value = t;
+            };
+            window.dbExportSet7d = function(prefix) {
+                var fi = document.getElementById('db-' + prefix + '-from');
+                var ti = document.getElementById('db-' + prefix + '-to');
+                if (fi) fi.value = _dbDateNdAgo(7); if (ti) ti.value = _dbDateToday();
+            };
+            window.dbExportSet30d = function(prefix) {
+                var fi = document.getElementById('db-' + prefix + '-from');
+                var ti = document.getElementById('db-' + prefix + '-to');
+                if (fi) fi.value = _dbDateNdAgo(30); if (ti) ti.value = _dbDateToday();
+            };
+            window.dbExportCSV = function(type) {
+                // prefix mapping: energy_ac -> energy, energy_lamp -> energy
+                var prefix = (type === 'energy_ac' || type === 'energy_lamp') ? 'energy' : type;
+                var fromEl = document.getElementById('db-' + prefix + '-from');
+                var toEl   = document.getElementById('db-' + prefix + '-to');
+                var from = fromEl ? fromEl.value : '';
+                var to   = toEl   ? toEl.value   : '';
+                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
+                if (from > to) { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
+                showToast('Mengambil data dari database...', 'success');
+                window.location.href = '/api/export/csv?type=' + type + '&from=' + from + '&to=' + to;
             };
 
             console.log('[OK] Dashboard Ready!');
