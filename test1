@@ -4656,7 +4656,7 @@ HTML_TEMPLATE = '''
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#ef4444;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Watt &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
                                 <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
                             </div>
@@ -4715,7 +4715,7 @@ HTML_TEMPLATE = '''
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#eab308;line-height:1;transition:color 0.3s;"><span id="lamp-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Watt &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
                                 <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
                             </div>
