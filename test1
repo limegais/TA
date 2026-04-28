@@ -2193,15 +2193,34 @@ from(bucket: "{INFLUX_BUCKET}")
                     rows_by_ts[ts_str][field] = record.get_value()
 
         if not rows_by_ts:
-            return jsonify({'error': 'Tidak ada data untuk rentang tanggal tersebut'}), 404
+            return jsonify({'error': 'No data found for the selected date range'}), 404
 
-        # Build CSV
+        sorted_ts = sorted(rows_by_ts.keys())
+
+        # For energy types: energy_kwh is a raw PZEM cumulative counter (e.g. 370 kWh since
+        # the sensor was last physically reset). Convert it to relative consumption within
+        # the exported period by subtracting the first value, so row 1 starts at 0.0000 kWh.
+        if dtype in ('energy_ac', 'energy_lamp') and 'energy_kwh' in fields:
+            first_kwh = None
+            for ts in sorted_ts:
+                v = rows_by_ts[ts].get('energy_kwh')
+                if v is not None:
+                    first_kwh = float(v)
+                    break
+            if first_kwh is not None:
+                for ts in sorted_ts:
+                    v = rows_by_ts[ts].get('energy_kwh')
+                    if v is not None:
+                        rows_by_ts[ts]['energy_kwh'] = round(float(v) - first_kwh, 4)
+
+        # Build CSV — rename energy_kwh column to consumption_kwh for energy exports
         import io, csv as _csv
         output = io.StringIO()
-        header = ['Waktu'] + fields
+        csv_fields = ['consumption_kwh' if (f == 'energy_kwh' and dtype in ('energy_ac','energy_lamp')) else f for f in fields]
+        header = ['Timestamp'] + csv_fields
         writer = _csv.writer(output)
         writer.writerow(header)
-        for ts_str in sorted(rows_by_ts.keys()):
+        for ts_str in sorted_ts:
             row_d = rows_by_ts[ts_str]
             row = [ts_str] + [round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '') for f in fields]
             writer.writerow(row)
