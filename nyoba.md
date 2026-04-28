@@ -14,6 +14,8 @@ from ultralytics import YOLO
 import random
 import math
 import os
+import tempfile
+import subprocess
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -38,7 +40,29 @@ alert_rules = {
 }
 active_alerts = deque(maxlen=50)
 
-# Occupancy Feedback
+# Timezone warning (set at startup by check_timezone())
+_system_tz_warn = ''   # empty = OK; non-empty = displayed in dashboard banner
+
+def check_timezone():
+    """Check RPi system timezone. Warn if not Asia/Jakarta."""
+    global _system_tz_warn
+    try:
+        result = subprocess.run(
+            ['timedatectl', 'show', '--property=Timezone', '--value'],
+            capture_output=True, text=True, timeout=3
+        )
+        tz = result.stdout.strip()
+        if tz and tz != 'Asia/Jakarta':
+            _system_tz_warn = f"System timezone is '{tz}', expected 'Asia/Jakarta'. Run: sudo timedatectl set-timezone Asia/Jakarta"
+            print(f"[WARN] {_system_tz_warn}")
+        else:
+            _system_tz_warn = ''
+            if tz:
+                print(f"  [TZ] Timezone OK: {tz}")
+    except FileNotFoundError:
+        pass   # Not on Linux/RPi — skip silently
+    except Exception as e:
+        print(f"[WARN] Timezone check failed: {e}")
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
 occupancy_feedback = deque(maxlen=200)
 
@@ -59,43 +83,123 @@ lamp_recording = {
 # Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)
 LAMP_RATED_WATT = 30.0   # Total watt kedua lampu at 100% brightness (2 × 15W LED)
 LAMP_VOLTAGE = 220.0     # Tegangan nominal Indonesia
-_lamp_energy_kwh = 0.0   # Akumulator kWh estimasi lampu (reset setiap server restart)
+_lamp_energy_kwh = 0.0   # Akumulator kWh estimasi lampu
 _lamp_energy_last_ts = 0.0
+
+# Lock for all recording-state globals (energy_phase, energy_recording, lamp_phase, lamp_recording, _lamp_energy_kwh)
+_recording_lock = threading.Lock()
 
 # Persist energy_recording to disk so it survives server restart
 ENERGY_RECORDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'energy_recording.json')
+ENERGY_RECORDING_BAK  = ENERGY_RECORDING_FILE + '.bak'
+
+def _validate_recording_entry(entry):
+    """Return a clean recording entry dict — reject bad types from corrupted JSON."""
+    if not isinstance(entry, dict):
+        return {'active': False, 'start': None, 'end': None}
+    return {
+        'active': bool(entry.get('active', False)),
+        'start':  entry.get('start') if isinstance(entry.get('start'), str) else None,
+        'end':    entry.get('end')   if isinstance(entry.get('end'),   str) else None,
+    }
 
 def save_energy_recording():
-    """Save energy_recording and lamp_recording state to JSON file"""
-    try:
-        with open(ENERGY_RECORDING_FILE, 'w') as f:
-            json.dump({
-                'phase': energy_phase, 'recording': energy_recording,
-                'lamp_phase': lamp_phase, 'lamp_recording': lamp_recording
-            }, f)
-    except Exception as e:
-        print(f"[WARN] Save energy recording failed: {e}")
+    """
+    Atomically persist recording state to disk.
+    Strategy: write to a temp file in the same directory, fsync, then rename
+    (rename is atomic on POSIX/ext4 — what the RPi runs).
+    A .bak copy of the previous good file is kept for disaster recovery.
+    """
+    with _recording_lock:
+        payload = {
+            'phase':          energy_phase,
+            'recording':      energy_recording,
+            'lamp_phase':     lamp_phase,
+            'lamp_recording': lamp_recording,
+            'lamp_energy_kwh': round(_lamp_energy_kwh, 6),
+            'saved_at':       datetime.utcnow().isoformat() + 'Z',
+        }
+        try:
+            dir_path = os.path.dirname(ENERGY_RECORDING_FILE)
+            # Write to a sibling temp file so the rename stays on the same filesystem
+            fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w') as fh:
+                    json.dump(payload, fh, indent=2)
+                    fh.flush()
+                    os.fsync(fh.fileno())   # force kernel buffer → disk
+            except Exception:
+                os.unlink(tmp_path)
+                raise
+            # Rotate: current → .bak, then new → current  (two renames, both atomic)
+            if os.path.exists(ENERGY_RECORDING_FILE):
+                os.replace(ENERGY_RECORDING_FILE, ENERGY_RECORDING_BAK)
+            os.replace(tmp_path, ENERGY_RECORDING_FILE)
+        except Exception as e:
+            print(f"[WARN] save_energy_recording failed: {e}")
 
 def load_energy_recording():
-    """Load energy_recording and lamp_recording state from JSON file"""
+    """
+    Load recording state from JSON file.
+    Falls back to .bak if the main file is corrupted.
+    Handles active-recording-on-restart: keeps active=True so the phase tag
+    continues to be applied to new InfluxDB writes, but logs a warning.
+    Also restores _lamp_energy_kwh so the accumulator survives restarts.
+    """
     global energy_phase, energy_recording, lamp_phase, lamp_recording
-    try:
-        if os.path.exists(ENERGY_RECORDING_FILE):
-            with open(ENERGY_RECORDING_FILE, 'r') as f:
+    global _lamp_energy_kwh, _lamp_energy_last_ts
+
+    for candidate in (ENERGY_RECORDING_FILE, ENERGY_RECORDING_BAK):
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, 'r') as f:
                 data = json.load(f)
+            # Validate top-level types
+            if not isinstance(data, dict):
+                raise ValueError("root is not a dict")
+
             energy_phase = data.get('phase', 'idle')
-            rec = data.get('recording', {})
-            for phase in ['before', 'after']:
-                if phase in rec:
-                    energy_recording[phase] = rec[phase]
+            if energy_phase not in ('before', 'after', 'idle'):
+                energy_phase = 'idle'
+
+            raw_rec = data.get('recording', {})
+            if isinstance(raw_rec, dict):
+                for ph in ('before', 'after'):
+                    energy_recording[ph] = _validate_recording_entry(raw_rec.get(ph, {}))
+
             lamp_phase = data.get('lamp_phase', 'idle')
-            lrec = data.get('lamp_recording', {})
-            for phase in ['before', 'after']:
-                if phase in lrec:
-                    lamp_recording[phase] = lrec[phase]
-            print(f"[OK] Loaded energy recording state: ac_phase={energy_phase}, lamp_phase={lamp_phase}")
-    except Exception as e:
-        print(f"[WARN] Load energy recording failed: {e}")
+            if lamp_phase not in ('before', 'after', 'idle'):
+                lamp_phase = 'idle'
+
+            raw_lrec = data.get('lamp_recording', {})
+            if isinstance(raw_lrec, dict):
+                for ph in ('before', 'after'):
+                    lamp_recording[ph] = _validate_recording_entry(raw_lrec.get(ph, {}))
+
+            # Restore accumulated kWh so the counter doesn't reset to 0 on restart
+            saved_kwh = data.get('lamp_energy_kwh', 0.0)
+            if isinstance(saved_kwh, (int, float)) and saved_kwh >= 0:
+                _lamp_energy_kwh = float(saved_kwh)
+                _lamp_energy_last_ts = time.time()  # treat 'now' as last known point
+
+            # Warn if any recording was still active when the server stopped
+            for ph in ('before', 'after'):
+                if energy_recording[ph]['active']:
+                    print(f"[WARN] AC recording '{ph}' was active at last shutdown — resuming. "
+                          f"Gap since {energy_recording[ph]['start']} will appear in data.")
+                if lamp_recording[ph]['active']:
+                    print(f"[WARN] Lamp recording '{ph}' was active at last shutdown — resuming.")
+
+            src = "main" if candidate == ENERGY_RECORDING_FILE else "BACKUP"
+            print(f"[OK] Loaded energy recording ({src}): "
+                  f"ac_phase={energy_phase}, lamp_phase={lamp_phase}, "
+                  f"lamp_kwh={_lamp_energy_kwh:.4f}")
+            return  # success — stop trying candidates
+        except Exception as e:
+            print(f"[WARN] load_energy_recording failed for {candidate}: {e}")
+
+    print("[INFO] No valid energy_recording.json found — starting fresh.")
 
 load_energy_recording()
 
@@ -104,6 +208,10 @@ load_energy_recording()
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
 OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
+
+# AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
+AC_MODE_NAMES = {0: 'COOL', 1: 'DRY', 2: 'FAN', 3: 'AUTO'}
 
 # Live sensor data for fitness calculation
 opt_sensor_data = {
@@ -141,7 +249,8 @@ def _get_temp_uniformity():
     if len(temps) < 2: return 1.0
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
-def calculate_ac_fitness(temp_set, fan_speed):
+def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
+    """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO"""
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
     # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
@@ -191,6 +300,28 @@ def calculate_ac_fitness(temp_set, fan_speed):
         fitness -= (24.0 - temp_set) * 3.0
     if temp_set < 18 and fan_speed == 3:
         fitness -= 10.0
+
+    # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
+    # COOL (0): best for cooling — reward when room is warm and cooling needed
+    # DRY  (1): dehumidification — reward when humidity > 65%
+    # FAN  (2): no cooling, just air circulation — penalise when hot, reward when mild
+    # AUTO (3): neutral — small bonus for flexibility
+    if mode_idx == 0:   # COOL
+        if temp_room > target_temp:
+            fitness += min(10.0, (temp_room - target_temp) * 2.0)
+    elif mode_idx == 1:  # DRY
+        if humidity > 65:
+            fitness += min(10.0, (humidity - 65) / 3.5)
+        elif humidity < 50:
+            fitness -= 8.0   # DRY when already dry — bad
+    elif mode_idx == 2:  # FAN
+        if temp_room <= target_temp + 1:
+            fitness += 5.0   # mild room — fan sufficient
+        else:
+            fitness -= (temp_room - (target_temp + 1)) * 3.0  # hot room — penalise FAN
+    elif mode_idx == 3:  # AUTO
+        fitness += 3.0  # small neutral bonus
+
     return max(0.0, round(fitness, 2))
 
 def calculate_lamp_fitness_2d(brightness1, brightness2):
@@ -241,10 +372,6 @@ def calculate_lamp_fitness_2d(brightness1, brightness2):
 
     return max(0.0, round(fitness, 2))
 
-# Keep backward compat wrapper for single-brightness calls
-def calculate_lamp_fitness(brightness):
-    return calculate_lamp_fitness_2d(brightness, brightness)
-
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
         if v is not None and k in opt_sensor_data:
@@ -263,8 +390,7 @@ def update_opt_sensor_data(**kwargs):
 
 def fetch_sensor_data_from_db(time_range_minutes=30):
     try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        query_api = client.query_api()
+        _, _, query_api = _get_influx_client()
         ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
         lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2" or r._field == "lux3" or r._field == "lux_avg") |> mean()'
         for table in query_api.query(ac_query):
@@ -283,7 +409,6 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     elif field in ('lux1', 'lux2', 'lux3'):
                         opt_sensor_data[field] = round(float(val), 1)
         opt_sensor_data['data_source'] = 'influxdb'
-        client.close()
     except Exception as e:
         print(f"[OPT] InfluxDB fetch failed: {e}, using MQTT data")
         opt_sensor_data['data_source'] = 'mqtt_fallback'
@@ -297,17 +422,22 @@ def run_ga_optimization(verbose=False):
     elite_count = max(2, int(pop_size * elitism_ratio))
     seed_solutions = []
     if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
-        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan']])
+        seed_mode = last_opt_results['ga'].get('mode_idx', 0)
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode])
 
     def create_ind():
-        return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1), random.randint(OPT_FAN_MIN, OPT_FAN_MAX)]
+        # ind = [temp, fan_speed, mode_idx]
+        return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1),
+                random.randint(OPT_FAN_MIN, OPT_FAN_MAX),
+                random.randint(OPT_MODE_MIN, OPT_MODE_MAX)]
 
     population = []
     for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
-        population.append([float(s[0]), int(s[1])])
+        population.append([float(s[0]), int(s[1]), int(s[2])])
         if len(population) < pop_size:
             population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
-                               max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1])))])
+                               max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1]))),
+                               int(s[2])])
     while len(population) < pop_size:
         population.append(create_ind())
     population = population[:pop_size]
@@ -318,7 +448,7 @@ def run_ga_optimization(verbose=False):
     prev_best = 0
 
     for gen in range(generations):
-        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
         paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
         population = [p[0] for p in paired]
         scores = [p[1] for p in paired]
@@ -333,7 +463,7 @@ def run_ga_optimization(verbose=False):
         if stagnation_counter >= stagnation_limit:
             for i in range(max(2, pop_size // 4)):
                 population[-(i + 1)] = create_ind()
-            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1]) for ind in population]
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
             boost = True
             stagnation_counter = 0
         if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
@@ -347,7 +477,7 @@ def run_ga_optimization(verbose=False):
             selected.append(population[best_idx][:])
         while len(next_pop) < pop_size:
             p1, p2 = random.sample(selected, 2)
-            # BLX-alpha crossover
+            # BLX-alpha crossover for temp; uniform for fan & mode
             if random.random() < crossover_rate:
                 alpha = 0.3
                 lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
@@ -356,7 +486,9 @@ def run_ga_optimization(verbose=False):
                 c2t = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, random.uniform(lo - alpha * span, hi + alpha * span))), 1)
                 c1f = p1[1] if random.random() < 0.5 else p2[1]
                 c2f = p2[1] if random.random() < 0.5 else p1[1]
-                child1, child2 = [c1t, c1f], [c2t, c2f]
+                c1m = p1[2] if random.random() < 0.5 else p2[2]
+                c2m = p2[2] if random.random() < 0.5 else p1[2]
+                child1, child2 = [c1t, c1f, c1m], [c2t, c2f, c2m]
             else:
                 child1, child2 = p1[:], p2[:]
             # mutate
@@ -369,22 +501,25 @@ def run_ga_optimization(verbose=False):
                     child[0] = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, child[0] + random.gauss(0, step))), 1)
                 if random.random() < adaptive_rate:
                     child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
+                if random.random() < adaptive_rate * 0.5:  # mode mutates less often
+                    child[2] = random.randint(OPT_MODE_MIN, OPT_MODE_MAX)
             next_pop.append(child1)
             if len(next_pop) < pop_size:
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # brute-force validation
+    # brute-force validation (temp × fan × mode search)
     bf_best_fit, bf_best_sol = -1, None
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
         for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
-            fit = calculate_ac_fitness(t, f)
-            if fit > bf_best_fit:
-                bf_best_fit, bf_best_sol = fit, [t, f]
+            for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
+                fit = calculate_ac_fitness(t, f, m)
+                if fit > bf_best_fit:
+                    bf_best_fit, bf_best_sol = fit, [t, f, m]
     if bf_best_fit > best_fitness:
-        best_solution = [float(bf_best_sol[0]), bf_best_sol[1]]
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2]]
         best_fitness = bf_best_fit
-    final = [int(round(best_solution[0])), best_solution[1]]
+    final = [int(round(best_solution[0])), best_solution[1], best_solution[2]]
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
@@ -469,8 +604,13 @@ def run_optimization_cycle(algo='both'):
         fetch_sensor_data_from_db(30)
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
-            last_opt_results['ga'] = {'fitness': fit, 'temp': sol[0], 'fan': sol[1], 'stats': hist, 'brute_force': bf}
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} fitness={fit:.2f}")
+            mode_idx = sol[2] if len(sol) > 2 else 0
+            last_opt_results['ga'] = {
+                'fitness': fit, 'temp': sol[0], 'fan': sol[1],
+                'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
+                'stats': hist, 'brute_force': bf
+            }
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
         if algo in ('pso', 'both'):
             sol, fit, hist = run_pso_optimization()
             b1, b2 = sol[0], sol[1]
@@ -484,6 +624,7 @@ def run_optimization_cycle(algo='both'):
             'optimization_runs': optimization_run_count,
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
+            'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
             'pso_brightness': last_opt_results['pso']['brightness'],
             'pso_brightness1': last_opt_results['pso'].get('brightness1', 0),
             'pso_brightness2': last_opt_results['pso'].get('brightness2', 0),
@@ -497,6 +638,7 @@ def run_optimization_cycle(algo='both'):
             'pso_fitness': float(last_opt_results['pso']['fitness']),
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
+            'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
@@ -504,14 +646,15 @@ def run_optimization_cycle(algo='both'):
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-            opt_temp = last_opt_results['ga']['temp']
-            opt_fan = last_opt_results['ga']['fan']
-            if 16 <= opt_temp <= 30 and opt_fan >= 1:
-                now = time.time()
-                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
-                    _last_adaptive_ac_apply = now
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
-                    mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                    opt_temp = last_opt_results['ga']['temp']
+                    opt_fan  = last_opt_results['ga']['fan']
+                    opt_mode = last_opt_results['ga'].get('mode', 'COOL')
+                    if 16 <= opt_temp <= 30 and opt_fan >= 1:
+                        now = time.time()
+                        if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
+                            _last_adaptive_ac_apply = now
+                            ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                            mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
         # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
         if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -533,7 +676,12 @@ def run_optimization_cycle(algo='both'):
             'pso_history': last_opt_results['pso'].get('stats', [])
         }
         if algo in ('ga', 'both'):
-            status_payload['ga_solution'] = {'temperature': last_opt_results['ga']['temp'], 'fan_speed': last_opt_results['ga']['fan']}
+            status_payload['ga_solution'] = {
+                'temperature': last_opt_results['ga']['temp'],
+                'fan_speed': last_opt_results['ga']['fan'],
+                'mode': last_opt_results['ga'].get('mode', 'COOL'),
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
+            }
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)}
         socketio.emit('ml_status', status_payload)
@@ -632,7 +780,7 @@ mqtt_data = {
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
-    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
+    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
 }
@@ -657,34 +805,73 @@ energy_runtime_history = deque(maxlen=5000)
 # Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
 lamp_runtime_history = deque(maxlen=5000)
 
-# ==================== INFLUXDB WRITE FUNCTIONS ====================
+# ==================== INFLUXDB SINGLETON ====================
+# One persistent client + write_api shared across all threads.
+# Query-API is stateless and thread-safe; write_api (SYNCHRONOUS) is also safe.
+# A RLock guards reinitialisation so two threads cannot race on _influx_write_api.
+_influx_lock    = threading.RLock()
+_influx_client  = None
+_influx_write_api = None
+
+def _get_influx_client():
+    """Return (client, write_api, query_api) — creates or recreates if closed/None."""
+    global _influx_client, _influx_write_api
+    with _influx_lock:
+        if _influx_client is None:
+            _influx_client   = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+            _influx_write_api = _influx_client.write_api(write_options=SYNCHRONOUS)
+        return _influx_client, _influx_write_api, _influx_client.query_api()
+
+def _reset_influx_client():
+    """Force-close and nullify so the next call recreates it (used after unrecoverable errors)."""
+    global _influx_client, _influx_write_api
+    with _influx_lock:
+        try:
+            if _influx_write_api:
+                _influx_write_api.close()
+        except Exception:
+            pass
+        try:
+            if _influx_client:
+                _influx_client.close()
+        except Exception:
+            pass
+        _influx_client    = None
+        _influx_write_api = None
+
+# Eager initialisation — fail fast at startup if InfluxDB is unreachable
+try:
+    _get_influx_client()
+    print("[OK] InfluxDB singleton initialised")
+except Exception as _e:
+    print(f"[WARN] InfluxDB not reachable at startup: {_e} — will retry on first use")
+
+# ==================== INFLUXDB WRITE / QUERY HELPERS ====================
 def write_to_influxdb(measurement, fields, tags=None):
-    """Write data point to InfluxDB"""
-    try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        write_api = client.write_api(write_options=SYNCHRONOUS)
-        
-        point = Point(measurement).time(datetime.utcnow(), WritePrecision.NS)
-        
-        if tags:
-            for key, value in tags.items():
-                point = point.tag(key, str(value))
-        
-        for key, value in fields.items():
-            if isinstance(value, (int, float)):
-                point = point.field(key, float(value))
-            elif isinstance(value, bool):
-                point = point.field(key, value)
-            else:
-                point = point.field(key, str(value))
-        
-        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
-        write_api.close()
-        client.close()
-        return True
-    except Exception as e:
-        print(f"[ERROR] InfluxDB Write Error ({measurement}): {str(e)}")
-        return False
+    """Write a single data point using the shared singleton client.
+    Retries once after resetting the client on connection-level errors."""
+    point = Point(measurement).time(datetime.utcnow(), WritePrecision.NS)
+    if tags:
+        for key, value in tags.items():
+            point = point.tag(key, str(value))
+    for key, value in fields.items():
+        if isinstance(value, bool):
+            point = point.field(key, value)
+        elif isinstance(value, (int, float)):
+            point = point.field(key, float(value))
+        else:
+            point = point.field(key, str(value))
+
+    for attempt in range(2):
+        try:
+            _, write_api, _ = _get_influx_client()
+            write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+            return True
+        except Exception as e:
+            print(f"[ERROR] InfluxDB write ({measurement}) attempt {attempt+1}: {e}")
+            if attempt == 0:
+                _reset_influx_client()   # recreate connection, then retry once
+    return False
 
 def save_sensor_data(temperature, humidity, heat_index):
     try:
@@ -694,38 +881,41 @@ def save_sensor_data(temperature, humidity, heat_index):
     except Exception as e:
         print(f'[ERROR] save_sensor_data: {e}')
 
-def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, brightness3, motion):
+def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
     global _lamp_energy_kwh, _lamp_energy_last_ts
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2) / 2.0
         write_to_influxdb('lamp_sensor', {
             'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
-            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness3': float(brightness3), 'brightness_avg': float(bright_avg),
+            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
             'motion': bool(motion)
         }, tags={'device': 'esp32_lamp', 'location': 'room'})
         # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
         now_ts = time.time()
         lamp_power = round((bright_avg / 100.0) * LAMP_RATED_WATT, 2)
         lamp_current = round(lamp_power / LAMP_VOLTAGE, 3) if lamp_power > 0 else 0.0
-        if _lamp_energy_last_ts > 0:
-            dt_h = (now_ts - _lamp_energy_last_ts) / 3600.0
-            _lamp_energy_kwh += lamp_power * dt_h / 1000.0
-        _lamp_energy_last_ts = now_ts
+        with _recording_lock:
+            if _lamp_energy_last_ts > 0:
+                dt_h = (now_ts - _lamp_energy_last_ts) / 3600.0
+                _lamp_energy_kwh += lamp_power * dt_h / 1000.0
+            _lamp_energy_last_ts = now_ts
+            kwh_snapshot  = round(_lamp_energy_kwh, 4)
+            phase_snapshot = lamp_phase
         write_to_influxdb('energy_monitor', {
             'power': lamp_power,
             'current': lamp_current,
             'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
-            'energy_kwh': round(_lamp_energy_kwh, 4)
-        }, tags={'device': 'esp32_lamp', 'phase': lamp_phase})
+            'energy_kwh': kwh_snapshot
+        }, tags={'device': 'esp32_lamp', 'phase': phase_snapshot})
         # Fill runtime buffer for immediate chart display (fallback when InfluxDB has no data yet)
         lamp_runtime_history.append({
             'ts': datetime.now(),
-            'phase': lamp_phase,
+            'phase': phase_snapshot,
             'power': lamp_power,
             'current': lamp_current,
             'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
-            'energy_kwh': round(_lamp_energy_kwh, 4)
+            'energy_kwh': kwh_snapshot
         })
     except Exception as e:
         print(f'[ERROR] save_lamp_data: {e}')
@@ -758,8 +948,6 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
 def load_yolo_model():
     global yolo_model
     try:
-        import os
-        
         yolo_dir = '/home/iotlab/smartroom/yolo'
         model_path = f'{yolo_dir}/yolov8n.pt'
         
@@ -1397,7 +1585,7 @@ def on_message(client, userdata, msg):
                 'uptime': payload.get('uptime', 0)
             })
             # Save lamp data to InfluxDB
-            save_lamp_data(l1, l2, l3, b1, b2, 0, mqtt_data['lamp']['motion'])
+            save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3)
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
@@ -1414,33 +1602,7 @@ def on_message(client, userdata, msg):
                 'pf': payload.get('pf', 0),
                 'connected': True
             })
-            write_to_influxdb('energy_monitor', {
-                'voltage': float(mqtt_data['energy']['voltage']),
-                'current': float(mqtt_data['energy']['current']),
-                'power': float(mqtt_data['energy']['power']),
-                'energy_kwh': float(mqtt_data['energy']['energy']),
-                'frequency': float(mqtt_data['energy']['frequency']),
-                'power_factor': float(mqtt_data['energy']['pf'])
-            }, tags={'device': 'pzem016', 'phase': energy_phase})
-
-            # Keep runtime ring-buffer so charts still work even if Influx has no data yet.
-            try:
-                energy_runtime_history.append({
-                    'ts': datetime.now(),
-                    'phase': energy_phase,
-                    'voltage': float(mqtt_data['energy']['voltage']),
-                    'current': float(mqtt_data['energy']['current']),
-                    'power': float(mqtt_data['energy']['power']),
-                    'energy_kwh': float(mqtt_data['energy']['energy']),
-                    'frequency': float(mqtt_data['energy']['frequency']),
-                    'power_factor': float(mqtt_data['energy']['pf'])
-                })
-            except Exception:
-                pass
-
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
-            # Track device status
-            device_last_seen['esp32_energy'] = {'last_seen': datetime.now(), 'status': 'online'}
 
         elif 'camera/detection' in topic:
             person_from_mqtt = payload.get('person_detected', False)
@@ -1487,13 +1649,14 @@ def on_message(client, userdata, msg):
             # AUTO-APPLY AC — only if ga_solution was present in this payload
             if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
                 opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
-                opt_fan = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
+                opt_fan  = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
+                opt_mode = ga_sol.get('mode', 'COOL')
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                     global _last_adaptive_ac_apply
                     now = time.time()
                     if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                         _last_adaptive_ac_apply = now
-                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
             # AUTO-APPLY Lamp — only if pso_solution was present in this payload
             if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -1571,7 +1734,6 @@ def on_message(client, userdata, msg):
                 save_ir_command(device, button_name, len(ir_code))
                 
                 try:
-                    import os
                     ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                     with open(ir_file, 'w') as f:
                         json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -1642,9 +1804,7 @@ mqtt_thread.start()
 # ==================== INFLUXDB ====================
 def get_influx_data(measurement, field, hours=1):
     try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        query_api = client.query_api()
-        
+        _, _, query_api = _get_influx_client()
         query = f'''
         from(bucket: "{INFLUX_BUCKET}")
           |> range(start: -{hours}h)
@@ -1653,9 +1813,7 @@ def get_influx_data(measurement, field, hours=1):
           |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
           |> yield(name: "mean")
         '''
-        
         result = query_api.query(query=query)
-        
         data_points = []
         for table in result:
             for record in table.records:
@@ -1663,10 +1821,7 @@ def get_influx_data(measurement, field, hours=1):
                     'time': record.get_time().astimezone().strftime('%H:%M'),
                     'value': round(float(record.get_value()), 2)
                 })
-        
-        client.close()
         return data_points
-        
     except Exception as e:
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'InfluxDB Query Error: {str(e)}', 'level': 'error'})
         return []
@@ -1768,6 +1923,10 @@ def get_data():
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     return response
+
+@app.route('/api/system/tz-status')
+def get_tz_status():
+    return jsonify({'warning': _system_tz_warn, 'ok': _system_tz_warn == ''})
 
 @app.route('/api/mqtt/status')
 def get_mqtt_status():
@@ -1901,7 +2060,41 @@ def occupancy_feedback_submit():
 def occupancy_feedback_list():
     return jsonify({'feedback': list(occupancy_feedback)[:20]})
 
-@app.route('/api/chart/<measurement>/<field>/<int:hours>')
+# ── Server-side recording state (shared across all devices) ──
+_rec_state = {'energy': False, 'temp': False, 'lux': False}
+
+@app.route('/api/rec/state', methods=['GET', 'POST'])
+def rec_state_api():
+    global _rec_state
+    if request.method == 'POST':
+        data = request.get_json(force=True) or {}
+        for k in ('energy', 'temp', 'lux'):
+            if k in data:
+                _rec_state[k] = bool(data[k])
+        return jsonify({'ok': True, 'state': _rec_state})
+    return jsonify(_rec_state)
+
+# ── Server-side recorded data (shared across all devices, in-memory) ──
+_rec_data = {'energy': [], 'temp': [], 'lux': []}
+
+@app.route('/api/rec/data', methods=['GET', 'POST', 'DELETE'])
+def rec_data_api():
+    global _rec_data
+    dtype = request.args.get('type', 'energy')
+    if dtype not in ('energy', 'temp', 'lux'):
+        return jsonify({'error': 'invalid type'}), 400
+    if request.method == 'DELETE':
+        _rec_data[dtype] = []
+        return jsonify({'ok': True})
+    if request.method == 'POST':
+        body = request.get_json(force=True) or {}
+        rows = body.get('rows', [])
+        if isinstance(rows, list) and len(rows) <= 50000:
+            _rec_data[dtype] = rows   # replace (not append) to stay idempotent
+        return jsonify({'ok': True, 'count': len(_rec_data[dtype])})
+    return jsonify({'rows': _rec_data[dtype], 'count': len(_rec_data[dtype])})
+
+
 def get_chart_data(measurement, field, hours):
     data = get_influx_data(measurement, field, hours)
     return jsonify(data)
@@ -1923,33 +2116,37 @@ def energy_record_api():
     """Start/stop recording for before/after energy comparison phases"""
     global energy_phase, energy_recording
     if request.method == 'POST':
-        phase = request.json.get('phase', '').lower()
-        action = request.json.get('action', '').lower()
+        body = request.json or {}
+        phase = body.get('phase', '').lower()
+        action = body.get('action', '').lower()
         if phase not in ('before', 'after'):
             return jsonify({'error': 'Phase must be before or after'}), 400
         if action not in ('start', 'stop'):
             return jsonify({'error': 'Action must be start or stop'}), 400
 
-        if action == 'start':
-            # Stop the other phase if it is recording
-            other = 'after' if phase == 'before' else 'before'
-            if energy_recording[other]['active']:
-                energy_recording[other]['active'] = False
-                energy_recording[other]['end'] = datetime.utcnow().isoformat()
-            energy_recording[phase]['active'] = True
-            energy_recording[phase]['start'] = datetime.utcnow().isoformat()
-            energy_recording[phase]['end'] = None
-            energy_phase = phase
-        else:
-            energy_recording[phase]['active'] = False
-            energy_recording[phase]['end'] = datetime.utcnow().isoformat()
-            energy_phase = 'idle'
+        with _recording_lock:
+            if action == 'start':
+                other = 'after' if phase == 'before' else 'before'
+                if energy_recording[other]['active']:
+                    energy_recording[other]['active'] = False
+                    energy_recording[other]['end'] = datetime.utcnow().isoformat()
+                energy_recording[phase]['active'] = True
+                energy_recording[phase]['start'] = datetime.utcnow().isoformat()
+                energy_recording[phase]['end'] = None
+                energy_phase = phase
+            else:
+                energy_recording[phase]['active'] = False
+                energy_recording[phase]['end'] = datetime.utcnow().isoformat()
+                energy_phase = 'idle'
+            snapshot_rec   = {k: dict(v) for k, v in energy_recording.items()}
+            snapshot_phase = energy_phase
 
         save_energy_recording()
-        socketio.emit('energy_recording', {'recording': energy_recording, 'phase': energy_phase})
-        return jsonify({'recording': energy_recording, 'phase': energy_phase})
+        socketio.emit('energy_recording', {'recording': snapshot_rec, 'phase': snapshot_phase})
+        return jsonify({'recording': snapshot_rec, 'phase': snapshot_phase})
 
-    return jsonify({'recording': energy_recording, 'phase': energy_phase})
+    with _recording_lock:
+        return jsonify({'recording': {k: dict(v) for k, v in energy_recording.items()}, 'phase': energy_phase})
 
 @app.route('/api/energy/compare')
 def energy_compare():
@@ -1962,8 +2159,7 @@ def energy_compare():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        query_api = client.query_api()
+        _, _, query_api = _get_influx_client()
 
         results = {}
         for phase in ['before', 'after']:
@@ -2084,7 +2280,6 @@ def energy_compare():
         avg_after = round(sum(after_vals) / len(after_vals), 2) if after_vals else 0
         savings_pct = round((1 - avg_after / avg_before) * 100, 1) if avg_before > 0 else 0
 
-        client.close()
         return jsonify({
             'field': field,
             'before': results['before'],
@@ -2101,12 +2296,95 @@ def energy_compare():
         print(f"[ERROR] Energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
+@app.route('/api/energy/export-csv')
+def energy_export_csv():
+    """Export data energi sebagai CSV — dari ring buffer realtime atau PHP proxy.
+    ?device=ac|lamp|all   (default: all)
+    ?source=realtime|php  (default: php — ambil dari PHP proxy)
+    """
+    import io, csv as csv_mod
+
+    device = request.args.get('device', 'all')   # ac, lamp, all
+    source = request.args.get('source', 'php')   # php atau realtime
+
+    rows = []
+
+    if source == 'realtime':
+        # Ambil dari ring buffer _mysqlBuf yang ada di JS — tidak bisa langsung.
+        # Gunakan energy_runtime_history yang ada di Python.
+        with _recording_lock:
+            hist = list(energy_runtime_history)
+        for rec in hist:
+            rows.append({
+                'timestamp': rec.get('ts', '').strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec.get('ts',''), 'strftime') else str(rec.get('ts','')),
+                'device':    'AC',
+                'tegangan':  rec.get('voltage', 0),
+                'arus':      rec.get('current', 0),
+                'daya_aktif':rec.get('power', 0),
+                'energi_kwh':rec.get('energy_kwh', 0),
+                'frekuensi': rec.get('frequency', 0),
+                'pf':        rec.get('power_factor', 0),
+                'reaktif':   '',
+                'semu':      '',
+            })
+    else:
+        # Ambil langsung dari PHP proxy (fresh data)
+        import urllib.request as _ureq, json as _json
+        PHP_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024'
+        try:
+            req = _ureq.Request(PHP_URL, headers={'User-Agent': 'SmartRoom-Export/1.0'})
+            with _ureq.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+        except Exception as ex:
+            return jsonify({'error': f'Gagal ambil data PHP: {ex}'}), 502
+
+        if 'error' in data:
+            return jsonify({'error': data['error']}), 500
+
+        def _row(d, label):
+            ap = float(d.get('apparent_power') or 0)
+            p  = float(d.get('active_power') or 0)
+            pf = round(p / ap, 3) if ap > 0.001 else 0.0
+            return {
+                'timestamp':  str(d.get('created_at', '')),
+                'device':     label,
+                'tegangan':   float(d.get('tegangan')   or 0),
+                'arus':       float(d.get('arus')       or 0),
+                'daya_aktif': p,
+                'energi_kwh': float(d.get('total_energy') or 0),
+                'frekuensi':  float(d.get('frekuensi')  or 0),
+                'pf':         pf,
+                'reaktif':    float(d.get('reactive_power') or 0),
+                'semu':       ap,
+            }
+
+        if device in ('ac', 'all') and data.get('ac'):
+            rows.append(_row(data['ac'], 'AC'))
+        if device in ('lamp', 'all') and data.get('lamp'):
+            rows.append(_row(data['lamp'], 'Lampu'))
+
+    # Buat CSV
+    output = io.StringIO()
+    fields = ['timestamp','device','tegangan','arus','daya_aktif','energi_kwh','frekuensi','pf','reaktif','semu']
+    writer = csv_mod.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    csv_text = output.getvalue()
+
+    from flask import Response
+    now_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return Response(
+        csv_text,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=energy_{device}_{now_str}.csv'}
+    )
+
 @app.route('/api/energy/history')
 def energy_history():
     """Get energy history from InfluxDB — supports 1h to 30 days.
-    device=ac  → PZEM-016 data (tag device='pzem016')
-    device=lamp → ESP32 Lamp estimated data (tag device='esp32_lamp')
-    device omitted → AC data (backward compat)
+    device=ac  -> MySQL AC data (tag device='mysql_ac')
+    device=lamp -> MySQL Lamp data (tag device='mysql_lamp')
+    device omitted -> AC data (backward compat)
     """
     period = request.args.get('period', '24h')
     field = request.args.get('field')
@@ -2128,12 +2406,11 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    device_tag = 'pzem016' if device == 'ac' else 'esp32_lamp'
+    device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
     p = period_map[period]
 
     try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        query_api = client.query_api()
+        _, _, query_api = _get_influx_client()
 
         time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
 
@@ -2169,7 +2446,6 @@ def energy_history():
                 if runtime:
                     step = max(1, len(runtime) // 120)
                     data_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)} for r in runtime[::step]]
-            client.close()
             return jsonify({'period': period, 'field': field, 'device': device, 'data': data_points})
 
         power_points = query_field_points('power')
@@ -2189,7 +2465,6 @@ def energy_history():
                 voltage_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sampled]
                 kwh_points     = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
 
-        client.close()
         return jsonify({'period': period, 'device': device, 'power': power_points, 'voltage': voltage_points, 'energy_kwh': kwh_points})
 
     except Exception as e:
@@ -2241,29 +2516,34 @@ def lamp_energy_record_api():
     """Start/stop recording for lamp before/after comparison"""
     global lamp_phase, lamp_recording
     if request.method == 'POST':
-        phase = request.json.get('phase', '').lower()
-        action = request.json.get('action', '').lower()
+        body = request.json or {}
+        phase = body.get('phase', '').lower()
+        action = body.get('action', '').lower()
         if phase not in ('before', 'after'):
             return jsonify({'error': 'Phase must be before or after'}), 400
         if action not in ('start', 'stop'):
             return jsonify({'error': 'Action must be start or stop'}), 400
-        if action == 'start':
-            other = 'after' if phase == 'before' else 'before'
-            if lamp_recording[other]['active']:
-                lamp_recording[other]['active'] = False
-                lamp_recording[other]['end'] = datetime.utcnow().isoformat()
-            lamp_recording[phase]['active'] = True
-            lamp_recording[phase]['start'] = datetime.utcnow().isoformat()
-            lamp_recording[phase]['end'] = None
-            lamp_phase = phase
-        else:
-            lamp_recording[phase]['active'] = False
-            lamp_recording[phase]['end'] = datetime.utcnow().isoformat()
-            lamp_phase = 'idle'
+        with _recording_lock:
+            if action == 'start':
+                other = 'after' if phase == 'before' else 'before'
+                if lamp_recording[other]['active']:
+                    lamp_recording[other]['active'] = False
+                    lamp_recording[other]['end'] = datetime.utcnow().isoformat()
+                lamp_recording[phase]['active'] = True
+                lamp_recording[phase]['start'] = datetime.utcnow().isoformat()
+                lamp_recording[phase]['end'] = None
+                lamp_phase = phase
+            else:
+                lamp_recording[phase]['active'] = False
+                lamp_recording[phase]['end'] = datetime.utcnow().isoformat()
+                lamp_phase = 'idle'
+            snapshot_rec   = {k: dict(v) for k, v in lamp_recording.items()}
+            snapshot_phase = lamp_phase
         save_energy_recording()
-        socketio.emit('lamp_recording', {'recording': lamp_recording, 'phase': lamp_phase})
-        return jsonify({'recording': lamp_recording, 'phase': lamp_phase})
-    return jsonify({'recording': lamp_recording, 'phase': lamp_phase})
+        socketio.emit('lamp_recording', {'recording': snapshot_rec, 'phase': snapshot_phase})
+        return jsonify({'recording': snapshot_rec, 'phase': snapshot_phase})
+    with _recording_lock:
+        return jsonify({'recording': {k: dict(v) for k, v in lamp_recording.items()}, 'phase': lamp_phase})
 
 @app.route('/api/lamp/energy/compare')
 def lamp_energy_compare():
@@ -2276,8 +2556,7 @@ def lamp_energy_compare():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        query_api = client.query_api()
+        _, _, query_api = _get_influx_client()
 
         results = {}
         for phase in ['before', 'after']:
@@ -2333,7 +2612,6 @@ def lamp_energy_compare():
         avg_after   = round(sum(after_vals) / len(after_vals), 2)   if after_vals  else 0
         savings_pct = round((1 - avg_after / avg_before) * 100, 1)  if avg_before > 0 else 0
 
-        client.close()
         return jsonify({
             'field': field,
             'before': results.get('before', []),
@@ -2344,6 +2622,119 @@ def lamp_energy_compare():
     except Exception as e:
         print(f"[ERROR] Lamp energy compare error: {e}")
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
+
+@app.route('/api/energy/daily-summary')
+def energy_daily_summary():
+    """Return today's energy summary: kWh, peak power, avg power, estimated cost, runtime hours."""
+    try:
+        _, _, query_api = _get_influx_client()
+        now_local = datetime.now()
+        midnight_utc = (now_local.replace(hour=0, minute=0, second=0, microsecond=0)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        def _query_today(device_tag, field, agg='mean'):
+            q = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {midnight_utc})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["device"] == "{device_tag}")
+              |> filter(fn: (r) => r["_field"] == "{field}")
+              |> {agg}()
+            '''
+            try:
+                result = query_api.query(q)
+                for table in result:
+                    for rec in table.records:
+                        v = rec.get_value()
+                        if v is not None:
+                            return round(float(v), 3)
+            except Exception:
+                pass
+            return 0.0
+
+        def _query_today_max(device_tag, field):
+            q = f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: {midnight_utc})
+              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+              |> filter(fn: (r) => r["device"] == "{device_tag}")
+              |> filter(fn: (r) => r["_field"] == "{field}")
+              |> max()
+            '''
+            try:
+                result = query_api.query(q)
+                for table in result:
+                    for rec in table.records:
+                        v = rec.get_value()
+                        if v is not None:
+                            return round(float(v), 3)
+            except Exception:
+                pass
+            return 0.0
+
+        def _runtime_hours_from_buffer(buf, threshold_power=10.0):
+            """Count hours today where power > threshold (device was 'on')."""
+            today = now_local.date()
+            on_count = sum(1 for r in buf if r.get('ts') and r['ts'].date() == today and r.get('power', 0) > threshold_power)
+            total_today = sum(1 for r in buf if r.get('ts') and r['ts'].date() == today)
+            if total_today == 0:
+                return 0.0
+            # estimate hours based on fraction of day elapsed so far
+            elapsed_h = now_local.hour + now_local.minute / 60.0
+            return round(elapsed_h * (on_count / total_today), 2)
+
+        # AC metrics (mysql_ac)
+        ac_kwh     = _query_today('mysql_ac', 'energy_kwh', 'max')  # cumulative, so max is total
+        ac_power_avg = _query_today('mysql_ac', 'power', 'mean')
+        ac_power_peak = _query_today_max('mysql_ac', 'power')
+
+        # Lamp metrics (mysql_lamp)
+        lamp_kwh     = _query_today('mysql_lamp', 'energy_kwh', 'max')
+        lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
+        lamp_power_peak = _query_today_max('mysql_lamp', 'power')
+
+        # Runtime from ring buffers (fallback when InfluxDB has no data yet today)
+        ac_runtime_h   = _runtime_hours_from_buffer(energy_runtime_history, threshold_power=50.0)
+        lamp_runtime_h = _runtime_hours_from_buffer(lamp_runtime_history, threshold_power=5.0)
+
+        # If InfluxDB returned 0 kWh, estimate from ring buffer
+        if ac_kwh == 0 and ac_power_avg == 0:
+            today = now_local.date()
+            ac_vals = [r.get('power', 0) for r in energy_runtime_history if r.get('ts') and r['ts'].date() == today]
+            if ac_vals:
+                ac_power_avg = round(sum(ac_vals) / len(ac_vals), 1)
+                ac_power_peak = round(max(ac_vals), 1)
+                ac_kwh = round(ac_power_avg * ac_runtime_h / 1000.0, 4)
+        if lamp_kwh == 0 and lamp_power_avg == 0:
+            today = now_local.date()
+            lamp_vals = [r.get('power', 0) for r in lamp_runtime_history if r.get('ts') and r['ts'].date() == today]
+            if lamp_vals:
+                lamp_power_avg = round(sum(lamp_vals) / len(lamp_vals), 1)
+                lamp_power_peak = round(max(lamp_vals), 1)
+                lamp_kwh = round(lamp_power_avg * lamp_runtime_h / 1000.0, 4)
+
+        total_kwh = round(ac_kwh + lamp_kwh, 4)
+        cost_rp   = round(total_kwh * 1500)
+
+        return jsonify({
+            'date': now_local.strftime('%Y-%m-%d'),
+            'ac': {
+                'kwh': ac_kwh,
+                'power_avg_w': ac_power_avg,
+                'power_peak_w': ac_power_peak,
+                'runtime_h': ac_runtime_h
+            },
+            'lamp': {
+                'kwh': lamp_kwh,
+                'power_avg_w': lamp_power_avg,
+                'power_peak_w': lamp_power_peak,
+                'runtime_h': lamp_runtime_h
+            },
+            'total_kwh': total_kwh,
+            'cost_rp': cost_rp
+        })
+    except Exception as e:
+        print(f"[ERROR] daily-summary: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/ac/control', methods=['POST'])
 def control_ac():
@@ -2471,15 +2862,16 @@ def update_optimization():
         # AUTO-APPLY AC — only if ga_solution was provided in this request
         if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
-            opt_fan = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
+            opt_fan  = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
+            opt_mode = ga_sol.get('mode', 'COOL')
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                 global _last_adaptive_ac_apply
                 now = time.time()
                 if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                     _last_adaptive_ac_apply = now
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': 'COOL', 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan}', 'level': 'success'})
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode}', 'level': 'success'})
         
         # AUTO-APPLY Lamp — only if pso_solution was provided in this request
         if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -2599,7 +2991,6 @@ def delete_ir_code():
             
             # Update file
             try:
-                import os
                 ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
                 with open(ir_file, 'w') as f:
                     json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -2643,7 +3034,6 @@ def manual_save_ir():
         
         # Save to file
         try:
-            import os
             ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
             with open(ir_file, 'w') as f:
                 json.dump(mqtt_data['ir_codes'], f, indent=2)
@@ -3584,173 +3974,62 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- Energy Monitor Panel (PZEM-016) -->
-                <div class="stat-card" id="energy-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(217, 119, 6, 0.08)); border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 14px;">
-                                E
-                            </div>
-                            <div>
-                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Energy Monitor</div>
-                                <div style="font-size: 11px; color: var(--text-secondary);">PZEM-016 + CT — AC Energy Usage</div>
-                            </div>
-                        </div>
-                        <div id="energy-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(107, 114, 128, 0.15); color: #6b7280; border: 1px solid rgba(107, 114, 128, 0.3);">
-                            <i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline
-                        </div>
-                    </div>
-                    <div style="padding: 16px 20px;">
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Voltage</div>
-                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-voltage">0</span><span style="font-size: 12px; color: var(--text-secondary);"> V</span></div>
-                            </div>
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Current</div>
-                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-current">0</span><span style="font-size: 12px; color: var(--text-secondary);"> A</span></div>
-                            </div>
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power</div>
-                                <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="energy-power">0</span><span style="font-size: 12px; color: var(--text-secondary);"> W</span></div>
-                            </div>
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Energy</div>
-                                <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="energy-kwh">0</span><span style="font-size: 12px; color: var(--text-secondary);"> kWh</span></div>
-                            </div>
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Frequency</div>
-                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-freq">0</span><span style="font-size: 12px; color: var(--text-secondary);"> Hz</span></div>
-                            </div>
-                            <div style="background: var(--bg-elevated); border-radius: 12px; padding: 14px; text-align: center;">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;">Power Factor</div>
-                                <div style="font-size: 22px; font-weight: 700; color: var(--text);"><span id="energy-pf">0</span></div>
-                            </div>
-                        </div>
-                        <!-- Estimasi biaya harian -->
-                        <div style="margin-top: 12px; padding: 10px 14px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(217, 119, 6, 0.05)); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
-                            <div style="font-size: 12px; color: var(--text-secondary);">Cost Estimate (Rp 1.444,70/kWh)</div>
-                            <div style="font-size: 14px; font-weight: 700; color: #f59e0b;">Rp <span id="energy-cost">0</span></div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
 
-                <!-- Person Detection - Enhanced Card -->
-                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #ef4444; font-size: 14px;">
-                                PD
-                            </div>
-                            <div>
-                                <div style="font-size: 15px; font-weight: 700; color: var(--text);">Person Detection</div>
-                                <div style="font-size: 11px; color: var(--text-secondary);">YOLOv8n — Camera Real-time</div>
-                            </div>
-                        </div>
-                        <div id="cam-status-badge" style="padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
-                            <i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person
-                        </div>
-                    </div>
-                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(239, 68, 68, 0.06); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Person Count
-                            </div>
-                            <div style="font-size: 32px; font-weight: 800; color: #ef4444;" id="cam-count">0</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">person(s)</div>
-                        </div>
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(245, 158, 11, 0.06); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Confidence
-                            </div>
-                            <div style="font-size: 32px; font-weight: 800; color: #f59e0b;" id="cam-confidence">0%</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);">detection accuracy</div>
-                        </div>
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                            <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Auto Control
-                            </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="cam-auto-status">ON</div>
-                            <div style="font-size: 12px; color: var(--text-secondary);" id="cam-auto-label">Active (10 min timeout)</div>
-                        </div>
-                    </div>
-                    <!-- Last Person Detection + Auto-OFF Timer -->
-                    <div style="padding: 8px 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                        <div style="padding: 12px; background: rgba(99, 102, 241, 0.06); border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.15);">
-                            <div style="font-size: 11px; color: #818cf8; font-weight: 600; margin-bottom: 4px;">
-                                Last Person Detection
-                            </div>
-                            <div style="font-size: 18px; font-weight: 800; color: #6366f1;" id="cam-last-seen">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-last-seen-label">Not detected yet</div>
-                        </div>
-                        <div style="padding: 12px; background: rgba(239, 68, 68, 0.06); border-radius: 10px; border: 1px solid rgba(239, 68, 68, 0.15);">
-                            <div style="font-size: 11px; color: #f87171; font-weight: 600; margin-bottom: 4px;">
-                                Auto-OFF AC
-                            </div>
-                            <div style="font-size: 18px; font-weight: 800; color: #ef4444;" id="cam-auto-off-timer">--</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);" id="cam-auto-off-label">Not active</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- GA + PSO Optimization - Full Width -->
-                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.05)); border-bottom: 1px solid var(--border);">
-                        <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #10b981; font-size: 14px;">
-                                ML
-                        </div>
+                <!-- ===== PANEL REKAM TEMP & HUMIDITY ===== -->
+                <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">ML Optimization Status</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);">Genetic Algorithm -> AC | PSO -> Lamp</div>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-thermometer-half" style="color:#3b82f6;margin-right:8px;"></i>Rekam Suhu &amp; Kelembaban</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data suhu &amp; humidity realtime — interval 1 menit, export ke CSV</p>
+                        </div>
+                        <div id="temp-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
                         </div>
                     </div>
-                    <div style="padding: 16px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
-                        <!-- GA Section -->
-                        <div style="padding: 16px; background: rgba(16, 185, 129, 0.04); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
-                            <div style="font-size: 12px; font-weight: 700; color: #10b981; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                GA -> AC Control
-                            </div>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #10b981;" id="ga-fitness">0.00</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Temp</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #3b82f6;" id="ga-temp">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">°C</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fan</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #8b5cf6;" id="ga-fan">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">speed</div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- PSO Section -->
-                        <div style="padding: 16px; background: rgba(245, 158, 11, 0.04); border-radius: 12px; border: 1px solid rgba(245, 158, 11, 0.15);">
-                            <div style="font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-                                PSO -> Lamp Control
-                            </div>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center;">
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Fitness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #f59e0b;" id="pso-fitness">0.00</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Brightness</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #eab308;" id="pso-brightness">--</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">%</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 10px; color: var(--text-secondary); text-transform: uppercase;">Runs</div>
-                                    <div style="font-size: 20px; font-weight: 800; color: #a855f7;" id="dash-opt-runs">0</div>
-                                    <div style="font-size: 10px; color: var(--text-secondary);">cycle</div>
-                                </div>
-                            </div>
-                        </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                        <button id="btn-temp-start" onclick="tempRecStart()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
+                        </button>
+                        <button id="btn-temp-stop" onclick="tempRecStop()" disabled
+                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                            <i class="fas fa-stop"></i> Stop
+                        </button>
+                        <button onclick="tempRecClear()"
+                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                            <i class="fas fa-trash-alt"></i> Hapus
+                        </button>
+                        <button onclick="tempExportCSV()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
                     </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris: <strong id="temp-rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="temp-rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="temp-rec-start" style="color:var(--text);">--</strong></span>
+                    </div>
+                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
+                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                            <thead>
+                                <tr style="background:rgba(59,130,246,0.08);">
+                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#3b82f6;font-weight:600;">Temp Rata2 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#06b6d4;font-weight:600;">Humidity (%)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T1 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T2 (°C)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">T3 (°C)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="temp-rec-preview">
+                                <tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="temp-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
                 </div>
+
             </div>
         </div>
 
@@ -3875,12 +4154,67 @@ HTML_TEMPLATE = '''
                             PSO
                         </div>
                     </div>
-                    <div class="stat-value" style="font-size: 24px;"><span id="pso-fitness">0.00</span></div>
+                    <div class="stat-value" style="font-size: 24px;"><span>0.00</span></div>
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span id="pso-brightness" style="color: #f59e0b; font-weight: bold;">--</span>%</span>
+                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
+                <!-- ===== PANEL REKAM LUX & BRIGHTNESS ===== -->
+                <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(234,179,8,0.25);background:linear-gradient(160deg,rgba(234,179,8,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                        <div>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-lightbulb" style="color:#eab308;margin-right:8px;"></i>Rekam Lux &amp; Kecerahan Lampu</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data lux 3 sensor, rata-rata &amp; brightness lampu — interval 1 menit, export ke CSV</p>
+                        </div>
+                        <div id="lux-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+                        <button id="btn-lux-start" onclick="luxRecStart()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                            <i class="fas fa-circle" style="font-size:9px;"></i> Mulai Rekam
+                        </button>
+                        <button id="btn-lux-stop" onclick="luxRecStop()" disabled
+                            style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                            <i class="fas fa-stop"></i> Stop
+                        </button>
+                        <button onclick="luxRecClear()"
+                            style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                            <i class="fas fa-trash-alt"></i> Hapus
+                        </button>
+                        <button onclick="luxExportCSV()"
+                            style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris: <strong id="lux-rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="lux-rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="lux-rec-start" style="color:var(--text);">--</strong></span>
+                    </div>
+                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
+                        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                            <thead>
+                                <tr style="background:rgba(234,179,8,0.08);">
+                                    <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 1 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 2 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#eab308;font-weight:600;">Lux 3 (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Avg Lux (lx)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright1 (%)</th>
+                                    <th style="padding:8px 10px;text-align:right;color:#fbbf24;font-weight:600;">Bright2 (%)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="lux-rec-preview">
+                                <tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="lux-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
+                </div>
+
             </div>
         </div>
 
@@ -4035,348 +4369,497 @@ HTML_TEMPLATE = '''
                     </button>
                 </div>
             </div>
+
+            <!-- ===== PANEL OCCUPANCY HARIAN ===== -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Grafik Occupancy Harian</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Jumlah orang terdeteksi per jam (otomatis direkam setiap jam) &mdash; max 24 data/hari</p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
+                        <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
+                    <span style="color:var(--text-secondary);">Data tampil: <strong id="occ-count" style="color:#a855f7;">0</strong> jam</span>
+                    <span style="color:var(--text-secondary);">Berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang</span>
+                </div>
+                <!-- Range filter occupancy -->
+                <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;">
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Hari Ini</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Hari</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Hari</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">Semua</button>
+                </div>
+                <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
+                    <canvas id="occChart"></canvas>
+                </div>
+                <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                        <thead>
+                            <tr style="background:rgba(168,85,247,0.08);">
+                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Waktu</th>
+                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Jam</th>
+                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Jumlah Orang</th>
+                                <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="occ-preview-body">
+                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Energy Usage Page -->
         <div id="energy" class="page">
             <div class="header">
                 <h1>Energy Usage</h1>
-                <p>Real-time & historical energy monitoring from PZEM-016</p>
+                <p>Real-time &amp; historical energy monitoring &mdash; MySQL Database (iotlabun_sbms)</p>
             </div>
 
-            <!-- Real-time summary cards -->
-            <div class="power-grid">
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">AC Energy / Day</div>
-                    <div class="power-value"><span id="ac-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="ac-power">0</span> W</div>
-                </div>
-
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Lamp Energy / Day</div>
-                    <div class="power-value"><span id="lamp-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Power: <span id="lamp-power">0</span> W</div>
-                </div>
-
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Total Energy / Day</div>
-                    <div class="power-value"><span id="total-energy-kwh">0</span> kWh</div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">Total Power: <span id="total-power">0</span> W | Current: <span id="total-current">0</span> A</div>
-                </div>
-
-                <div class="power-card">
-                    <div style="color: var(--text-secondary); margin-bottom: 10px;">Daily Cost</div>
-                    <div class="power-value">Rp<span id="daily-cost">0</span></div>
-                    <div style="color: var(--text-secondary); font-size: 12px; margin-top: 10px;">@ Rp 1,500/kWh</div>
-                </div>
-            </div>
-
-            <!-- Historical Power Chart (AC + Lamp dual-line) -->
-            <div class="chart-container" style="margin-top: 30px;">
-                <div class="chart-header">
-                    <div class="chart-title">Power Consumption — AC <span style="color:#ef4444;">■</span> &amp; Lamp <span style="color:#10b981;">■</span> (W)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="energyPowerChart" height="80"></canvas>
-                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
-                    <span style="color:#ef4444; font-weight:600;">AC</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-power-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:#10b981; font-weight:600; margin-left:10px;">Lamp</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text-primary);">--</strong></span>
-                </div>
-            </div>
-
-            <!-- Historical Voltage Chart (AC only — lamp voltage is grid ~220V) -->
-            <div class="chart-container" style="margin-top: 20px;">
-                <div class="chart-header">
-                    <div class="chart-title">Voltage — AC (V)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">7d</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '30d', this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="energyVoltageChart" height="80"></canvas>
-                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--text-secondary);">
-                    <span>Latest: <strong id="energy-voltage-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span>Min: <strong id="energy-voltage-min" style="color:var(--text-primary);">--</strong></span>
-                    <span>Max: <strong id="energy-voltage-max" style="color:var(--text-primary);">--</strong></span>
-                    <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text-primary);">--</strong></span>
-                </div>
-            </div>
-
-            <!-- Historical Current Chart (AC + Lamp dual-line) -->
-            <div class="chart-container" style="margin-top: 20px;">
-                <div class="chart-header">
-                    <div class="chart-title">Current — AC <span style="color:#f59e0b;">■</span> &amp; Lamp <span style="color:#06b6d4;">■</span> (A)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '24h', this)">24h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">7d</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('current', '30d', this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="energyCurrentChart" height="80"></canvas>
-                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
-                    <span style="color:#f59e0b; font-weight:600;">AC</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:#06b6d4; font-weight:600; margin-left:10px;">Lamp</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text-primary);">--</strong></span>
-                </div>
-            </div>
-
-            <!-- Historical Energy kWh Chart (AC + Lamp dual-line) -->
-            <div class="chart-container" style="margin-top: 20px;">
-                <div class="chart-header">
-                    <div class="chart-title">Cumulative Energy — AC <span style="color:#10b981;">■</span> &amp; Lamp <span style="color:#a855f7;">■</span> (kWh)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
-                        <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="energyKwhChart" height="80"></canvas>
-                <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:10px; font-size:12px;">
-                    <span style="color:#10b981; font-weight:600;">AC</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="energy-kwh-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="energy-kwh-avg" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:#a855f7; font-weight:600; margin-left:10px;">Lamp</span>
-                    <span style="color:var(--text-secondary);">Latest: <strong id="lamp-kwh-latest" style="color:var(--text-primary);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Avg: <strong id="lamp-kwh-avg" style="color:var(--text-primary);">--</strong></span>
-                </div>
-            </div>
-
-            <!-- Estimated daily energy (real-time) -->
-            <div class="chart-container" style="margin-top: 20px;">
-                <div class="chart-header">
-                    <div class="chart-title">Real-time Energy Trend (kWh/day estimate)</div>
-                </div>
-                <canvas id="energyChart" height="80"></canvas>
-            </div>
-
-            <!-- ===== BEFORE vs AFTER Adaptive AC Comparison ===== -->
-            <div style="margin-top: 34px; padding: 20px; border-radius: 18px; border: 1px solid rgba(99,102,241,0.2); background: linear-gradient(160deg, rgba(99,102,241,0.08), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
-                <div style="text-align: center; margin-bottom: 20px;">
-                    <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
-                        Before vs After Adaptive AC
-                    </h2>
-                    <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare energy usage before and after installing the adaptive AC system</p>
-                </div>
-
-                <!-- Recording Controls -->
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
-                    <!-- BEFORE Panel -->
-                    <div id="panel-before" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
-                        <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">
-                            BEFORE Adaptive AC
+            <!-- ===== LIVE ENERGY MONITOR ===== -->
+            <div style="background:var(--bg-card);border-radius:18px;border:1px solid rgba(99,102,241,0.2);overflow:hidden;margin-bottom:22px;box-shadow:0 4px 24px rgba(0,0,0,0.07);">
+                <!-- Header -->
+                <div style="padding:14px 20px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,rgba(99,102,241,0.10),rgba(79,70,229,0.06));border-bottom:1px solid rgba(99,102,241,0.15);">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="width:38px;height:38px;border-radius:10px;background:rgba(99,102,241,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
+                        <div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text);">Live Energy Monitor</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; update tiap 5 detik</div>
                         </div>
-                        <div id="status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
-                            &#9675; Not started
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <div style="font-size:11px;color:var(--text-secondary);">Update: <span id="energy-last-update" style="color:var(--text);font-weight:600;">--</span></div>
+                        <div id="mysql-live-badge" style="padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);transition:all 0.4s ease;">
+                            <i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Waiting...
                         </div>
-                        <button id="btn-record-before" onclick="toggleRecording('before')"
-                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
-                            START RECORDING
+                    </div>
+                </div>
+
+                <!-- AC + Lamp columns -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+                    <!-- ── AC ── -->
+                    <div style="padding:18px 20px;border-right:1px solid rgba(239,68,68,0.15);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#ef4444;"><i class="fas fa-snowflake" style="margin-right:6px;"></i>AC (id_kwh=1)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#ef4444;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Watt &mdash; Daya Aktif</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
+                                <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 3000 W max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(239,68,68,0.04);border:1px solid rgba(239,68,68,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-ac-pf">--</span>
+                                <span id="eu-ac-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-ac-ts">--</span></div>
+                    </div>
+
+                    <!-- ── Lamp ── -->
+                    <div style="padding:18px 20px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lampu (id_kwh=2)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(234,179,8,0.1);color:#eab308;border:1px solid rgba(234,179,8,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#eab308;line-height:1;transition:color 0.3s;"><span id="lamp-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Watt &mdash; Daya Aktif</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
+                                <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 500 W max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(234,179,8,0.04);border:1px solid rgba(234,179,8,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-lamp-pf">--</span>
+                                <span id="eu-lamp-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-lamp-ts">--</span></div>
+                    </div>
+                </div>
+
+                <!-- Total footer row -->
+                <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(99,102,241,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(99,102,241,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Daya</div>
+                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> W</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Arus</div>
+                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energi</div>
+                        <div style="font-size:20px;font-weight:800;color:#10b981;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frekuensi</div>
+                        <div style="font-size:20px;font-weight:800;color:var(--text);"><span id="total-freq-card">--</span><span style="font-size:11px;"> Hz</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Biaya</div>
+                        <div style="font-size:17px;font-weight:800;color:#f59e0b;">Rp <span id="daily-cost">--</span></div>
+                        <div style="font-size:9px;color:var(--text-secondary);">@ Rp 1.500/kWh</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== GRAFIK REALTIME (30 titik terakhir) ===== -->
+            <div style="background:var(--bg-card);border-radius:16px;border:1px solid rgba(99,102,241,0.18);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-chart-line" style="margin-right:8px;color:#6366f1;"></i>Grafik Realtime &mdash; 30 titik terakhir</h2>
+                <div class="chart-container" style="margin-bottom:16px;">
+                    <div class="chart-header">
+                        <div class="chart-title">Tegangan AC <span style="color:#6366f1;">&#9632;</span> &amp; Lampu <span style="color:#22d3ee;">&#9632;</span> (V) &nbsp;|&nbsp; Frekuensi <span style="color:#f59e0b;">- -</span> (Hz)</div>
+                    </div>
+                    <canvas id="mysqlVoltFreqChart" height="80"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Daya Aktif &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lampu <span style="color:#eab308;">&#9632;</span> (W)</div>
+                        </div>
+                        <canvas id="mysqlPowerChart" height="100"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Arus &mdash; AC <span style="color:#f59e0b;">&#9632;</span> &amp; Lampu <span style="color:#06b6d4;">&#9632;</span> (A)</div>
+                        </div>
+                        <canvas id="mysqlCurrentChart" height="100"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== GRAFIK HISTORIS (InfluxDB) ===== -->
+            <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-history" style="margin-right:8px;color:#10b981;"></i>Data Historis (InfluxDB)</h2>
+
+                <!-- Power -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title">Daya &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lampu <span style="color:#10b981;">&#9632;</span> (W)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyPowerChart" height="80"></canvas>
+                    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
+                        <span style="color:#ef4444;font-weight:600;">AC</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="energy-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#10b981;font-weight:600;margin-left:10px;">Lampu</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text);">--</strong></span>
+                    </div>
+                </div>
+
+                <!-- Voltage + Current side by side -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Tegangan &mdash; AC (V)</div>
+                            <div class="chart-options">
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">7d</button>
+                            </div>
+                        </div>
+                        <canvas id="energyVoltageChart" height="100"></canvas>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                            <span>Latest: <strong id="energy-voltage-latest" style="color:var(--text);">--</strong></span>
+                            <span>Min: <strong id="energy-voltage-min" style="color:var(--text);">--</strong></span>
+                            <span>Max: <strong id="energy-voltage-max" style="color:var(--text);">--</strong></span>
+                            <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text);">--</strong></span>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Arus &mdash; AC <span style="color:#f59e0b;">&#9632;</span> &amp; Lampu <span style="color:#06b6d4;">&#9632;</span> (A)</div>
+                            <div class="chart-options">
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '24h', this)">24h</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">7d</button>
+                            </div>
+                        </div>
+                        <canvas id="energyCurrentChart" height="100"></canvas>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;">
+                            <span style="color:#f59e0b;font-weight:600;">AC</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text);">--</strong></span>
+                            <span style="color:#06b6d4;font-weight:600;margin-left:8px;">Lampu</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text);">--</strong></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- kWh -->
+                <div class="chart-container" style="margin-top:16px;">
+                    <div class="chart-header">
+                        <div class="chart-title">Energi Kumulatif &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lampu <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="energyKwhChart" height="80"></canvas>
+                    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
+                        <span style="color:#10b981;font-weight:600;">AC</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#a855f7;font-weight:600;margin-left:10px;">Lampu</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
+                    </div>
+                </div>
+
+            </div>
+
+
+            <!-- ===== DAILY SUMMARY ===== -->
+            <div id="daily-summary-section" style="margin-top: 28px; padding: 22px; border-radius: 18px; border: 1px solid rgba(16,185,129,0.2); background: linear-gradient(160deg, rgba(16,185,129,0.06), rgba(241,245,249,0.94)); box-shadow: 0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:10px;">
+                    <div>
+                        <h2 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Daily Summary</h2>
+                        <p style="color:var(--text-secondary); font-size:12px; margin:0;">Today's energy statistics — <span id="daily-summary-date">--</span></p>
+                    </div>
+                    <button onclick="loadDailySummary()" style="padding:7px 16px; border-radius:8px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.1); color:#10b981; font-size:12px; cursor:pointer;">↻ Refresh</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:14px;">
+                    <!-- AC kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#ef4444;"><span id="ds-ac-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Lamp kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.07); border:1px solid rgba(16,185,129,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#10b981;"><span id="ds-lamp-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Total kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.07); border:1px solid rgba(59,130,246,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Total Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#3b82f6;"><span id="ds-total-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Estimated Cost -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(245,158,11,0.07); border:1px solid rgba(245,158,11,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Est. Cost</div>
+                        <div style="font-size:18px; font-weight:700; color:#f59e0b;">Rp<span id="ds-cost">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">@ Rp 1,500/kWh</div>
+                    </div>
+                    <!-- AC Peak Power -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Peak Power</div>
+                        <div style="font-size:20px; font-weight:700; color:#ef4444;"><span id="ds-ac-peak">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">W</div>
+                    </div>
+                    <!-- Lamp Peak Power -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Peak Power</div>
+                        <div style="font-size:20px; font-weight:700; color:#10b981;"><span id="ds-lamp-peak">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">W</div>
+                    </div>
+                    <!-- AC Runtime -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Runtime</div>
+                        <div style="font-size:20px; font-weight:700; color:#ef4444;"><span id="ds-ac-runtime">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">hours</div>
+                    </div>
+                    <!-- Lamp Runtime -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Runtime</div>
+                        <div style="font-size:20px; font-weight:700; color:#10b981;"><span id="ds-lamp-runtime">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">hours</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== PANEL REKAM DATA & EXPORT CSV ===== -->
+            <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Rekam Data &amp; Export CSV</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Rekam data energi realtime &mdash; terlihat di semua device &mdash; bisa export per perangkat</p>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <div id="rec-status-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);">
+                            <i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle
+                        </div>
+                        <div id="rec-sync-badge" style="padding:5px 12px;border-radius:20px;font-size:10px;font-weight:600;background:rgba(99,102,241,0.1);color:#6366f1;border:1px solid rgba(99,102,241,0.2);">
+                            <i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tombol kontrol -->
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+                    <button id="btn-rec-start" onclick="energyRecStart()"
+                        style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-circle" style="font-size:9px;color:#fff;"></i> Mulai Rekam
+                    </button>
+                    <button id="btn-rec-stop" onclick="energyRecStop()" disabled
+                        style="padding:10px 22px;border-radius:10px;border:none;background:rgba(239,68,68,0.15);color:#ef4444;font-size:13px;font-weight:700;cursor:pointer;border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;gap:7px;opacity:0.5;">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                    <button id="btn-rec-clear" onclick="energyRecClear()"
+                        style="padding:10px 18px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">
+                        <i class="fas fa-trash-alt"></i> Hapus
+                    </button>
+                    <!-- Export split buttons -->
+                    <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+                        <button onclick="energyExportCSV('all')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> Semua
+                        </button>
+                        <button onclick="energyExportCSV('AC')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> AC
+                        </button>
+                        <button onclick="energyExportCSV('Lampu')"
+                            style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
+                            <i class="fas fa-download"></i> Lampu
                         </button>
                     </div>
-                    <!-- AFTER Panel -->
-                    <div id="panel-after" style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
-                        <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">
-                            AFTER Adaptive AC
-                        </div>
-                        <div id="status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">
-                            &#9675; Not started
-                        </div>
-                        <button id="btn-record-after" onclick="toggleRecording('after')"
-                            style="width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.3s;">
-                            START RECORDING
-                        </button>
+                </div>
+
+                <!-- Counter info + filter tabs -->
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;">
+                        <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
+                        <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
+                        <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
+                        <span id="rec-date-range" style="display:none;color:var(--text-secondary);">Rentang: <strong id="rec-range-text" style="color:#10b981;"></strong></span>
+                    </div>
+                    <!-- Filter tabs -->
+                    <div style="display:flex;gap:4px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
+                        <button id="rec-tab-all" onclick="recSetFilter('all')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#fff;color:#6366f1;box-shadow:0 1px 3px rgba(0,0,0,0.1);">Semua</button>
+                        <button id="rec-tab-ac" onclick="recSetFilter('AC')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">AC</button>
+                        <button id="rec-tab-lamp" onclick="recSetFilter('Lampu')"
+                            style="padding:4px 12px;border-radius:6px;border:none;font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--text-secondary);">Lampu</button>
                     </div>
                 </div>
 
-                <!-- Savings Summary Cards -->
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">
-                    <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Range:</span>
-                    <button class="chart-option-btn" id="compare-range-7d" onclick="setCompareRange('7d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">7 Days</button>
-                    <button class="chart-option-btn" id="compare-range-30d" onclick="setCompareRange('30d', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">30 Days</button>
-                    <button class="chart-option-btn active" id="compare-range-all" onclick="setCompareRange('all', this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">All</button>
+                <!-- Preview tabel semua baris (filtered, scrollable) -->
+                <div style="overflow-x:auto;overflow-y:auto;max-height:320px;border-radius:10px;border:1px solid var(--border);">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                        <thead>
+                            <tr style="background:rgba(99,102,241,0.08);">
+                                <th style="padding:8px 10px;text-align:left;color:var(--text-secondary);font-weight:600;white-space:nowrap;">Waktu</th>
+                                <th style="padding:8px 10px;text-align:center;color:var(--text-secondary);font-weight:600;">Perangkat</th>
+                                <th style="padding:8px 10px;text-align:right;color:#6366f1;font-weight:600;">Tegangan (V)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#f59e0b;font-weight:600;">Arus (A)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#ef4444;font-weight:600;">Daya (W)</th>
+                                <th style="padding:8px 10px;text-align:right;color:#10b981;font-weight:600;">Energi (kWh)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Reaktif (VAR)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Semu (VA)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">Freq (Hz)</th>
+                                <th style="padding:8px 10px;text-align:right;color:var(--text-secondary);font-weight:600;">PF</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rec-preview-body">
+                            <tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>
+                        </tbody>
+                    </table>
                 </div>
-                <div style="display: grid; grid-template-columns: repeat(3, minmax(130px,1fr)); gap: 12px; margin-bottom: 20px;">
-                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
-                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg Before</div>
-                        <div style="font-size: 22px; font-weight: 700; color: #f59e0b;"><span id="compare-avg-before">--</span> W</div>
-                    </div>
-                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(16, 185, 129, 0.10); border: 1px solid rgba(16, 185, 129, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
-                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Avg After</div>
-                        <div style="font-size: 22px; font-weight: 700; color: #10b981;"><span id="compare-avg-after">--</span> W</div>
-                    </div>
-                    <div style="padding: 14px; border-radius: 14px; text-align: center; background: rgba(99, 102, 241, 0.10); border: 1px solid rgba(99, 102, 241, 0.26); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);">
-                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Energy Savings</div>
-                        <div style="font-size: 22px; font-weight: 700; color: #6366f1;"><span id="compare-savings">--</span>%</div>
-                    </div>
-                </div>
-
-                <!-- Power Comparison - 2 Charts Side by Side -->
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
-                    <div class="chart-container" style="border: none; padding: 0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Power (W)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('energyCompareBefore', 'Power Before (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="energyCompareBeforeChart" height="120"></canvas>
-                    </div>
-                    <div class="chart-container" style="border: none; padding: 0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color: #10b981;">AFTER — Power (W)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('power')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('energyCompareAfter', 'Power After (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="energyCompareAfterChart" height="120"></canvas>
-                    </div>
-                </div>
-
-                <!-- Energy kWh Comparison - 2 Charts Side by Side -->
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px;">
-                    <div class="chart-container" style="border: none; padding: 0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color: #f59e0b;">BEFORE — Energy (kWh)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhBefore', 'Energy Before (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="energyCompareKwhBeforeChart" height="120"></canvas>
-                    </div>
-                    <div class="chart-container" style="border: none; padding: 0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color: #10b981;">AFTER — Energy (kWh)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadEnergyCompare('energy_kwh')" style="padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('energyCompareKwhAfter', 'Energy After (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="energyCompareKwhAfterChart" height="120"></canvas>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ===== BEFORE vs AFTER Adaptive LAMP Comparison ===== -->
-            <div style="margin-top: 24px; padding: 20px; border-radius: 18px; border: 1px solid rgba(16,185,129,0.25); background: linear-gradient(160deg, rgba(16,185,129,0.07), rgba(241,245,249,0.92)); box-shadow: 0 12px 34px rgba(15,23,42,0.1);">
-                <div style="text-align: center; margin-bottom: 20px;">
-                    <h2 style="font-size: 20px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px 0;">
-                        Before vs After Adaptive Lamp
-                    </h2>
-                    <p style="color: var(--text-secondary); font-size: 13px; margin: 0;">Compare lamp power usage before and after installing the adaptive dimming system</p>
-                </div>
-
-                <!-- Lamp Recording Controls -->
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
-                    <div style="padding: 18px; border-radius: 14px; border: 2px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06);">
-                        <div style="font-size: 15px; font-weight: 700; color: #f59e0b; margin-bottom: 4px;">BEFORE Adaptive Lamp</div>
-                        <div id="lamp-status-before" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">&#9675; Not started</div>
-                        <button id="lamp-btn-record-before" onclick="toggleLampRecording('before')"
-                            style="width:100%;padding:12px;border-radius:10px;border:none;background:linear-gradient(135deg,#f59e0b,#d97706);color:white;font-size:14px;font-weight:700;cursor:pointer;transition:all 0.3s;">
-                            START RECORDING
-                        </button>
-                    </div>
-                    <div style="padding: 18px; border-radius: 14px; border: 2px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.06);">
-                        <div style="font-size: 15px; font-weight: 700; color: #10b981; margin-bottom: 4px;">AFTER Adaptive Lamp</div>
-                        <div id="lamp-status-after" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; min-height: 36px;">&#9675; Not started</div>
-                        <button id="lamp-btn-record-after" onclick="toggleLampRecording('after')"
-                            style="width:100%;padding:12px;border-radius:10px;border:none;background:linear-gradient(135deg,#10b981,#059669);color:white;font-size:14px;font-weight:700;cursor:pointer;transition:all 0.3s;">
-                            START RECORDING
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Lamp Savings Summary -->
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
-                    <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">Range:</span>
-                    <button class="chart-option-btn" id="lamp-compare-range-7d" onclick="setLampCompareRange('7d',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">7 Days</button>
-                    <button class="chart-option-btn" id="lamp-compare-range-30d" onclick="setLampCompareRange('30d',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">30 Days</button>
-                    <button class="chart-option-btn active" id="lamp-compare-range-all" onclick="setLampCompareRange('all',this)" style="font-size:11px;padding:4px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;">All</button>
-                </div>
-                <div style="display:grid;grid-template-columns:repeat(3,minmax(130px,1fr));gap:12px;margin-bottom:20px;">
-                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.26);">
-                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Avg Before</div>
-                        <div style="font-size:22px;font-weight:700;color:#f59e0b;"><span id="lamp-compare-avg-before">--</span> W</div>
-                    </div>
-                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.26);">
-                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Avg After</div>
-                        <div style="font-size:22px;font-weight:700;color:#10b981;"><span id="lamp-compare-avg-after">--</span> W</div>
-                    </div>
-                    <div style="padding:14px;border-radius:14px;text-align:center;background:rgba(99,102,241,0.10);border:1px solid rgba(99,102,241,0.26);">
-                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">Power Savings</div>
-                        <div style="font-size:22px;font-weight:700;color:#6366f1;"><span id="lamp-compare-savings">--</span>%</div>
-                    </div>
-                </div>
-
-                <!-- Lamp Power Comparison Charts -->
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-                    <div class="chart-container" style="border:none;padding:0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color:#f59e0b;">BEFORE — Lamp Power (W)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadLampEnergyCompare('power')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('lampCompareBefore','Lamp Power Before (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="lampCompareBeforeChart" height="120"></canvas>
-                    </div>
-                    <div class="chart-container" style="border:none;padding:0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color:#10b981;">AFTER — Lamp Power (W)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadLampEnergyCompare('power')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('lampCompareAfter','Lamp Power After (W)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="lampCompareAfterChart" height="120"></canvas>
-                    </div>
-                </div>
-
-                <!-- Lamp kWh Comparison Charts -->
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px;">
-                    <div class="chart-container" style="border:none;padding:0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color:#f59e0b;">BEFORE — Lamp Energy (kWh)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadLampEnergyCompare('energy_kwh')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('lampCompareKwhBefore','Lamp Energy Before (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="lampCompareKwhBeforeChart" height="120"></canvas>
-                    </div>
-                    <div class="chart-container" style="border:none;padding:0;">
-                        <div class="chart-header">
-                            <div class="chart-title" style="color:#10b981;">AFTER — Lamp Energy (kWh)</div>
-                            <div style="display:flex;gap:6px;">
-                                <button onclick="loadLampEnergyCompare('energy_kwh')" style="padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer;">↻</button>
-                                <button class="chart-option-btn" onclick="exportChartData('lampCompareKwhAfter','Lamp Energy After (kWh)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            </div>
-                        </div>
-                        <canvas id="lampCompareKwhAfterChart" height="120"></canvas>
-                    </div>
-                </div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="rec-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
             </div>
         </div>
 
@@ -4689,7 +5172,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span></span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
                 </div>
 
                 <div class="stat-card">
@@ -5061,7 +5544,7 @@ HTML_TEMPLATE = '''
                         document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
                     }
                     
-                    for (let i = 1; i <= 3; i++) {
+                    for (let i = 1; i <= 2; i++) {
                         const slider = document.getElementById('brightness-slider-' + i);
                         if (slider) {
                             slider.value = settings['lampBrightness' + i] || 0;
@@ -5153,11 +5636,6 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
             });
 
-            charts.energy = new Chart(document.getElementById('energyChart'), {
-                type: 'line', options: makeEnergyOpts('kWh/day'),
-                data: { labels: [], datasets: [{ label: 'Total Energy (kWh/day)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }] }
-            });
-
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [
@@ -5187,6 +5665,66 @@ HTML_TEMPLATE = '''
                     { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
                     { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
+            });
+
+            // MySQL Real-time Charts (ring buffer, 30 points)
+            charts.mysqlVoltFreq = new Chart(document.getElementById('mysqlVoltFreqChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Tegangan AC (V)', data: [], borderColor: '#6366f1', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yV' },
+                        { label: 'Tegangan Lampu (V)', data: [], borderColor: '#22d3ee', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yV' },
+                        { label: 'Frekuensi (Hz)', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [6,3], pointRadius: 0, tension: 0.3, yAxisID: 'yF' }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        yV: { type: 'linear', position: 'left', title: { display: true, text: 'V', color: '#94a3b8' }, suggestedMin: 210, suggestedMax: 240, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } },
+                        yF: { type: 'linear', position: 'right', title: { display: true, text: 'Hz', color: '#94a3b8' }, suggestedMin: 49, suggestedMax: 51, ticks: { color: '#94a3b8' }, grid: { drawOnChartArea: false } }
+                    }
+                }
+            });
+
+            charts.mysqlPower = new Chart(document.getElementById('mysqlPowerChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'AC (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true },
+                        { label: 'Lampu (W)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        y: { beginAtZero: true, title: { display: true, text: 'W', color: '#94a3b8' }, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } }
+                    }
+                }
+            });
+
+            charts.mysqlCurrent = new Chart(document.getElementById('mysqlCurrentChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'AC (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true },
+                        { label: 'Lampu (A)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.08)', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.1)' }, ticks: { color: '#94a3b8', maxTicksLimit: 8, maxRotation: 0 } },
+                        y: { beginAtZero: true, title: { display: true, text: 'A', color: '#94a3b8' }, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } }
+                    }
+                }
             });
 
             // Energy Comparison: 4 separate charts (Before/After x Power/kWh) for side-by-side view
@@ -5507,7 +6045,7 @@ HTML_TEMPLATE = '''
                         var overlay = document.createElement('div');
                         overlay.id = noDataId;
                         overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
-                        overlay.textContent = 'No data — waiting for PZEM-016';
+                        overlay.textContent = 'Menunggu data MySQL (polling setiap 5 detik)...';
                         canvas.parentElement.style.position = 'relative';
                         canvas.parentElement.appendChild(overlay);
                     }
@@ -5521,7 +6059,12 @@ HTML_TEMPLATE = '''
             var avg = values.reduce(function(a,b){ return a+b; }, 0) / values.length;
             var latest = values[values.length - 1];
             var unit = {power:'W', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
-            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v.toFixed(field==='energy_kwh'?4:2) + ' ' + unit; };
+            var fmt = function(v) {
+                return field === 'energy_kwh'
+                    ? v.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+                    : v.toFixed(2);
+            };
+            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
             if (field === 'power') { setEl('lamp-power-latest', latest); setEl('lamp-power-avg', avg); }
             else if (field === 'current') { setEl('lamp-current-latest', latest); setEl('lamp-current-avg', avg); }
             else if (field === 'energy_kwh') { setEl('lamp-kwh-latest', latest); setEl('lamp-kwh-avg', avg); }
@@ -5538,7 +6081,57 @@ HTML_TEMPLATE = '''
             loadLampEnergyCompare('energy_kwh');
             loadRecordingState();
             loadLampRecordingState();
+            loadDailySummary();
         }
+
+        // ==================== DAILY SUMMARY ====================
+        var _dailySummaryTimer = null;
+        function loadDailySummary() {
+            fetch('/api/energy/daily-summary')
+                .then(r => r.json())
+                .then(d => {
+                    if (d.error) return;
+                    var setText = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; };
+                    var fmtKwh = function(v) {
+                        var num = parseFloat(v || 0);
+                        if (!Number.isFinite(num)) return '--';
+                        return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+                    };
+                    setText('daily-summary-date', d.date || '--');
+                    setText('ds-ac-kwh',       d.ac ? fmtKwh(d.ac.kwh) : '--');
+                    setText('ds-lamp-kwh',     d.lamp ? fmtKwh(d.lamp.kwh) : '--');
+                    setText('ds-total-kwh',    d.total_kwh !== undefined ? fmtKwh(d.total_kwh) : '--');
+                    setText('ds-cost',         d.cost_rp !== undefined ? d.cost_rp.toLocaleString() : '--');
+                    setText('ds-ac-peak',      d.ac ? d.ac.power_peak_w.toFixed(1) : '--');
+                    setText('ds-lamp-peak',    d.lamp ? d.lamp.power_peak_w.toFixed(1) : '--');
+                    setText('ds-ac-runtime',   d.ac ? d.ac.runtime_h.toFixed(2) : '--');
+                    setText('ds-lamp-runtime', d.lamp ? d.lamp.runtime_h.toFixed(2) : '--');
+                })
+                .catch(function(e) { console.error('Daily summary error:', e); });
+        }
+        // Auto-refresh daily summary every 10 minutes
+        if (_dailySummaryTimer) clearInterval(_dailySummaryTimer);
+        _dailySummaryTimer = setInterval(loadDailySummary, 600000);
+
+        // ==================== TIMEZONE WARNING ====================
+        function checkTimezoneWarning() {
+            fetch('/api/system/tz-status')
+                .then(r => r.json())
+                .then(d => {
+                    if (!d.ok && d.warning) {
+                        var banner = document.getElementById('tz-warning-banner');
+                        if (!banner) {
+                            banner = document.createElement('div');
+                            banner.id = 'tz-warning-banner';
+                            banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#1e293b;padding:8px 20px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;gap:12px;';
+                            banner.innerHTML = '<span>⚠ Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.remove()" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;">✕</button>';
+                            document.body.prepend(banner);
+                        }
+                    }
+                })
+                .catch(function() {});
+        }
+        checkTimezoneWarning();
 
         // ==================== BEFORE vs AFTER RECORDING ====================
         var energyRecording = {
@@ -5952,6 +6545,7 @@ HTML_TEMPLATE = '''
             setEl('ml-pso-fitness', (data.pso_fitness || 0).toFixed(2));
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
+            setEl('ml-ga-mode', data.ga_mode || 'COOL');
             setEl('ml-pso-brightness', data.pso_brightness || '--');
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
@@ -6593,16 +7187,6 @@ HTML_TEMPLATE = '''
                     if (gaTemp) gaTemp.textContent = (data.system.ga_temp || 0) > 0 ? data.system.ga_temp + '°C' : '--';
                     if (gaFan) gaFan.textContent = (data.system.ga_fan || 0) > 0 ? 'Lv ' + data.system.ga_fan : '--';
                     if (gaFitness) gaFitness.textContent = (data.system.ga_fitness || 0) > 0 ? parseFloat(data.system.ga_fitness).toFixed(2) : '--';
-                });
-        }
-
-        // Keep old function name for backward compat (called elsewhere)
-        function toggleACMode() {
-            fetch('/api/data')
-                .then(r => r.json())
-                .then(data => {
-                    const newMode = data.ac.mode === 'ADAPTIVE' ? 'MANUAL' : 'ADAPTIVE';
-                    setACMode(newMode);
                 });
         }
 
@@ -7515,86 +8099,9 @@ HTML_TEMPLATE = '''
                         optRunsEl.textContent = num(system.optimization_runs);
                     }
                     
-                    // Calculate AC power based on temperature logic
-                    let acPower = 0;
-                    const actualACState = temperature < 30 ? 'ON' : 'OFF';
-                    
-                    if (actualACState === 'ON') {
-                        acPower = fanSpeed === 1 ? 100 : (fanSpeed === 2 ? 200 : 300);
-                    }
-                    let lampPower = (num(lamp.brightness1) + num(lamp.brightness2) + num(lamp.brightness3)) / 255 * 10;
-                    let totalPower = acPower + lampPower;
-
-                    // Use real PZEM data if available, otherwise estimate
-                    let realPower = null;
-                    let realEnergyKwh = null;
-                    let realCurrent = null;
-                    if (energy && energy.connected) {
-                        realPower = num(energy.power);
-                        realEnergyKwh = num(energy.energy);
-                        realCurrent = num(energy.current);
-                    }
-
-                    let acEnergyKwh = (acPower / 1000) * 24;
-                    let lampEnergyKwh = (lampPower / 1000) * 24;
-                    let totalEnergyKwh = realEnergyKwh !== null ? realEnergyKwh : (acEnergyKwh + lampEnergyKwh);
-                    let displayPower = realPower !== null ? realPower : totalPower;
-                    let dailyCost = totalEnergyKwh * 1500;
-                    
-                    document.getElementById('ac-power').textContent = acPower.toFixed(0);
-                    document.getElementById('lamp-power').textContent = lampPower.toFixed(1);
-                    document.getElementById('total-power').textContent = displayPower.toFixed(1);
-                    document.getElementById('total-current').textContent = realCurrent !== null ? realCurrent.toFixed(2) : '0';
-                    document.getElementById('ac-energy-kwh').textContent = acEnergyKwh.toFixed(2);
-                    document.getElementById('lamp-energy-kwh').textContent = lampEnergyKwh.toFixed(2);
-                    document.getElementById('total-energy-kwh').textContent = totalEnergyKwh.toFixed(3);
-                    document.getElementById('daily-cost').textContent = dailyCost.toFixed(0);
-
-                    if (charts.energy) {
-                        const now = new Date();
-                        const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                        if (charts.energy.data.labels.length >= 50) {
-                            charts.energy.data.labels.shift();
-                            charts.energy.data.datasets[0].data.shift();
-                        }
-                        charts.energy.data.labels.push(timeLabel);
-                        charts.energy.data.datasets[0].data.push(parseFloat(totalEnergyKwh.toFixed(2)));
-                        charts.energy.update('none');
-                    }
-                    
-                    // Energy Monitor (PZEM-016) data
-                    if (energy) {
-                        const e = energy;
-                        const eVolt = document.getElementById('energy-voltage');
-                        const eCurr = document.getElementById('energy-current');
-                        const ePow = document.getElementById('energy-power');
-                        const eKwh = document.getElementById('energy-kwh');
-                        const eFreq = document.getElementById('energy-freq');
-                        const ePf = document.getElementById('energy-pf');
-                        const eCost = document.getElementById('energy-cost');
-                        const eBadge = document.getElementById('energy-status-badge');
-                        if (eVolt) eVolt.textContent = parseFloat(e.voltage || 0).toFixed(1);
-                        if (eCurr) eCurr.textContent = parseFloat(e.current || 0).toFixed(2);
-                        if (ePow) ePow.textContent = parseFloat(e.power || 0).toFixed(1);
-                        if (eKwh) eKwh.textContent = parseFloat(e.energy || 0).toFixed(3);
-                        if (eFreq) eFreq.textContent = parseFloat(e.frequency || 0).toFixed(1);
-                        if (ePf) ePf.textContent = parseFloat(e.pf || 0).toFixed(2);
-                        if (eCost) {
-                            const cost = parseFloat(e.energy || 0) * 1500;
-                            eCost.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
-                        }
-                        if (eBadge) {
-                            if (e.connected) {
-                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
-                                eBadge.style.background = 'rgba(16, 185, 129, 0.15)';
-                                eBadge.style.color = '#10b981';
-                            } else {
-                                eBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
-                                eBadge.style.background = 'rgba(107, 114, 128, 0.15)';
-                                eBadge.style.color = '#6b7280';
-                            }
-                        }
-                    }
+                    // Energy data dihandle oleh mysql_energy_update event
+                    // (ac-power, lamp-power, total-power, total-current, total-energy-kwh,
+                    //  daily-cost diisi langsung dari MySQL via socket)
 
                     updateModeBadges();
                 } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
@@ -7764,6 +8271,894 @@ HTML_TEMPLATE = '''
         }
 
         // ==================== SOCKET.IO EVENTS ====================
+        // Ring buffer untuk chart MySQL realtime
+        var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
+        var _MYSQL_MAX = 30;
+
+        // ── Fungsi update DOM energi (dipakai socket DAN direct-poll) ──
+        var _lastEnergyUpdate = 0;
+        function _applyEnergyData(ac, lamp) {
+            _lastEnergyUpdate = Date.now();
+            var s = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+            var f = function(v, d) { return parseFloat(v || 0).toFixed(d !== undefined ? d : 1); };
+            var fkwh = function(v) {
+                var num = parseFloat(v || 0);
+                if (!Number.isFinite(num)) return '0';
+                return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+            };
+
+            // ── Overview page badge + mini cards ──
+            var badge = document.getElementById('mysql-energy-badge');
+            if (badge) {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
+                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+            s('mysql-ac-voltage', f(ac.voltage));       s('mysql-ac-current', f(ac.current, 2));
+            s('mysql-ac-power',   f(ac.power));         s('mysql-ac-kwh',     fkwh(ac.energy));
+            s('mysql-ac-freq',    f(ac.frequency, 2));  s('mysql-ac-pf',      f(ac.pf, 2));
+            s('mysql-ac-ts',      ac.updated_at || '--');
+            s('mysql-lamp-voltage', f(lamp.voltage));     s('mysql-lamp-current', f(lamp.current, 2));
+            s('mysql-lamp-power',   f(lamp.power));       s('mysql-lamp-kwh',     fkwh(lamp.energy));
+            s('mysql-lamp-freq',    f(lamp.frequency, 2)); s('mysql-lamp-pf',     f(lamp.pf, 2));
+            s('mysql-lamp-ts',      lamp.updated_at || '--');
+
+            // ── Energy Usage page live values ──
+            var liveBadge = document.getElementById('mysql-live-badge');
+            if (liveBadge) {
+                liveBadge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Live';
+                liveBadge.style.cssText = 'padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+            }
+            s('eu-ac-voltage', f(ac.voltage));       s('eu-ac-current', f(ac.current, 2));
+            s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     fkwh(ac.energy));
+            s('eu-ac-freq',    f(ac.frequency, 2));  s('eu-ac-pf',      f(ac.pf, 2));
+            s('eu-ac-ts',      ac.updated_at || '--');
+            s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
+            s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     fkwh(lamp.energy));
+            s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
+            s('eu-lamp-ts',      lamp.updated_at || '--');
+
+            // ── Reactive / Apparent / PF quality / Power bars ──
+            s('eu-ac-reactive',   f(ac.reactive_power,  1));
+            s('eu-ac-apparent',   f(ac.apparent_power,  1));
+            s('eu-lamp-reactive', f(lamp.reactive_power, 1));
+            s('eu-lamp-apparent', f(lamp.apparent_power, 1));
+            var _pfBadge = function(pf) {
+                var v = parseFloat(pf||0);
+                if (v >= 0.95) return {t:'Baik',  bg:'rgba(16,185,129,0.15)', c:'#10b981'};
+                if (v >= 0.85) return {t:'Cukup', bg:'rgba(245,158,11,0.15)', c:'#f59e0b'};
+                if (v >  0)    return {t:'Buruk', bg:'rgba(239,68,68,0.15)',  c:'#ef4444'};
+                return {t:'--', bg:'rgba(107,114,128,0.15)', c:'#6b7280'};
+            };
+            var _applyBadge = function(id, pf) {
+                var q = _pfBadge(pf); var el = document.getElementById(id);
+                if (el) { el.textContent = q.t; el.style.background = q.bg; el.style.color = q.c; }
+            };
+            _applyBadge('eu-ac-pf-quality',   ac.pf);
+            _applyBadge('eu-lamp-pf-quality', lamp.pf);
+            var acBar = document.getElementById('eu-ac-pbar');
+            var lpBar = document.getElementById('eu-lamp-pbar');
+            if (acBar)  acBar.style.width  = Math.min(100, (parseFloat(ac.power||0)   / 3000 * 100)).toFixed(1) + '%';
+            if (lpBar)  lpBar.style.width  = Math.min(100, (parseFloat(lamp.power||0) / 500  * 100)).toFixed(1) + '%';
+
+            // ── Update power-grid summary cards ──
+            var acPow  = parseFloat(ac.power||0);
+            var lampPow = parseFloat(lamp.power||0);
+            var acKwh  = parseFloat(ac.energy||0);
+            var lampKwh = parseFloat(lamp.energy||0);
+            var totPow = acPow + lampPow;
+            var totKwh = acKwh + lampKwh;
+            s('ac-power',   acPow.toFixed(1));
+            s('lamp-power', lampPow.toFixed(1));
+            s('total-power',   totPow.toFixed(1));
+            s('total-current', (parseFloat(ac.current||0) + parseFloat(lamp.current||0)).toFixed(2));
+            s('ac-energy-kwh',   fkwh(acKwh));
+            s('lamp-energy-kwh', fkwh(lampKwh));
+            s('total-energy-kwh', fkwh(totKwh));
+            s('ac-voltage-card',  f(ac.voltage));
+            s('ac-current-card',  f(ac.current, 2));
+            s('ac-pf-card',       f(ac.pf, 2));
+            s('lamp-voltage-card', f(lamp.voltage));
+            s('lamp-current-card', f(lamp.current, 2));
+            s('lamp-pf-card',      f(lamp.pf, 2));
+            s('total-freq-card',   f(ac.frequency, 2));
+            s('energy-last-update', ac.updated_at ? ac.updated_at.substring(11,19) : '--');
+            var costEst = Math.round(totKwh * 1500);
+            s('daily-cost', costEst > 0 ? costEst.toLocaleString() : '0');
+
+            // ── Ring buffer & chart ──
+            var now2 = new Date();
+            var ts2  = now2.getHours() + ':' + String(now2.getMinutes()).padStart(2,'0') + ':' + String(now2.getSeconds()).padStart(2,'0');
+            _mysqlBuf.labels.push(ts2);
+            _mysqlBuf.acV.push(parseFloat(ac.voltage||0));
+            _mysqlBuf.lampV.push(parseFloat(lamp.voltage||0));
+            _mysqlBuf.freq.push(parseFloat(ac.frequency||0));
+            _mysqlBuf.acP.push(parseFloat(ac.power||0));
+            _mysqlBuf.lampP.push(parseFloat(lamp.power||0));
+            _mysqlBuf.acA.push(parseFloat(ac.current||0));
+            _mysqlBuf.lampA.push(parseFloat(lamp.current||0));
+            if (_mysqlBuf.labels.length > _MYSQL_MAX) {
+                ['labels','acV','lampV','freq','acP','lampP','acA','lampA'].forEach(function(k){ _mysqlBuf[k].shift(); });
+            }
+            if (charts.mysqlVoltFreq) {
+                charts.mysqlVoltFreq.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlVoltFreq.data.datasets[0].data = _mysqlBuf.acV.slice();
+                charts.mysqlVoltFreq.data.datasets[1].data = _mysqlBuf.lampV.slice();
+                charts.mysqlVoltFreq.data.datasets[2].data = _mysqlBuf.freq.slice();
+                charts.mysqlVoltFreq.update('none');
+            }
+            if (charts.mysqlPower) {
+                charts.mysqlPower.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlPower.data.datasets[0].data = _mysqlBuf.acP.slice();
+                charts.mysqlPower.data.datasets[1].data = _mysqlBuf.lampP.slice();
+                charts.mysqlPower.update('none');
+            }
+            if (charts.mysqlCurrent) {
+                charts.mysqlCurrent.data.labels = _mysqlBuf.labels.slice();
+                charts.mysqlCurrent.data.datasets[0].data = _mysqlBuf.acA.slice();
+                charts.mysqlCurrent.data.datasets[1].data = _mysqlBuf.lampA.slice();
+                charts.mysqlCurrent.update('none');
+            }
+        }
+
+        // ── Socket handler ──
+        socket.on('mysql_energy_update', function(data) {
+            _applyEnergyData(data.ac || {}, data.lamp || {});
+        });
+
+        // ── Direct PHP polling fallback ──
+        // Jika socket tidak kirim data dalam 10 detik, browser fetch langsung ke PHP
+        var _PHP_ENERGY_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024';
+        var _phpPollErr = 0;
+        function _phpDirectPoll() {
+            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket masih aktif, skip
+            fetch(_PHP_ENERGY_URL)
+                .then(function(r) {
+                    if (!r.ok) { console.error('[PHP-poll] HTTP ' + r.status); return null; }
+                    return r.json();
+                })
+                .then(function(data) {
+                    if (!data) { _phpPollErr++; return; }
+                    if (data.error) {
+                        _phpPollErr++;
+                        console.error('[PHP-poll] Server error:', data.error, data.file + ':' + data.line);
+                        return;
+                    }
+                    _phpPollErr = 0;
+                    var ac   = data.ac   || {};
+                    var lamp = data.lamp || {};
+                    // Hitung pf karena PHP tidak kirim pf langsung
+                    var acAp = parseFloat(ac.apparent_power||0);
+                    var lpAp = parseFloat(lamp.apparent_power||0);
+                    ac.pf   = acAp > 0 ? parseFloat((parseFloat(ac.active_power||0) / acAp).toFixed(3)) : 0;
+                    lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
+                    // Sesuaikan nama field: active_power → power, frekuensi → frequency
+                    ac.power       = ac.active_power;
+                    // total_energy dari DB sudah dalam kWh (tabel energy_kwh)
+                    ac.energy      = parseFloat(ac.total_energy || 0);
+                    ac.frequency   = ac.frekuensi;
+                    ac.voltage     = ac.tegangan;
+                    ac.current     = ac.arus;
+                    lamp.power     = lamp.active_power;
+                    lamp.energy    = parseFloat(lamp.total_energy || 0);
+                    lamp.frequency = lamp.frekuensi;
+                    lamp.voltage   = lamp.tegangan;
+                    lamp.current   = lamp.arus;
+                    _applyEnergyData(ac, lamp);
+                })
+                .catch(function(e) { _phpPollErr++; console.warn('[PHP-poll] error:', e); });
+        }
+        setInterval(_phpDirectPoll, 6000);
+        // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
+        setTimeout(_phpDirectPoll, 3000);
+
+        // ==================== SESSION STORAGE + SERVER STATE PERSISTENCE ====================
+        function _ssSave(key, val) { try { sessionStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+        function _ssLoad(key, def) { try { var v = sessionStorage.getItem(key); return v !== null ? JSON.parse(v) : def; } catch(e) { return def; } }
+        // Push recording state to server so other devices see badges
+        function _recStatePush(obj) {
+            fetch('/api/rec/state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj) }).catch(function(){});
+        }
+        // Poll server state every 5 s to update badges on all devices
+        function _recStatePoll() {
+            fetch('/api/rec/state').then(function(r){ return r.json(); }).then(function(st) {
+                // Only update badge if this device is not the one recording (to avoid overwriting active timer)
+                if (!_recActive) {
+                    var badge = document.getElementById('rec-status-badge');
+                    if (badge) {
+                        if (st.energy) {
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                            badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                        } else { _recUpdateBadge(); }
+                    }
+                }
+                if (!_tempActive) {
+                    var tb = document.getElementById('temp-rec-badge');
+                    if (tb && st.temp) {
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                    } else if (tb && !st.temp) { _tempUpdateBadge(); }
+                }
+                if (!_luxActive) {
+                    var lb = document.getElementById('lux-rec-badge');
+                    if (lb && st.lux) {
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                    } else if (lb && !st.lux) { _luxUpdateBadge(); }
+                }
+            }).catch(function(){});
+        }
+        setInterval(_recStatePoll, 5000);
+
+        // ==================== ENERGY RECORDING & CSV EXPORT ====================
+        var _recRows    = _ssLoad('_recRows', []);
+        var _recActive  = false;  // never auto-resume active state; user must press start
+        var _recStartTs = null;
+        var _recTimer   = null;
+        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lampu'
+
+        function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
+
+        // ── Server-side data sync ──
+        function _recServerPush() {
+            fetch('/api/rec/data?type=energy', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _recRows})
+            }).then(function(r){ return r.json(); }).then(function(d){
+                var b = document.getElementById('rec-sync-badge');
+                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#10b981'; b.style.borderColor='rgba(16,185,129,0.3)'; }
+            }).catch(function(){});
+        }
+        function _recServerFetch() {
+            fetch('/api/rec/data?type=energy').then(function(r){ return r.json(); }).then(function(d){
+                if (!d.rows) return;
+                // Always sync from server when not recording — server is source of truth
+                // This fixes stale sessionStorage showing wrong data on other devices
+                if (d.rows.length !== _recRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_recRows[_recRows.length-1])) {
+                    _recRows = d.rows; _ssSave('_recRows', _recRows); _recUpdatePreview();
+                }
+                var b = document.getElementById('rec-sync-badge');
+                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
+            }).catch(function(){});
+        }
+        function _recServerDelete() { fetch('/api/rec/data?type=energy', {method:'DELETE'}).catch(function(){}); }
+        // Poll server for rows every 5 s on passive devices (matches badge poll speed)
+        setInterval(function(){ if (!_recActive) _recServerFetch(); }, 5000);
+
+        function recSetFilter(f) {
+            _recFilter = f;
+            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lampu:'rec-tab-lamp'};
+            Object.keys(map).forEach(function(k) {
+                var el = document.getElementById(map[k]); if (!el) return;
+                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lampu'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
+                else { el.style.background='transparent'; el.style.fontWeight='600'; el.style.color='var(--text-secondary)'; el.style.boxShadow='none'; }
+            });
+            _recUpdatePreview();
+        }
+
+        function _recUpdateBadge() {
+            var badge = document.getElementById('rec-status-badge');
+            if (!badge) return;
+            if (_recActive) {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam';
+                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
+            } else {
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);';
+            }
+        }
+
+        function _recUpdatePreview() {
+            var tbody = document.getElementById('rec-preview-body');
+            var countEl = document.getElementById('rec-count');
+            if (countEl) countEl.textContent = _recRows.length;
+            if (!tbody) return;
+            var filtered = _recFilter === 'all' ? _recRows : _recRows.filter(function(r){ return r.device === _recFilter; });
+            if (filtered.length === 0) {
+                var msg = _recRows.length > 0 ? 'Tidak ada data untuk filter <strong>' + _recFilter + '</strong>.' : 'Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.';
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
+                var rngHide = document.getElementById('rec-date-range'); if (rngHide) rngHide.style.display = 'none';
+                return;
+            }
+            // Tampilkan rentang tanggal
+            var rng = document.getElementById('rec-date-range'); var rngTxt = document.getElementById('rec-range-text');
+            if (rng && rngTxt) { rng.style.display = ''; rngTxt.textContent = filtered[0].ts + ' \u2014 ' + filtered[filtered.length-1].ts; }
+            // Tampilkan 100 baris terbaru (scroll)
+            var shown = filtered.slice(-100).reverse();
+            var shownEl = document.getElementById('rec-shown-count'); if (shownEl) shownEl.textContent = Math.min(filtered.length, 100);
+            tbody.innerHTML = shown.map(function(r) {
+                return '<tr style="border-bottom:1px solid var(--border);">' +
+                    '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#6366f1;font-weight:600;">' + r.tegangan + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#f59e0b;font-weight:600;">' + r.arus + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#ef4444;font-weight:600;">' + r.daya + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#10b981;font-weight:600;">' + r.energi + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.reaktif + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.semu + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.freq + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.pf + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function _recTick() {
+            if (!_recStartTs) return;
+            var sec = Math.floor((Date.now() - _recStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var el = document.getElementById('rec-duration');
+            if (el) el.textContent = m + ':' + String(s).padStart(2,'0');
+        }
+
+        function _recAddRow(ac, lamp) {
+            if (!_recActive) return;
+            var now = new Date();
+            var ts  = now.toISOString().replace('T',' ').substring(0,19);
+            // AC row
+            _recRows.push({
+                ts: ts, device: 'AC',
+                tegangan: _recFmt(ac.voltage || ac.tegangan),
+                arus:     _recFmt(ac.current || ac.arus, 3),
+                daya:     _recFmt(ac.power   || ac.active_power, 2),
+                energi:   _recFmt(ac.energy  || ac.total_energy, 4),
+                reaktif:  _recFmt(ac.reactive_power, 2),
+                semu:     _recFmt(ac.apparent_power, 2),
+                freq:     _recFmt(ac.frequency || ac.frekuensi, 2),
+                pf:       _recFmt(ac.pf, 3),
+            });
+            // Lamp row
+            _recRows.push({
+                ts: ts, device: 'Lampu',
+                tegangan: _recFmt(lamp.voltage || lamp.tegangan),
+                arus:     _recFmt(lamp.current || lamp.arus, 3),
+                daya:     _recFmt(lamp.power   || lamp.active_power, 2),
+                energi:   _recFmt(lamp.energy  || lamp.total_energy, 4),
+                reaktif:  _recFmt(lamp.reactive_power, 2),
+                semu:     _recFmt(lamp.apparent_power, 2),
+                freq:     _recFmt(lamp.frequency || lamp.frekuensi, 2),
+                pf:       _recFmt(lamp.pf, 3),
+            });
+            _recUpdatePreview();
+            _ssSave('_recRows', _recRows);
+            _recServerPush();
+        } {
+            _recActive  = true;
+            _recStartTs = Date.now();
+            var startEl = document.getElementById('rec-start-time');
+            if (startEl) startEl.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-rec-start').disabled = true;
+            document.getElementById('btn-rec-start').style.opacity = '0.5';
+            document.getElementById('btn-rec-stop').disabled = false;
+            document.getElementById('btn-rec-stop').style.opacity = '1';
+            _recTimer = setInterval(_recTick, 1000);
+            _recUpdateBadge();
+            _recStatePush({energy: true});
+            showToast('Rekam data dimulai', 'success');
+        }
+
+        function energyRecStop() {
+            _recActive = false;
+            clearInterval(_recTimer);
+            document.getElementById('btn-rec-start').disabled = false;
+            document.getElementById('btn-rec-start').style.opacity = '1';
+            document.getElementById('btn-rec-stop').disabled = true;
+            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            _recUpdateBadge();
+            _recStatePush({energy: false});
+            _recServerPush();
+            showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
+        }
+
+        function energyRecClear() {
+            _recRows = [];
+            _recActive = false;
+            clearInterval(_recTimer);
+            sessionStorage.removeItem('_recRows');
+            _recServerDelete();
+            var countEl = document.getElementById('rec-count');
+            var durEl   = document.getElementById('rec-duration');
+            var startEl = document.getElementById('rec-start-time');
+            if (countEl)  countEl.textContent  = '0';
+            if (durEl)    durEl.textContent    = '0:00';
+            if (startEl)  startEl.textContent  = '--';
+            document.getElementById('btn-rec-start').disabled = false;
+            document.getElementById('btn-rec-start').style.opacity = '1';
+            document.getElementById('btn-rec-stop').disabled = true;
+            document.getElementById('btn-rec-stop').style.opacity = '0.5';
+            _recUpdateBadge();
+            _recUpdatePreview();
+            var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
+            showToast('Data rekaman dihapus', 'info');
+        }
+
+        function energyExportCSV(device) {
+            if (_recRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
+            if (rows.length === 0) { showToast('Tidak ada data untuk ' + device, 'error'); return; }
+            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+            var body = rows.map(function(r) {
+                return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
+                       r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
+            }).join('\\n');
+            var now = new Date();
+            var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
+            var fname = 'energy' + suffix + '_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(rows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
+
+        // Hook ke _applyEnergyData — rekam setiap 6 menit (360 detik)
+        var _lastRecTime = 0;
+        var _REC_INTERVAL_MS = 360000; // 6 menit
+        var _origApply = _applyEnergyData;
+        _applyEnergyData = function(ac, lamp) {
+            _origApply(ac, lamp);
+            if (Date.now() - _lastRecTime >= _REC_INTERVAL_MS) {
+                _lastRecTime = Date.now();
+                _recAddRow(ac, lamp);
+            }
+        };
+
+        // ==================== REKAM SUHU & HUMIDITY ====================
+        function _tempServerPush() {
+            fetch('/api/rec/data?type=temp', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _tempRows})
+            }).catch(function(){});
+        }
+        function _tempServerFetch() {
+            fetch('/api/rec/data?type=temp').then(function(r){ return r.json(); }).then(function(d){
+                if (!d.rows) return;
+                if (d.rows.length !== _tempRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_tempRows[_tempRows.length-1])) {
+                    _tempRows = d.rows; _ssSave('_tempRows', _tempRows); _tempUpdatePreview();
+                    var c = document.getElementById('temp-rec-count'); if (c) c.textContent = _tempRows.length;
+                }
+            }).catch(function(){});
+        }
+        function _tempServerDelete() { fetch('/api/rec/data?type=temp', {method:'DELETE'}).catch(function(){}); }
+        setInterval(function(){ if (!_tempActive) _tempServerFetch(); }, 5000);
+
+        var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
+        var _tempTimer = null, _lastTempRecTime = 0;
+        var _TEMP_REC_MS = 60000; // 1 menit
+
+        function _tempFmt(v, d) { var n = parseFloat(v); return Number.isFinite(n) ? n.toFixed(d != null ? d : 1) : '--'; }
+
+        function _tempAddRow() {
+            var ts = new Date().toLocaleString('id-ID');
+            var temp = document.getElementById('dash-ac-room-temp') ? document.getElementById('dash-ac-room-temp').textContent : '--';
+            var hum  = document.getElementById('dash-ac-room-hum')  ? document.getElementById('dash-ac-room-hum').textContent  : '--';
+            var t1   = document.getElementById('dash-ac-temp1')      ? document.getElementById('dash-ac-temp1').textContent      : '--';
+            var t2   = document.getElementById('dash-ac-temp2')      ? document.getElementById('dash-ac-temp2').textContent      : '--';
+            var t3   = document.getElementById('dash-ac-temp3')      ? document.getElementById('dash-ac-temp3').textContent      : '--';
+            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3 });
+            _tempUpdatePreview();
+            var c = document.getElementById('temp-rec-count');
+            if (c) c.textContent = _tempRows.length;
+            _ssSave('_tempRows', _tempRows);
+            _tempServerPush();
+        }
+
+        function _tempTick() {
+            if (!_tempActive) return;
+            var sec = Math.floor((Date.now() - _tempStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var d = document.getElementById('temp-rec-duration');
+            if (d) d.textContent = m + ':' + String(s).padStart(2, '0');
+            if (Date.now() - _lastTempRecTime >= _TEMP_REC_MS) {
+                _lastTempRecTime = Date.now();
+                _tempAddRow();
+            }
+        }
+
+        function _tempUpdateBadge() {
+            var b = document.getElementById('temp-rec-badge');
+            if (!b) return;
+            if (_tempActive) {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+            } else {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
+            }
+        }
+
+        function _tempUpdatePreview() {
+            var tbody = document.getElementById('temp-rec-preview');
+            if (!tbody) return;
+            if (_tempRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                return;
+            }
+            // Tampilkan 100 baris terbaru (scroll)
+            var shownT = document.getElementById('temp-shown-count'); if (shownT) shownT.textContent = Math.min(_tempRows.length, 100);
+            var last100 = _tempRows.slice(-100).reverse();
+            tbody.innerHTML = last100.map(function(r, i) {
+                var bg = i % 2 === 0 ? 'background:rgba(59,130,246,0.03);' : '';
+                return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#3b82f6;">' + r.temp + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#06b6d4;">' + r.hum + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t2 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t3 + '</td></tr>';
+            }).join('');
+        }
+
+        function tempRecStart() {
+            _tempActive = true; _tempStartTs = Date.now(); _lastTempRecTime = 0;
+            var s = document.getElementById('temp-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-temp-start').disabled = true;
+            document.getElementById('btn-temp-start').style.opacity = '0.5';
+            document.getElementById('btn-temp-stop').disabled = false;
+            document.getElementById('btn-temp-stop').style.opacity = '1';
+            _tempTimer = setInterval(_tempTick, 1000);
+            _tempUpdateBadge();
+            _recStatePush({temp: true});
+            showToast('Rekam suhu & humidity dimulai', 'success');
+        }
+
+        function tempRecStop() {
+            _tempActive = false; clearInterval(_tempTimer);
+            document.getElementById('btn-temp-start').disabled = false;
+            document.getElementById('btn-temp-start').style.opacity = '1';
+            document.getElementById('btn-temp-stop').disabled = true;
+            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            _tempUpdateBadge();
+            _recStatePush({temp: false});
+            _tempServerPush();
+            showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
+        }
+
+        function tempRecClear() {
+            _tempRows = []; _tempActive = false; clearInterval(_tempTimer);
+            sessionStorage.removeItem('_tempRows');
+            _tempServerDelete();
+            ['temp-rec-count','temp-rec-duration','temp-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
+            document.getElementById('btn-temp-start').disabled = false;
+            document.getElementById('btn-temp-start').style.opacity = '1';
+            document.getElementById('btn-temp-stop').disabled = true;
+            document.getElementById('btn-temp-stop').style.opacity = '0.5';
+            _tempUpdateBadge(); _tempUpdatePreview();
+            showToast('Data suhu dihapus', 'info');
+        }
+
+        function tempExportCSV() {
+            if (_tempRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+            var body = _tempRows.map(function(r) {
+                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
+            }).join('\\n');
+            var now = new Date();
+            var fname = 'suhu_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_tempRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
+
+        // ==================== REKAM LUX & BRIGHTNESS ====================
+        function _luxServerPush() {
+            fetch('/api/rec/data?type=lux', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rows: _luxRows})
+            }).catch(function(){});
+        }
+        function _luxServerFetch() {
+            fetch('/api/rec/data?type=lux').then(function(r){ return r.json(); }).then(function(d){
+                if (!d.rows) return;
+                if (d.rows.length !== _luxRows.length ||
+                    JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_luxRows[_luxRows.length-1])) {
+                    _luxRows = d.rows; _ssSave('_luxRows', _luxRows); _luxUpdatePreview();
+                    var c = document.getElementById('lux-rec-count'); if (c) c.textContent = _luxRows.length;
+                }
+            }).catch(function(){});
+        }
+        function _luxServerDelete() { fetch('/api/rec/data?type=lux', {method:'DELETE'}).catch(function(){}); }
+        setInterval(function(){ if (!_luxActive) _luxServerFetch(); }, 5000);
+
+        var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
+        var _luxTimer = null, _lastLuxRecTime = 0;
+        var _LUX_REC_MS = 60000; // 1 menit
+
+        function _luxAddRow() {
+            var ts = new Date().toLocaleString('id-ID');
+            var get = function(id) { var e = document.getElementById(id); return e ? e.textContent : '--'; };
+            _luxRows.push({
+                ts: ts,
+                lux1: get('dash-lux1'), lux2: get('dash-lux2'), lux3: get('dash-lux3'),
+                avg: get('dash-lux-avg'), b1: get('dash-bright1'), b2: get('dash-bright2')
+            });
+            _luxUpdatePreview();
+            var c = document.getElementById('lux-rec-count');
+            if (c) c.textContent = _luxRows.length;
+            _ssSave('_luxRows', _luxRows);
+            _luxServerPush();
+        }
+
+        function _luxTick() {
+            if (!_luxActive) return;
+            var sec = Math.floor((Date.now() - _luxStartTs) / 1000);
+            var m = Math.floor(sec / 60), s = sec % 60;
+            var d = document.getElementById('lux-rec-duration');
+            if (d) d.textContent = m + ':' + String(s).padStart(2, '0');
+            if (Date.now() - _lastLuxRecTime >= _LUX_REC_MS) {
+                _lastLuxRecTime = Date.now();
+                _luxAddRow();
+            }
+        }
+
+        function _luxUpdateBadge() {
+            var b = document.getElementById('lux-rec-badge');
+            if (!b) return;
+            if (_luxActive) {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+            } else {
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
+                b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
+            }
+        }
+
+        function _luxUpdatePreview() {
+            var tbody = document.getElementById('lux-rec-preview');
+            if (!tbody) return;
+            if (_luxRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                return;
+            }
+            // Tampilkan 100 baris terbaru (scroll)
+            var shownL = document.getElementById('lux-shown-count'); if (shownL) shownL.textContent = Math.min(_luxRows.length, 100);
+            var last100 = _luxRows.slice(-100).reverse();
+            tbody.innerHTML = last100.map(function(r, i) {
+                var bg = i % 2 === 0 ? 'background:rgba(234,179,8,0.03);' : '';
+                return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux2 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux3 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#f59e0b;">' + r.avg + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b1 + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b2 + '</td></tr>';
+            }).join('');
+        }
+
+        function luxRecStart() {
+            _luxActive = true; _luxStartTs = Date.now(); _lastLuxRecTime = 0;
+            var s = document.getElementById('lux-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            document.getElementById('btn-lux-start').disabled = true;
+            document.getElementById('btn-lux-start').style.opacity = '0.5';
+            document.getElementById('btn-lux-stop').disabled = false;
+            document.getElementById('btn-lux-stop').style.opacity = '1';
+            _luxTimer = setInterval(_luxTick, 1000);
+            _luxUpdateBadge();
+            _recStatePush({lux: true});
+            showToast('Rekam lux & brightness dimulai', 'success');
+        }
+
+        function luxRecStop() {
+            _luxActive = false; clearInterval(_luxTimer);
+            document.getElementById('btn-lux-start').disabled = false;
+            document.getElementById('btn-lux-start').style.opacity = '1';
+            document.getElementById('btn-lux-stop').disabled = true;
+            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            _luxUpdateBadge();
+            _recStatePush({lux: false});
+            _luxServerPush();
+            showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
+        }
+
+        function luxRecClear() {
+            _luxRows = []; _luxActive = false; clearInterval(_luxTimer);
+            sessionStorage.removeItem('_luxRows');
+            _luxServerDelete();
+            ['lux-rec-count','lux-rec-duration','lux-rec-start'].forEach(function(id) { var e = document.getElementById(id); if (e) e.textContent = id.includes('count') ? '0' : id.includes('duration') ? '0:00' : '--'; });
+            document.getElementById('btn-lux-start').disabled = false;
+            document.getElementById('btn-lux-start').style.opacity = '1';
+            document.getElementById('btn-lux-stop').disabled = true;
+            document.getElementById('btn-lux-stop').style.opacity = '0.5';
+            _luxUpdateBadge(); _luxUpdatePreview();
+            showToast('Data lux dihapus', 'info');
+        }
+
+        function luxExportCSV() {
+            if (_luxRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+            var body = _luxRows.map(function(r) {
+                return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
+            }).join('\\n');
+            var now = new Date();
+            var fname = 'lux_brightness_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '_' +
+                        String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_luxRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+        }
+
+        // ==================== OCCUPANCY DAILY RECORDING ====================
+        var _occRows    = _ssLoad('_occRows', []);   // {ts, hour, count, conf}
+        var _occLastHour = -1;                        // last recorded hour (-1 = none yet)
+        var _occRangeFilter = 'today';                // range: 'today'|'7d'|'30d'|'all'
+        var _OCC_REC_LABEL = Array.from({length:24}, function(_,i){ return String(i).padStart(2,'0') + ':00'; });
+        var _occChart   = null;
+
+        // Restore last recorded hour from session
+        if (_occRows.length > 0) {
+            _occLastHour = _occRows[_occRows.length - 1].hour;
+        }
+
+        function _occInitChart() {
+            var ctx = document.getElementById('occChart');
+            if (!ctx || _occChart) return;
+            _occChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: _OCC_REC_LABEL,
+                    datasets: [{
+                        label: 'Jumlah Orang',
+                        data: new Array(24).fill(null),
+                        backgroundColor: 'rgba(168,85,247,0.5)',
+                        borderColor: '#a855f7',
+                        borderWidth: 1,
+                        borderRadius: 5,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false }, tooltip: {
+                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' orang' : 'Belum direkam'; } }
+                    }},
+                    scales: {
+                        x: { ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', maxRotation: 0 } },
+                        y: { beginAtZero: true, ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', stepSize: 1 },
+                             title: { display: true, text: 'Jumlah Orang', font: {size:10}, color: '#a855f7' } }
+                    }
+                }
+            });
+            _occRefreshChart();
+        }
+
+        function _occGetFilteredRows() {
+            var now = new Date();
+            if (_occRangeFilter === 'today') {
+                var today = now.toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) === today; });
+            } else if (_occRangeFilter === '7d') {
+                var cutoff = new Date(now - 7*24*60*60*1000).toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
+            } else if (_occRangeFilter === '30d') {
+                var cutoff = new Date(now - 30*24*60*60*1000).toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
+            }
+            return _occRows.slice();
+        }
+
+        function occSetRange(r) {
+            _occRangeFilter = r;
+            ['today','7d','30d','all'].forEach(function(t) {
+                var btn = document.getElementById('occ-tab-' + t);
+                if (!btn) return;
+                if (t === r) {
+                    btn.style.background = '#a855f7'; btn.style.color = '#fff'; btn.style.border = 'none';
+                    btn.style.boxShadow = '0 1px 4px rgba(168,85,247,0.3)'; btn.style.fontWeight = '700';
+                } else {
+                    btn.style.background = 'rgba(168,85,247,0.12)'; btn.style.color = '#a855f7';
+                    btn.style.border = '1px solid rgba(168,85,247,0.25)'; btn.style.boxShadow = ''; btn.style.fontWeight = '600';
+                }
+            });
+            _occRefreshChart();
+        }
+
+        function _occRefreshChart() {
+            if (!_occChart) return;
+            var filtered = _occGetFilteredRows();
+            var total = filtered.reduce(function(s,r){ return s + (r.count||0); }, 0);
+            var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = total;
+            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = filtered.length;
+            if (_occRangeFilter === 'today') {
+                var data = new Array(24).fill(null);
+                filtered.forEach(function(r){ if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
+                _occChart.data.labels = _OCC_REC_LABEL;
+                _occChart.data.datasets[0].data = data;
+                _occChart.data.datasets[0].label = 'Jumlah Orang (per jam)';
+            } else {
+                var dayMap = {};
+                filtered.forEach(function(r){ var d = r.ts.substring(0,10); dayMap[d] = (dayMap[d]||0) + (r.count||0); });
+                var days = Object.keys(dayMap).sort();
+                _occChart.data.labels = days;
+                _occChart.data.datasets[0].data = days.map(function(d){ return dayMap[d]; });
+                _occChart.data.datasets[0].label = 'Total Orang per Hari';
+            }
+            _occChart.update('none');
+            _occUpdatePreview();
+        }
+
+        function _occUpdatePreview() {
+            var tbody = document.getElementById('occ-preview-body');
+            if (!tbody) return;
+            var filtered = _occGetFilteredRows();
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Belum ada data untuk rentang ini&hellip;</td></tr>';
+                return;
+            }
+            tbody.innerHTML = filtered.slice().reverse().map(function(r) {
+                return '<tr style="border-bottom:1px solid var(--border);">' +
+                    '<td style="padding:6px 12px;color:var(--text-secondary);">' + r.ts + '</td>' +
+                    '<td style="padding:6px 12px;text-align:center;font-weight:700;color:#a855f7;">' + String(r.hour).padStart(2,'0') + ':00</td>' +
+                    '<td style="padding:6px 12px;text-align:right;font-weight:700;color:#10b981;">' + r.count + '</td>' +
+                    '<td style="padding:6px 12px;text-align:right;color:var(--text-secondary);">' + r.conf + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function _occTryRecord() {
+            var now = new Date();
+            var h = now.getHours();
+            var today = now.toISOString().substring(0, 10);
+            var dateHour = today + ' ' + String(h).padStart(2, '0');
+            // Sudah direkam untuk jam+tanggal ini?
+            if (_occRows.some(function(r){ return r.ts.substring(0,13) === dateHour; })) return;
+            // Prune data lebih dari 30 hari
+            var cutoff = new Date(now - 30*24*60*60*1000).toISOString().substring(0,10);
+            _occRows = _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
+            var countEl = document.getElementById('cam-count-display');
+            var confEl  = document.getElementById('cam-confidence-display');
+            var count   = parseInt((countEl ? countEl.textContent : '0') || '0', 10);
+            var confStr = confEl ? confEl.textContent.replace('%','').trim() : '0';
+            var conf    = parseFloat(confStr) || 0;
+            var ts = now.toISOString().replace('T',' ').substring(0,19);
+            _occRows.push({ ts: ts, hour: h, count: count, conf: conf.toFixed(1) + '%' });
+            _occLastHour = h;
+            _ssSave('_occRows', _occRows);
+            _occRefreshChart();
+            showToast('Occupancy jam ' + String(h).padStart(2,'0') + ':00 direkam — ' + count + ' orang', 'info');
+        }
+
+        function occClear() {
+            _occRows = []; _occLastHour = -1;
+            sessionStorage.removeItem('_occRows');
+            if (_occChart) { _occChart.data.datasets[0].data = new Array(24).fill(null); _occChart.update('none'); }
+            _occUpdatePreview();
+            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = '0';
+            var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = '0';
+            showToast('Data occupancy dihapus', 'info');
+        }
+
+        function occExportCSV() {
+            if (_occRows.length === 0) { showToast('Belum ada data occupancy', 'error'); return; }
+            var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+            var body = _occRows.map(function(r) {
+                return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
+            }).join('\\n');
+            var now = new Date();
+            var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+                        String(now.getDate()).padStart(2,'0') + '.csv';
+            downloadCSV(fname, header + body);
+            showToast(_occRows.length + ' data berhasil diekspor: ' + fname, 'success');
+        }
+
+        // Run occupancy check every 60 seconds; reset and record new hour
+        setInterval(function() {
+            try { _occTryRecord(); } catch(e) {}
+        }, 60000);
+        // Update "next record in" countdown every second
+        setInterval(function() {
+            try {
+                var now = new Date();
+                var minsLeft = 59 - now.getMinutes();
+                var secsLeft = 59 - now.getSeconds();
+                var el = document.getElementById('occ-next-in');
+                if (el) el.textContent = minsLeft + ' mnt ' + String(secsLeft).padStart(2,'0') + ' dtk';
+            } catch(e) {}
+        }, 1000);
+        // Also init chart once DOM is ready (delayed)
+        setTimeout(function() {
+            try { _occInitChart(); _occRefreshChart(); } catch(e) {}
+        }, 500);
+
+        // ==================== MQTT REAL-TIME UPDATE HANDLER ====================
         socket.on('mqtt_update', function(data) {
             updateDashboard();
             
@@ -7804,94 +9199,12 @@ HTML_TEMPLATE = '''
             
             if (data.type === 'energy') {
                 const e = data.data;
-                const voltEl = document.getElementById('energy-voltage');
-                const currEl = document.getElementById('energy-current');
-                const powEl = document.getElementById('energy-power');
-                const kwhEl = document.getElementById('energy-kwh');
-                const freqEl = document.getElementById('energy-freq');
-                const pfEl = document.getElementById('energy-pf');
-                const costEl = document.getElementById('energy-cost');
-                const badge = document.getElementById('energy-status-badge');
-                
-                if (voltEl) voltEl.textContent = parseFloat(e.voltage || 0).toFixed(1);
-                if (currEl) currEl.textContent = parseFloat(e.current || 0).toFixed(2);
-                if (powEl) powEl.textContent = parseFloat(e.power || 0).toFixed(1);
-                if (kwhEl) kwhEl.textContent = parseFloat(e.energy || 0).toFixed(3);
-                if (freqEl) freqEl.textContent = parseFloat(e.frequency || 0).toFixed(1);
-                if (pfEl) pfEl.textContent = parseFloat(e.pf || 0).toFixed(2);
-                
-                // Estimasi biaya: tarif PLN R1/1300VA = Rp 1.444,70/kWh
-                if (costEl) {
-                    const cost = parseFloat(e.energy || 0) * 1444.70;
-                    costEl.textContent = cost.toLocaleString('id-ID', {minimumFractionDigits: 0, maximumFractionDigits: 0});
-                }
-                
-                if (badge) {
-                    if (e.connected) {
-                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Online';
-                        badge.style.background = 'rgba(16, 185, 129, 0.15)';
-                        badge.style.color = '#10b981';
-                        badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    } else {
-                        badge.innerHTML = '<i class="fas fa-circle" style="font-size: 6px; vertical-align: middle; margin-right: 4px;"></i> Offline';
-                        badge.style.background = 'rgba(107, 114, 128, 0.15)';
-                        badge.style.color = '#6b7280';
-                        badge.style.borderColor = 'rgba(107, 114, 128, 0.3)';
-                    }
-                }
-                
-                // Show energy data bubble notification
+                // Tampilkan bubble notifikasi jika ada daya
                 const pwr = parseFloat(e.power || 0);
                 const vlt = parseFloat(e.voltage || 0);
                 const cur = parseFloat(e.current || 0);
                 if (pwr > 0 || vlt > 0) {
                     showEnergyBubble(pwr, vlt, cur);
-                }
-
-                // Real-time push to energy charts (so charts work even without InfluxDB)
-                // Remove "No Data" overlays once data arrives
-                ['powerChart','voltageChart','currentChart','kwhChart'].forEach(function(cid){
-                    var ov = document.getElementById('nodata-' + cid);
-                    if (ov) ov.remove();
-                });
-                var now = new Date();
-                var tStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                if (charts.energyPower && pwr >= 0) {
-                    if (charts.energyPower.data.labels.length > 120) {
-                        charts.energyPower.data.labels.shift();
-                        charts.energyPower.data.datasets[0].data.shift();
-                    }
-                    charts.energyPower.data.labels.push(tStr);
-                    charts.energyPower.data.datasets[0].data.push(pwr);
-                    charts.energyPower.update('none');
-                }
-                if (charts.energyVoltage && vlt >= 0) {
-                    if (charts.energyVoltage.data.labels.length > 120) {
-                        charts.energyVoltage.data.labels.shift();
-                        charts.energyVoltage.data.datasets[0].data.shift();
-                    }
-                    charts.energyVoltage.data.labels.push(tStr);
-                    charts.energyVoltage.data.datasets[0].data.push(vlt);
-                    charts.energyVoltage.update('none');
-                }
-                if (charts.energyCurrent && cur >= 0) {
-                    if (charts.energyCurrent.data.labels.length > 120) {
-                        charts.energyCurrent.data.labels.shift();
-                        charts.energyCurrent.data.datasets[0].data.shift();
-                    }
-                    charts.energyCurrent.data.labels.push(tStr);
-                    charts.energyCurrent.data.datasets[0].data.push(cur);
-                    charts.energyCurrent.update('none');
-                }
-                var kwhVal = parseFloat(e.energy || 0);
-                if (charts.energyKwh && kwhVal >= 0) {
-                    if (charts.energyKwh.data.labels.length > 120) {
-                        charts.energyKwh.data.labels.shift();
-                        charts.energyKwh.data.datasets[0].data.shift();
-                    }
-                    charts.energyKwh.data.labels.push(tStr);
-                    charts.energyKwh.data.datasets[0].data.push(kwhVal);
-                    charts.energyKwh.update('none');
                 }
             }
 
@@ -8121,12 +9434,19 @@ HTML_TEMPLATE = '''
                     btn.style.opacity = '0.5';
                 });
             } else if (status === 'completed') {
-                showToast(algo + ' optimization completed! GA: ' + (data.ga_fitness || 0).toFixed(2) + ', PSO: ' + (data.pso_fitness || 0).toFixed(2), 'success');
+                var modeLabel = '';
+                if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
+                showToast(algo + ' optimization completed! GA: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel + ', PSO: ' + (data.pso_fitness || 0).toFixed(2), 'success');
                 // Re-enable run buttons
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = false;
                     btn.style.opacity = '1';
                 });
+                // Update mode display immediately from solution
+                if (data.ga_solution && data.ga_solution.mode) {
+                    var modeEl = document.getElementById('ml-ga-mode');
+                    if (modeEl) modeEl.textContent = data.ga_solution.mode;
+                }
                 // Refresh ML data
                 refreshMLData();
             } else if (status === 'error') {
@@ -8242,6 +9562,15 @@ HTML_TEMPLATE = '''
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
             try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
+            // Restore recording previews from sessionStorage
+            try { _recUpdatePreview(); } catch(e) {}
+            try { _tempUpdatePreview(); } catch(e) {}
+            try { _luxUpdatePreview(); } catch(e) {}
+            // Fetch server-side recorded data (cross-device sync)
+            try { _recServerFetch(); } catch(e) {}
+            try { _tempServerFetch(); } catch(e) {}
+            try { _luxServerFetch(); } catch(e) {}
+            try { _occInitChart(); } catch(e) {}
             try { loadSavedPreferences(); } catch(e) { console.error('[ERROR] loadSavedPreferences:', e); }
             try { loadSavedSettings(); } catch(e) { console.error('[ERROR] loadSavedSettings:', e); }
             try { updateSoundToggleUI(); } catch(e) { console.error('[ERROR] updateSoundToggleUI:', e); }
@@ -8314,10 +9643,12 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     print("Smart Room Dashboard starting...")
-    
+
+    # Check system timezone (RPi must be Asia/Jakarta for correct timestamps)
+    check_timezone()
+
     # Load saved IR codes from file
     try:
-        import os
         ir_file = os.path.join(os.path.dirname(__file__), 'ir_codes.json')
         if os.path.exists(ir_file):
             with open(ir_file, 'r') as f:
@@ -8342,5 +9673,19 @@ if __name__ == '__main__':
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
-    
+
+    # Start MySQL energy polling (Jagoan Hosting)
+    try:
+        import mysql_energy
+        mysql_energy.start_polling({
+            'mqtt_data':              mqtt_data,
+            'energy_runtime_history': energy_runtime_history,
+            'get_energy_phase':       lambda: energy_phase,
+            'write_influx':           write_to_influxdb,
+            'socketio':               socketio,
+        })
+        print("  [MySQL] Energy polling thread started")
+    except Exception as _me:
+        print(f"  [MySQL] WARNING: mysql_energy tidak bisa dimuat: {_me}")
+
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
