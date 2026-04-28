@@ -805,6 +805,12 @@ energy_runtime_history = deque(maxlen=5000)
 # Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
 lamp_runtime_history = deque(maxlen=5000)
 
+# InfluxDB write throttle — simpan setiap 6 menit agar database tidak terlalu penuh
+INFLUX_WRITE_INTERVAL = 360  # detik (6 menit)
+_last_sensor_influx_ts   = 0.0   # kapan terakhir ac_sensor ditulis ke InfluxDB
+_last_lamp_influx_ts     = 0.0   # kapan terakhir lamp_sensor ditulis ke InfluxDB
+_last_ac_energy_influx_ts = 0.0  # kapan terakhir energy AC ditulis ke InfluxDB
+
 # ==================== INFLUXDB SINGLETON ====================
 # One persistent client + write_api shared across all threads.
 # Query-API is stateless and thread-safe; write_api (SYNCHRONOUS) is also safe.
@@ -874,6 +880,11 @@ def write_to_influxdb(measurement, fields, tags=None):
     return False
 
 def save_sensor_data(temperature, humidity, heat_index):
+    global _last_sensor_influx_ts
+    now = time.time()
+    if now - _last_sensor_influx_ts < INFLUX_WRITE_INTERVAL:
+        return  # throttle: belum 6 menit
+    _last_sensor_influx_ts = now
     try:
         write_to_influxdb('ac_sensor', {
             'temperature': float(temperature), 'humidity': float(humidity), 'heat_index': float(heat_index)
@@ -882,15 +893,20 @@ def save_sensor_data(temperature, humidity, heat_index):
         print(f'[ERROR] save_sensor_data: {e}')
 
 def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
-    global _lamp_energy_kwh, _lamp_energy_last_ts
+    global _lamp_energy_kwh, _lamp_energy_last_ts, _last_lamp_influx_ts
+    now_ts_throttle = time.time()
+    do_influx_write = (now_ts_throttle - _last_lamp_influx_ts >= INFLUX_WRITE_INTERVAL)
+    if do_influx_write:
+        _last_lamp_influx_ts = now_ts_throttle
     try:
         lux_avg = (lux1 + lux2 + lux3) / 3.0
         bright_avg = (brightness1 + brightness2) / 2.0
-        write_to_influxdb('lamp_sensor', {
-            'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
-            'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
-            'motion': bool(motion)
-        }, tags={'device': 'esp32_lamp', 'location': 'room'})
+        if do_influx_write:
+            write_to_influxdb('lamp_sensor', {
+                'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
+                'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
+                'motion': bool(motion)
+            }, tags={'device': 'esp32_lamp', 'location': 'room'})
         # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
         now_ts = time.time()
         lamp_power = round((bright_avg / 100.0) * LAMP_RATED_WATT, 2)
@@ -902,12 +918,13 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
             _lamp_energy_last_ts = now_ts
             kwh_snapshot  = round(_lamp_energy_kwh, 4)
             phase_snapshot = lamp_phase
-        write_to_influxdb('energy_monitor', {
-            'power': lamp_power,
-            'current': lamp_current,
-            'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
-            'energy_kwh': kwh_snapshot
-        }, tags={'device': 'esp32_lamp', 'phase': phase_snapshot})
+        if do_influx_write:
+            write_to_influxdb('energy_monitor', {
+                'power': lamp_power,
+                'current': lamp_current,
+                'voltage': LAMP_VOLTAGE if lamp_power > 0 else 0.0,
+                'energy_kwh': kwh_snapshot
+            }, tags={'device': 'esp32_lamp', 'phase': phase_snapshot})
         # Fill runtime buffer for immediate chart display (fallback when InfluxDB has no data yet)
         lamp_runtime_history.append({
             'ts': datetime.now(),
@@ -1603,6 +1620,20 @@ def on_message(client, userdata, msg):
                 'connected': True
             })
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
+            # Simpan ke InfluxDB energy_monitor setiap 6 menit (untuk fitur export)
+            global _last_ac_energy_influx_ts
+            _now_e = time.time()
+            if _now_e - _last_ac_energy_influx_ts >= INFLUX_WRITE_INTERVAL:
+                _last_ac_energy_influx_ts = _now_e
+                try:
+                    write_to_influxdb('energy_monitor', {
+                        'voltage':    float(mqtt_data['energy']['voltage']),
+                        'current':    float(mqtt_data['energy']['current']),
+                        'power':      float(mqtt_data['energy']['power']),
+                        'energy_kwh': float(mqtt_data['energy']['energy']),
+                    }, tags={'device': 'esp32_ac'})
+                except Exception as _e:
+                    print(f'[ERROR] energy_monitor write: {_e}')
 
         elif 'camera/detection' in topic:
             person_from_mqtt = payload.get('person_detected', False)
@@ -9851,7 +9882,25 @@ HTML_TEMPLATE = '''
                 if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
                 if (from > to) { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
                 showToast('Mengambil data dari database...', 'success');
-                window.location.href = '/api/export/csv?type=' + type + '&from=' + from + '&to=' + to;
+                var url = '/api/export/csv?type=' + type + '&from=' + from + '&to=' + to;
+                fetch(url).then(function(r) {
+                    if (r.ok && r.headers.get('Content-Type') && r.headers.get('Content-Type').indexOf('text/csv') >= 0) {
+                        return r.blob().then(function(blob) {
+                            var a = document.createElement('a');
+                            a.href = URL.createObjectURL(blob);
+                            var fname = type + '_' + from + '_sd_' + to + '.csv';
+                            a.download = fname;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(a.href);
+                        });
+                    } else {
+                        return r.json().then(function(j) {
+                            showToast((j && j.error) ? j.error : 'Gagal export data', 'error');
+                        });
+                    }
+                }).catch(function(e) { showToast('Error: ' + e, 'error'); });
             };
 
             console.log('[OK] Dashboard Ready!');
