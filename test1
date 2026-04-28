@@ -4004,13 +4004,17 @@ HTML_TEMPLATE = '''
                             style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
+                        <button onclick="tempExportRange()" title="Export rentang tanggal"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.10);color:#3b82f6;font-size:13px;font-weight:700;cursor:pointer;">
+                            &#128197; Rentang
+                        </button>
                     </div>
                     <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
                         <span style="color:var(--text-secondary);">Baris: <strong id="temp-rec-count" style="color:var(--text);">0</strong></span>
                         <span style="color:var(--text-secondary);">Durasi: <strong id="temp-rec-duration" style="color:var(--text);">0:00</strong></span>
                         <span style="color:var(--text-secondary);">Mulai: <strong id="temp-rec-start" style="color:var(--text);">--</strong></span>
                     </div>
-                    <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
                         <table style="width:100%;border-collapse:collapse;font-size:11px;">
                             <thead>
                                 <tr style="background:rgba(59,130,246,0.08);">
@@ -4027,7 +4031,7 @@ HTML_TEMPLATE = '''
                             </tbody>
                         </table>
                     </div>
-                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk semua data.</div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="temp-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
                 </div>
 
             </div>
@@ -4188,13 +4192,17 @@ HTML_TEMPLATE = '''
                             style="padding:10px 22px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;margin-left:auto;">
                             <i class="fas fa-download"></i> Export CSV
                         </button>
+                        <button onclick="luxExportRange()" title="Export rentang tanggal"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.10);color:#ca8a04;font-size:13px;font-weight:700;cursor:pointer;">
+                            &#128197; Rentang
+                        </button>
                     </div>
                     <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;">
                         <span style="color:var(--text-secondary);">Baris: <strong id="lux-rec-count" style="color:var(--text);">0</strong></span>
                         <span style="color:var(--text-secondary);">Durasi: <strong id="lux-rec-duration" style="color:var(--text);">0:00</strong></span>
                         <span style="color:var(--text-secondary);">Mulai: <strong id="lux-rec-start" style="color:var(--text);">--</strong></span>
                     </div>
-                    <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                    <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);">
                         <table style="width:100%;border-collapse:collapse;font-size:11px;">
                             <thead>
                                 <tr style="background:rgba(234,179,8,0.08);">
@@ -4212,7 +4220,7 @@ HTML_TEMPLATE = '''
                             </tbody>
                         </table>
                     </div>
-                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 5 baris terakhir. Export CSV untuk semua data.</div>
+                    <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="lux-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
                 </div>
 
             </div>
@@ -4230,6 +4238,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Room Temperature Trend</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Temperature (C)')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
@@ -4243,6 +4252,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Humidity Trend</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Humidity (%)')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
@@ -4256,6 +4266,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">AC Target Temperature</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'AC Target Temp (C)')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -4277,6 +4288,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Light Intensity (Lux) — 3 Sensors</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampLux', 'Lux')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 24)">24h</button>
@@ -4290,6 +4302,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Brightness Level — 2 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampBright', 'Brightness (%)')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 24)">24h</button>
@@ -4380,18 +4393,26 @@ HTML_TEMPLATE = '''
                     <div style="display:flex;gap:8px;align-items:center;">
                         <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
                         <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="occExportRange()" title="Export rentang tanggal" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
                         <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
                     </div>
                 </div>
-                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-size:12px;">
-                    <span style="color:var(--text-secondary);">Data hari ini: <strong id="occ-count" style="color:#a855f7;">0</strong> jam tercatat</span>
-                    <span style="color:var(--text-secondary);">Jam berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Total terdeteksi hari ini: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang/jam</span>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
+                    <span style="color:var(--text-secondary);">Data tampil: <strong id="occ-count" style="color:#a855f7;">0</strong> jam</span>
+                    <span style="color:var(--text-secondary);">Berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang</span>
+                </div>
+                <!-- Range filter occupancy -->
+                <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;">
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Hari Ini</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Hari</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Hari</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">Semua</button>
                 </div>
                 <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
                     <canvas id="occChart"></canvas>
                 </div>
-                <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
+                <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
                             <tr style="background:rgba(168,85,247,0.08);">
@@ -4808,6 +4829,10 @@ HTML_TEMPLATE = '''
                             style="padding:10px 16px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">
                             <i class="fas fa-download"></i> Lampu
                         </button>
+                        <button onclick="energyExportRange('all')" title="Export rentang tanggal"
+                            style="padding:10px 14px;border-radius:10px;border:1px solid rgba(99,102,241,0.35);background:rgba(99,102,241,0.10);color:#6366f1;font-size:12px;font-weight:700;cursor:pointer;">
+                            &#128197; Rentang
+                        </button>
                     </div>
                 </div>
 
@@ -4817,6 +4842,7 @@ HTML_TEMPLATE = '''
                         <span style="color:var(--text-secondary);">Baris direkam: <strong id="rec-count" style="color:var(--text);">0</strong></span>
                         <span style="color:var(--text-secondary);">Durasi: <strong id="rec-duration" style="color:var(--text);">0:00</strong></span>
                         <span style="color:var(--text-secondary);">Mulai: <strong id="rec-start-time" style="color:var(--text);">--</strong></span>
+                        <span id="rec-date-range" style="display:none;color:var(--text-secondary);">Rentang: <strong id="rec-range-text" style="color:#10b981;"></strong></span>
                     </div>
                     <!-- Filter tabs -->
                     <div style="display:flex;gap:4px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
@@ -4829,8 +4855,8 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- Preview tabel 10 baris terakhir (filtered) -->
-                <div style="overflow-x:auto;border-radius:10px;border:1px solid var(--border);">
+                <!-- Preview tabel semua baris (filtered, scrollable) -->
+                <div style="overflow-x:auto;overflow-y:auto;max-height:320px;border-radius:10px;border:1px solid var(--border);">
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
                             <tr style="background:rgba(99,102,241,0.08);">
@@ -4851,7 +4877,7 @@ HTML_TEMPLATE = '''
                         </tbody>
                     </table>
                 </div>
-                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan 10 baris terakhir sesuai filter. Export CSV untuk semua data.</div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">Menampilkan <span id="rec-shown-count">100</span> baris terbaru (scroll &#x2195;). Export CSV untuk semua data.</div>
             </div>
         </div>
 
@@ -5213,6 +5239,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             Run GA
                         </button>
@@ -5227,6 +5254,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">PSO Fitness Convergence (Lamp Optimization)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
                             Run PSO
                         </button>
@@ -5372,6 +5400,7 @@ HTML_TEMPLATE = '''
                         <div class="chart-title">Occupancy Trend</div>
                         <div class="chart-options">
                             <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export rentang tanggal">&#128197;</button>
                             <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
@@ -8549,10 +8578,16 @@ HTML_TEMPLATE = '''
             if (filtered.length === 0) {
                 var msg = _recRows.length > 0 ? 'Tidak ada data untuk filter <strong>' + _recFilter + '</strong>.' : 'Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.';
                 tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
+                var rngHide = document.getElementById('rec-date-range'); if (rngHide) rngHide.style.display = 'none';
                 return;
             }
-            var last10 = filtered.slice(-10).reverse();
-            tbody.innerHTML = last10.map(function(r) {
+            // Tampilkan rentang tanggal
+            var rng = document.getElementById('rec-date-range'); var rngTxt = document.getElementById('rec-range-text');
+            if (rng && rngTxt) { rng.style.display = ''; rngTxt.textContent = filtered[0].ts + ' \u2014 ' + filtered[filtered.length-1].ts; }
+            // Tampilkan 100 baris terbaru (scroll)
+            var shown = filtered.slice(-100).reverse();
+            var shownEl = document.getElementById('rec-shown-count'); if (shownEl) shownEl.textContent = Math.min(filtered.length, 100);
+            tbody.innerHTML = shown.map(function(r) {
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
@@ -8759,8 +8794,10 @@ HTML_TEMPLATE = '''
                 tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
                 return;
             }
-            var last5 = _tempRows.slice(-5).reverse();
-            tbody.innerHTML = last5.map(function(r, i) {
+            // Tampilkan 100 baris terbaru (scroll)
+            var shownT = document.getElementById('temp-shown-count'); if (shownT) shownT.textContent = Math.min(_tempRows.length, 100);
+            var last100 = _tempRows.slice(-100).reverse();
+            tbody.innerHTML = last100.map(function(r, i) {
                 var bg = i % 2 === 0 ? 'background:rgba(59,130,246,0.03);' : '';
                 return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#3b82f6;">' + r.temp + '</td>' +
@@ -8893,8 +8930,10 @@ HTML_TEMPLATE = '''
                 tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
                 return;
             }
-            var last5 = _luxRows.slice(-5).reverse();
-            tbody.innerHTML = last5.map(function(r, i) {
+            // Tampilkan 100 baris terbaru (scroll)
+            var shownL = document.getElementById('lux-shown-count'); if (shownL) shownL.textContent = Math.min(_luxRows.length, 100);
+            var last100 = _luxRows.slice(-100).reverse();
+            tbody.innerHTML = last100.map(function(r, i) {
                 var bg = i % 2 === 0 ? 'background:rgba(234,179,8,0.03);' : '';
                 return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux1 + '</td>' +
@@ -8961,6 +9000,7 @@ HTML_TEMPLATE = '''
         // ==================== OCCUPANCY DAILY RECORDING ====================
         var _occRows    = _ssLoad('_occRows', []);   // {ts, hour, count, conf}
         var _occLastHour = -1;                        // last recorded hour (-1 = none yet)
+        var _occRangeFilter = 'today';                // range: 'today'|'7d'|'30d'|'all'
         var _OCC_REC_LABEL = Array.from({length:24}, function(_,i){ return String(i).padStart(2,'0') + ':00'; });
         var _occChart   = null;
 
@@ -9001,26 +9041,70 @@ HTML_TEMPLATE = '''
             _occRefreshChart();
         }
 
+        function _occGetFilteredRows() {
+            var now = new Date();
+            if (_occRangeFilter === 'today') {
+                var today = now.toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) === today; });
+            } else if (_occRangeFilter === '7d') {
+                var cutoff = new Date(now - 7*24*60*60*1000).toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
+            } else if (_occRangeFilter === '30d') {
+                var cutoff = new Date(now - 30*24*60*60*1000).toISOString().substring(0,10);
+                return _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
+            }
+            return _occRows.slice();
+        }
+
+        function occSetRange(r) {
+            _occRangeFilter = r;
+            ['today','7d','30d','all'].forEach(function(t) {
+                var btn = document.getElementById('occ-tab-' + t);
+                if (!btn) return;
+                if (t === r) {
+                    btn.style.background = '#a855f7'; btn.style.color = '#fff'; btn.style.border = 'none';
+                    btn.style.boxShadow = '0 1px 4px rgba(168,85,247,0.3)'; btn.style.fontWeight = '700';
+                } else {
+                    btn.style.background = 'rgba(168,85,247,0.12)'; btn.style.color = '#a855f7';
+                    btn.style.border = '1px solid rgba(168,85,247,0.25)'; btn.style.boxShadow = ''; btn.style.fontWeight = '600';
+                }
+            });
+            _occRefreshChart();
+        }
+
         function _occRefreshChart() {
             if (!_occChart) return;
-            var data = new Array(24).fill(null);
-            _occRows.forEach(function(r) { if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
-            _occChart.data.datasets[0].data = data;
-            _occChart.update('none');
-            var total = _occRows.reduce(function(s,r){ return s + (r.count || 0); }, 0);
+            var filtered = _occGetFilteredRows();
+            var total = filtered.reduce(function(s,r){ return s + (r.count||0); }, 0);
             var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = total;
-            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = _occRows.length;
+            var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = filtered.length;
+            if (_occRangeFilter === 'today') {
+                var data = new Array(24).fill(null);
+                filtered.forEach(function(r){ if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
+                _occChart.data.labels = _OCC_REC_LABEL;
+                _occChart.data.datasets[0].data = data;
+                _occChart.data.datasets[0].label = 'Jumlah Orang (per jam)';
+            } else {
+                var dayMap = {};
+                filtered.forEach(function(r){ var d = r.ts.substring(0,10); dayMap[d] = (dayMap[d]||0) + (r.count||0); });
+                var days = Object.keys(dayMap).sort();
+                _occChart.data.labels = days;
+                _occChart.data.datasets[0].data = days.map(function(d){ return dayMap[d]; });
+                _occChart.data.datasets[0].label = 'Total Orang per Hari';
+            }
+            _occChart.update('none');
             _occUpdatePreview();
         }
 
         function _occUpdatePreview() {
             var tbody = document.getElementById('occ-preview-body');
             if (!tbody) return;
-            if (_occRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>';
+            var filtered = _occGetFilteredRows();
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Belum ada data untuk rentang ini&hellip;</td></tr>';
                 return;
             }
-            tbody.innerHTML = _occRows.slice().reverse().map(function(r) {
+            tbody.innerHTML = filtered.slice().reverse().map(function(r) {
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 12px;color:var(--text-secondary);">' + r.ts + '</td>' +
                     '<td style="padding:6px 12px;text-align:center;font-weight:700;color:#a855f7;">' + String(r.hour).padStart(2,'0') + ':00</td>' +
@@ -9033,21 +9117,13 @@ HTML_TEMPLATE = '''
         function _occTryRecord() {
             var now = new Date();
             var h = now.getHours();
-            if (h === _occLastHour) return;   // already recorded this hour
-            // Check if it's a new day → reset
-            if (_occRows.length > 0) {
-                var lastDate = _occRows[0].ts.substring(0, 10);
-                var today    = now.toISOString().substring(0, 10);
-                if (lastDate !== today) {
-                    _occRows = [];
-                    _occLastHour = -1;
-                    sessionStorage.removeItem('_occRows');
-                    if (_occChart) {
-                        _occChart.data.datasets[0].data = new Array(24).fill(null);
-                        _occChart.update('none');
-                    }
-                }
-            }
+            var today = now.toISOString().substring(0, 10);
+            var dateHour = today + ' ' + String(h).padStart(2, '0');
+            // Sudah direkam untuk jam+tanggal ini?
+            if (_occRows.some(function(r){ return r.ts.substring(0,13) === dateHour; })) return;
+            // Prune data lebih dari 30 hari
+            var cutoff = new Date(now - 30*24*60*60*1000).toISOString().substring(0,10);
+            _occRows = _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
             var countEl = document.getElementById('cam-count-display');
             var confEl  = document.getElementById('cam-confidence-display');
             var count   = parseInt((countEl ? countEl.textContent : '0') || '0', 10);
@@ -9579,9 +9655,183 @@ HTML_TEMPLATE = '''
                 } catch(e) {}
             }, 8000);
             
+            // ==================== DATE RANGE PICKER ====================
+            var _drpCallback = null;
+            var _drpAllRows  = null; // reference for "Semua" shortcut
+
+            function showDateRangePicker(subtitle, rowsRef, callback) {
+                _drpCallback = callback;
+                _drpAllRows  = rowsRef;
+                var sub = document.getElementById('drp-subtitle');
+                if (sub) sub.textContent = subtitle || 'Export data dalam rentang yang dipilih';
+                var today = new Date().toISOString().substring(0,10);
+                var from30 = new Date(Date.now() - 29*24*60*60*1000).toISOString().substring(0,10);
+                // default: last 30 days or first row's date, whichever is earlier
+                var fromVal = from30;
+                if (rowsRef && rowsRef.length > 0 && rowsRef[0].ts) {
+                    var firstDate = rowsRef[0].ts.substring(0,10);
+                    fromVal = firstDate < from30 ? firstDate : from30;
+                }
+                document.getElementById('drp-from').value = fromVal;
+                document.getElementById('drp-to').value   = today;
+                var modal = document.getElementById('drp-modal');
+                modal.style.display = 'flex';
+            }
+
+            function drpShortcut(days) {
+                var today = new Date().toISOString().substring(0,10);
+                document.getElementById('drp-to').value = today;
+                if (days === 0) {
+                    // Semua — set from = first row date
+                    var fromVal = today;
+                    if (_drpAllRows && _drpAllRows.length > 0 && _drpAllRows[0].ts) {
+                        fromVal = _drpAllRows[0].ts.substring(0,10);
+                    }
+                    document.getElementById('drp-from').value = fromVal;
+                } else if (days === 1) {
+                    document.getElementById('drp-from').value = today;
+                } else {
+                    var d = new Date(Date.now() - (days-1)*24*60*60*1000).toISOString().substring(0,10);
+                    document.getElementById('drp-from').value = d;
+                }
+            }
+
+            function drpConfirm() {
+                var from = document.getElementById('drp-from').value;
+                var to   = document.getElementById('drp-to').value;
+                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
+                if (from > to)    { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
+                document.getElementById('drp-modal').style.display = 'none';
+                if (_drpCallback) _drpCallback(from, to);
+            }
+
+            function drpCancel() {
+                document.getElementById('drp-modal').style.display = 'none';
+            }
+
+            // Helper: filter rows array by date range (ts field starts with YYYY-MM-DD)
+            function drpFilter(rows, from, to) {
+                return rows.filter(function(r){ var d = (r.ts||'').substring(0,10); return d >= from && d <= to; });
+            }
+
+            // Energy export with date range
+            function energyExportRange(device) {
+                showDateRangePicker(
+                    'Export rekaman energi' + (device && device !== 'all' ? ' (' + device + ')' : ' (Semua)'),
+                    _recRows,
+                    function(from, to) {
+                        var base = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
+                        var rows = drpFilter(base, from, to);
+                        if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                        var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+                        var body = rows.map(function(r) {
+                            return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
+                                   r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
+                        }).join('\\n');
+                        var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
+                        var fname = 'energy' + suffix + '_' + from + '_sd_' + to + '.csv';
+                        downloadCSV(fname, header + body);
+                        showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                    }
+                );
+            }
+
+            // Temp export with date range
+            function tempExportRange() {
+                showDateRangePicker('Export rekaman suhu & humidity', _tempRows, function(from, to) {
+                    var rows = drpFilter(_tempRows, from, to);
+                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                    var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3; }).join('\\n');
+                    var fname = 'suhu_' + from + '_sd_' + to + '.csv';
+                    downloadCSV(fname, header + body);
+                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                });
+            }
+
+            // Lux export with date range
+            function luxExportRange() {
+                showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
+                    var rows = drpFilter(_luxRows, from, to);
+                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                    var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\\n');
+                    var fname = 'lux_' + from + '_sd_' + to + '.csv';
+                    downloadCSV(fname, header + body);
+                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                });
+            }
+
+            // Occupancy export with date range
+            function occExportRange() {
+                showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
+                    var rows = drpFilter(_occRows, from, to);
+                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                    var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\\n');
+                    var fname = 'occupancy_' + from + '_sd_' + to + '.csv';
+                    downloadCSV(fname, header + body);
+                    showToast(rows.length + ' data diekspor: ' + fname, 'success');
+                });
+            }
+
+            // Chart export with date range (filters chart data by time label prefix YYYY-MM-DD)
+            function exportChartRange(chartName, valueLabel) {
+                var chart = charts[chartName];
+                if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
+                    showToast('Tidak ada data untuk ' + chartName, 'error'); return;
+                }
+                // Build pseudo rows from chart labels for the "Semua" shortcut hint
+                var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
+                showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
+                    var header = 'Time,' + valueLabel + '\\n';
+                    var lines = [];
+                    chart.data.labels.forEach(function(label, i) {
+                        var d = label.substring(0,10);
+                        if (d < from || d > to) return;
+                        var val = chart.data.datasets[0].data[i];
+                        lines.push('"' + label + '",' + (val !== null && val !== undefined ? val : ''));
+                    });
+                    if (lines.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                    downloadCSV(chartName + '_' + from + '_sd_' + to + '.csv', header + lines.join('\\n') + '\\n');
+                    showToast(lines.length + ' poin diekspor', 'success');
+                });
+            }
+
             console.log('[OK] Dashboard Ready!');
         };
     </script>
+
+    <!-- ===== MODAL PILIH RENTANG TANGGAL ===== -->
+    <div id="drp-modal" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
+        <div style="background:var(--bg-card);border-radius:20px;padding:30px 28px 24px;min-width:310px;max-width:380px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,0.25);border:1px solid var(--border);position:relative;">
+            <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px;display:flex;align-items:center;gap:8px;">
+                <span style="font-size:20px;">&#128197;</span> Pilih Rentang Tanggal
+            </div>
+            <div id="drp-subtitle" style="font-size:12px;color:var(--text-secondary);margin-bottom:20px;">Export data dalam rentang yang dipilih</div>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:22px;">
+                <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Dari Tanggal</label>
+                    <input type="date" id="drp-from" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
+                </div>
+                <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Sampai Tanggal</label>
+                    <input type="date" id="drp-to" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
+                </div>
+            </div>
+            <!-- Shortcut buttons -->
+            <div style="display:flex;gap:5px;margin-bottom:20px;flex-wrap:wrap;">
+                <button onclick="drpShortcut(1)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Hari ini</button>
+                <button onclick="drpShortcut(7)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">7 Hari</button>
+                <button onclick="drpShortcut(30)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">30 Hari</button>
+                <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Semua</button>
+            </div>
+            <div style="display:flex;gap:10px;">
+                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Ekspor CSV</button>
+                <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Batal</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 '''
