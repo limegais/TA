@@ -9657,16 +9657,15 @@ HTML_TEMPLATE = '''
             
             // ==================== DATE RANGE PICKER ====================
             var _drpCallback = null;
-            var _drpAllRows  = null; // reference for "Semua" shortcut
+            var _drpAllRows  = null;
 
-            function showDateRangePicker(subtitle, rowsRef, callback) {
+            window.showDateRangePicker = function(subtitle, rowsRef, callback) {
                 _drpCallback = callback;
                 _drpAllRows  = rowsRef;
                 var sub = document.getElementById('drp-subtitle');
                 if (sub) sub.textContent = subtitle || 'Export data dalam rentang yang dipilih';
                 var today = new Date().toISOString().substring(0,10);
                 var from30 = new Date(Date.now() - 29*24*60*60*1000).toISOString().substring(0,10);
-                // default: last 30 days or first row's date, whichever is earlier
                 var fromVal = from30;
                 if (rowsRef && rowsRef.length > 0 && rowsRef[0].ts) {
                     var firstDate = rowsRef[0].ts.substring(0,10);
@@ -9674,15 +9673,13 @@ HTML_TEMPLATE = '''
                 }
                 document.getElementById('drp-from').value = fromVal;
                 document.getElementById('drp-to').value   = today;
-                var modal = document.getElementById('drp-modal');
-                modal.style.display = 'flex';
-            }
+                document.getElementById('drp-modal').style.display = 'flex';
+            };
 
-            function drpShortcut(days) {
+            window.drpShortcut = function(days) {
                 var today = new Date().toISOString().substring(0,10);
                 document.getElementById('drp-to').value = today;
                 if (days === 0) {
-                    // Semua — set from = first row date
                     var fromVal = today;
                     if (_drpAllRows && _drpAllRows.length > 0 && _drpAllRows[0].ts) {
                         fromVal = _drpAllRows[0].ts.substring(0,10);
@@ -9694,28 +9691,26 @@ HTML_TEMPLATE = '''
                     var d = new Date(Date.now() - (days-1)*24*60*60*1000).toISOString().substring(0,10);
                     document.getElementById('drp-from').value = d;
                 }
-            }
+            };
 
-            function drpConfirm() {
+            window.drpConfirm = function() {
                 var from = document.getElementById('drp-from').value;
                 var to   = document.getElementById('drp-to').value;
                 if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
                 if (from > to)    { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
                 document.getElementById('drp-modal').style.display = 'none';
                 if (_drpCallback) _drpCallback(from, to);
-            }
+            };
 
-            function drpCancel() {
+            window.drpCancel = function() {
                 document.getElementById('drp-modal').style.display = 'none';
-            }
+            };
 
-            // Helper: filter rows array by date range (ts field starts with YYYY-MM-DD)
             function drpFilter(rows, from, to) {
                 return rows.filter(function(r){ var d = (r.ts||'').substring(0,10); return d >= from && d <= to; });
             }
 
-            // Energy export with date range
-            function energyExportRange(device) {
+            window.energyExportRange = function(device) {
                 showDateRangePicker(
                     'Export rekaman energi' + (device && device !== 'all' ? ' (' + device + ')' : ' (Semua)'),
                     _recRows,
@@ -9734,10 +9729,9 @@ HTML_TEMPLATE = '''
                         showToast(rows.length + ' baris diekspor: ' + fname, 'success');
                     }
                 );
-            }
+            };
 
-            // Temp export with date range
-            function tempExportRange() {
+            window.tempExportRange = function() {
                 showDateRangePicker('Export rekaman suhu & humidity', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
                     if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
@@ -9747,10 +9741,9 @@ HTML_TEMPLATE = '''
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' baris diekspor: ' + fname, 'success');
                 });
-            }
+            };
 
-            // Lux export with date range
-            function luxExportRange() {
+            window.luxExportRange = function() {
                 showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
                     var rows = drpFilter(_luxRows, from, to);
                     if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
@@ -9760,10 +9753,9 @@ HTML_TEMPLATE = '''
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' baris diekspor: ' + fname, 'success');
                 });
-            }
+            };
 
-            // Occupancy export with date range
-            function occExportRange() {
+            window.occExportRange = function() {
                 showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
                     var rows = drpFilter(_occRows, from, to);
                     if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
@@ -9773,15 +9765,13 @@ HTML_TEMPLATE = '''
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' data diekspor: ' + fname, 'success');
                 });
-            }
+            };
 
-            // Chart export with date range (filters chart data by time label prefix YYYY-MM-DD)
-            function exportChartRange(chartName, valueLabel) {
+            window.exportChartRange = function(chartName, valueLabel) {
                 var chart = charts[chartName];
                 if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
                     showToast('Tidak ada data untuk ' + chartName, 'error'); return;
                 }
-                // Build pseudo rows from chart labels for the "Semua" shortcut hint
                 var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
                 showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
                     var header = 'Time,' + valueLabel + '\\n';
@@ -9796,7 +9786,7 @@ HTML_TEMPLATE = '''
                     downloadCSV(chartName + '_' + from + '_sd_' + to + '.csv', header + lines.join('\\n') + '\\n');
                     showToast(lines.length + ' poin diekspor', 'success');
                 });
-            }
+            };
 
             console.log('[OK] Dashboard Ready!');
         };
