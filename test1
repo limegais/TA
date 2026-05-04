@@ -696,9 +696,27 @@ def run_optimization_cycle(algo='both'):
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
-                'stats': hist, 'brute_force': bf
+                'stats': hist, 'brute_force': bf,
+                'initial_fitness': round(hist[0], 2) if hist else 0,
+                'final_fitness': round(fit, 2),
+                'run_time': datetime.now().strftime('%d %b %Y %H:%M'),
+                'params': {
+                    'population_size': ga_params['population_size'],
+                    'generations': ga_params['generations'],
+                    'mutation_rate': ga_params['mutation_rate'],
+                    'crossover_rate': ga_params['crossover_rate'],
+                    'elitism_ratio': ga_params['elitism_ratio'],
+                },
+                'sensor_snapshot': {
+                    'temp_room': round(opt_sensor_data.get('temperature', 0), 1),
+                    'humidity': round(opt_sensor_data.get('humidity', 0), 1),
+                    'person_detected': opt_sensor_data.get('person_detected', False),
+                    'person_count': opt_sensor_data.get('person_count', 0),
+                    'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
+                },
             }
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
             b1, b2 = sol[0], sol[1]
@@ -733,6 +751,7 @@ def run_optimization_cycle(algo='both'):
                 },
             }
             print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
+            persist_opt_results('pso')
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -827,6 +846,161 @@ def run_optimization_cycle(algo='both'):
         return False
     finally:
         optimization_lock.release()
+
+# ==================== PERSIST & RESTORE OPT RESULTS ====================
+OPT_PERSIST_MEASUREMENT = 'opt_results'  # InfluxDB measurement name
+
+def persist_opt_results(algo):
+    """Write current GA or PSO results to InfluxDB so they survive restarts."""
+    try:
+        if algo == 'ga':
+            ga = last_opt_results['ga']
+            if not ga or ga.get('fitness', 0) == 0:
+                return
+            fields = {
+                'fitness':          float(ga['fitness']),
+                'temp':             float(ga.get('temp', 0)),
+                'fan':              float(ga.get('fan', 0)),
+                'mode_idx':         float(ga.get('mode_idx', 0)),
+                'initial_fitness':  float(ga.get('initial_fitness', 0)),
+                'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
+                'run_time':         str(ga.get('run_time', '')),
+            }
+            write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
+                              tags={'algo': 'ga', 'version': '1'})
+        elif algo == 'pso':
+            pso = last_opt_results['pso']
+            if not pso or pso.get('fitness', 0) == 0 and pso.get('brightness1', 0) == 0:
+                return
+            fields = {
+                'fitness':        float(pso['fitness']),
+                'brightness':     float(pso.get('brightness', 0)),
+                'brightness1':    float(pso.get('brightness1', 0)),
+                'brightness2':    float(pso.get('brightness2', 0)),
+                'initial_error':  float(pso.get('initial_error', 0)),
+                'final_error':    float(pso.get('final_error', pso['fitness'])),
+                'lux_achieved':   float(pso.get('lux_achieved', 0)),
+                'target_lux':     float(pso.get('target_lux', 350.0)),
+                'run_time':       str(pso.get('run_time', '')),
+            }
+            write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
+                              tags={'algo': 'pso', 'version': '1'})
+    except Exception as e:
+        print(f"[PERSIST] Error saving {algo} results: {e}")
+
+def restore_opt_results():
+    """Read the latest GA and PSO results from InfluxDB on startup."""
+    try:
+        _, _, query_api = _get_influx_client()
+        for algo in ('ga', 'pso'):
+            q = (f'from(bucket: "{INFLUX_BUCKET}")'
+                 f' |> range(start: -30d)'
+                 f' |> filter(fn:(r) => r._measurement == "{OPT_PERSIST_MEASUREMENT}" and r.algo == "{algo}")'
+                 f' |> last()')
+            rec_map = {}
+            for table in query_api.query(q):
+                for rec in table.records:
+                    rec_map[rec.get_field()] = rec.get_value()
+            if not rec_map:
+                continue
+            if algo == 'ga' and rec_map.get('fitness', 0) > 0:
+                last_opt_results['ga'].update({
+                    'fitness':          float(rec_map.get('fitness', 0)),
+                    'temp':             int(rec_map.get('temp', 0)),
+                    'fan':              int(rec_map.get('fan', 0)),
+                    'mode_idx':         int(rec_map.get('mode_idx', 0)),
+                    'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
+                    'final_fitness':    float(rec_map.get('final_fitness', 0)),
+                    'run_time':         str(rec_map.get('run_time', '')),
+                    'stats':            [],  # history not stored (too large)
+                })
+                mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
+                mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
+                mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
+            elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
+                last_opt_results['pso'].update({
+                    'fitness':       float(rec_map.get('fitness', 0)),
+                    'brightness':    int(rec_map.get('brightness', 0)),
+                    'brightness1':   int(rec_map.get('brightness1', 0)),
+                    'brightness2':   int(rec_map.get('brightness2', 0)),
+                    'initial_error': float(rec_map.get('initial_error', 0)),
+                    'final_error':   float(rec_map.get('final_error', 0)),
+                    'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
+                    'target_lux':    float(rec_map.get('target_lux', 350.0)),
+                    'run_time':      str(rec_map.get('run_time', '')),
+                    'stats':         [],
+                })
+                mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
+                mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
+                mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
+                mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['brightness1']}% PWM2={last_opt_results['pso']['brightness2']}% error={last_opt_results['pso']['fitness']:.2f}")
+    except Exception as e:
+        print(f"  [RESTORE] Could not restore opt results: {e}")
+
+# ==================== SENSOR FAULT DETECTION ====================
+# Thresholds: how many seconds without a message = sensor is "stale"
+SENSOR_STALE_WARN_S  = 120   # 2 min  → WARNING  (yellow)
+SENSOR_STALE_FAULT_S = 300   # 5 min  → FAULT    (red)
+# Track per-sensor last emit time so we don't spam the same fault
+_fault_last_emit = {}
+
+def sensor_fault_loop():
+    """Background thread: check sensor staleness every 60 s and push alerts."""
+    time.sleep(20)  # let devices connect first
+    print("[FAULT] Sensor fault detection started")
+    while True:
+        try:
+            now = datetime.now()
+            checks = [
+                ('esp32_ac',   'AC Sensor (ESP32)',  ['temperature', 'humidity']),
+                ('esp32_lamp', 'Lamp Sensor (ESP32)', ['lux1', 'lux2', 'lux3']),
+                ('camera',     'Camera (YOLO)',       []),
+            ]
+            health = {}
+            for dev_id, dev_label, fields in checks:
+                last = device_last_seen[dev_id]['last_seen']
+                if last is None:
+                    age = float('inf')
+                else:
+                    age = (now - last).total_seconds()
+
+                if age == float('inf') or age > SENSOR_STALE_FAULT_S:
+                    lvl = 'fault'
+                elif age > SENSOR_STALE_WARN_S:
+                    lvl = 'warn'
+                else:
+                    lvl = 'ok'
+
+                age_str = 'never' if age == float('inf') else f"{int(age)}s ago"
+                health[dev_id] = {'label': dev_label, 'status': lvl, 'age': age_str}
+
+                # Only emit alert once per transition to avoid spam
+                prev = _fault_last_emit.get(dev_id, 'ok')
+                if lvl != 'ok' and prev == 'ok':
+                    msg = f'[SENSOR FAULT] {dev_label} tidak ada data ({age_str})'
+                    level = 'danger' if lvl == 'fault' else 'warning'
+                    socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': lvl, 'age': age_str})
+                    socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
+                    log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': level})
+                    print(msg)
+                elif lvl == 'ok' and prev != 'ok':
+                    # Recovery
+                    msg = f'[SENSOR OK] {dev_label} kembali online'
+                    socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': 'ok', 'age': age_str})
+                    socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
+                    log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
+                    print(msg)
+                _fault_last_emit[dev_id] = lvl
+
+            # Push health snapshot to frontend every cycle
+            socketio.emit('sensor_health', health)
+        except Exception as e:
+            print(f"[FAULT] sensor_fault_loop error: {e}")
+        time.sleep(60)
 
 def optimization_auto_loop():
     """Background thread: GA (AC) and PSO (Lamp) always run in separate cycles.
@@ -2857,6 +3031,102 @@ def ml_status():
         'pso_history': mqtt_data['system'].get('pso_history', [])
     })
 
+@app.route('/api/ga/export-csv')
+@admin_required
+def ga_export_csv():
+    """Export laporan hasil GA (AC Optimization) dalam format CSV lengkap."""
+    import io, csv as csv_mod
+    ga = last_opt_results.get('ga', {})
+    if not ga or ga.get('fitness', 0) == 0:
+        return jsonify({'error': 'Belum ada hasil GA. Jalankan GA terlebih dahulu.'}), 404
+
+    params    = ga.get('params', ga_params)
+    run_time  = ga.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
+    temp_opt  = ga.get('temp', 0)
+    fan_opt   = ga.get('fan', 0)
+    mode_opt  = ga.get('mode', 'COOL')
+    init_fit  = ga.get('initial_fitness', '-')
+    final_fit = ga.get('final_fitness', round(ga.get('fitness', 0), 2))
+    bf        = ga.get('brute_force', {})
+    snap      = ga.get('sensor_snapshot', {})
+    history   = ga.get('stats', [])
+
+    # Fan label
+    fan_label_map = {1: 'Low', 2: 'Medium', 3: 'High', 4: 'Turbo'}
+    fan_label = fan_label_map.get(int(fan_opt), str(fan_opt))
+
+    # Improvement %
+    if isinstance(init_fit, (int, float)) and init_fit > 0:
+        improvement = round((final_fit - init_fit) / init_fit * 100, 1)
+    else:
+        improvement = '-'
+
+    buf = io.StringIO()
+    wr  = csv_mod.writer(buf)
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    wr.writerow(['=== LAPORAN HASIL GA (GENETIC ALGORITHM) - SMART ROOM ==='])
+    wr.writerow([])
+    wr.writerow(['Tanggal Run', run_time])
+    wr.writerow([])
+
+    # ── Parameter GA ────────────────────────────────────────────────────────
+    wr.writerow(['--- PARAMETER GA ---'])
+    wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
+    wr.writerow(['Jumlah Generasi',   params.get('generations', '-')])
+    wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
+    wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
+    wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
+    wr.writerow([])
+
+    # ── Kondisi Ruangan Saat Run ─────────────────────────────────────────────
+    wr.writerow(['--- KONDISI RUANGAN SAAT OPTIMASI ---'])
+    wr.writerow(['Suhu Ruangan',   f"{snap.get('temp_room', '-')} °C"])
+    wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
+    wr.writerow(['Orang Terdeteksi', 'Ya' if snap.get('person_detected') else 'Tidak'])
+    wr.writerow(['Jumlah Orang',  snap.get('person_count', 0)])
+    wr.writerow(['Daya AC (real)', f"{snap.get('actual_watt', '-')} W"])
+    wr.writerow([])
+
+    # ── Hasil Optimal ────────────────────────────────────────────────────────
+    wr.writerow(['--- HASIL OPTIMASI AC ---'])
+    wr.writerow(['Suhu AC Optimal',        f"{temp_opt} °C"])
+    wr.writerow(['Kecepatan Fan Optimal',   f"{fan_opt} ({fan_label})"])
+    wr.writerow(['Mode AC Optimal',         mode_opt])
+    wr.writerow([])
+
+    # ── Performa GA ─────────────────────────────────────────────────────────
+    wr.writerow(['--- PERFORMA ALGORITMA ---'])
+    wr.writerow(['Fitness Awal (Gen 1)',     init_fit])
+    wr.writerow(['Fitness Akhir (Terbaik)',  final_fit])
+    wr.writerow(['Peningkatan Fitness',      f"{improvement}%" if improvement != '-' else '-'])
+    if bf:
+        wr.writerow(['Brute-Force Validation',
+                     f"Temp={bf.get('solution', ['-','-','-'])[0]}°C "
+                     f"Fan={bf.get('solution', ['-','-','-'])[1]} "
+                     f"Mode={AC_MODE_NAMES.get(bf.get('solution', [None,None,0])[2], 'COOL')} "
+                     f"Fitness={round(bf.get('fitness', 0), 2)}"])
+    wr.writerow([])
+
+    # ── Riwayat Konvergensi ──────────────────────────────────────────────────
+    if history:
+        wr.writerow(['=== RIWAYAT KONVERGENSI FITNESS ==='])
+        wr.writerow(['Generasi', 'Fitness Terbaik', 'Delta'])
+        prev = None
+        for idx, val in enumerate(history, 1):
+            v = round(val, 4)
+            delta = round(v - prev, 4) if prev is not None else '-'
+            wr.writerow([idx, v, delta])
+            prev = v
+
+    output = buf.getvalue().encode('utf-8-sig')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return Response(
+        output,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=ga_report_{ts}.csv'}
+    )
+
 @app.route('/api/pso/export-csv')
 @admin_required
 def pso_export_csv():
@@ -3495,6 +3765,29 @@ def get_device_status():
             dev['status'] = 'online'
     return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
 
+@app.route('/api/sensor/health')
+def sensor_health_api():
+    """Return real-time sensor health: status (ok/warn/fault) and data age."""
+    now = datetime.now()
+    health = {}
+    labels = {'esp32_ac': 'AC Sensor', 'esp32_lamp': 'Lamp Sensor', 'camera': 'Camera'}
+    for dev_id, dev in device_last_seen.items():
+        last = dev['last_seen']
+        age = float('inf') if last is None else (now - last).total_seconds()
+        if age == float('inf') or age > SENSOR_STALE_FAULT_S:
+            status = 'fault'
+        elif age > SENSOR_STALE_WARN_S:
+            status = 'warn'
+        else:
+            status = 'ok'
+        health[dev_id] = {
+            'label':   labels.get(dev_id, dev_id),
+            'status':  status,
+            'age':     'never' if age == float('inf') else f"{int(age)}s ago",
+            'last_seen': last.strftime('%H:%M:%S') if last else None,
+        }
+    return jsonify(health)
+
 @app.route('/api/alerts')
 def get_alerts():
     return jsonify({'rules': alert_rules, 'active': list(active_alerts)})
@@ -3614,7 +3907,7 @@ HTML_TEMPLATE = '''
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Smart Room IoT Dashboard</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
@@ -3634,7 +3927,7 @@ HTML_TEMPLATE = '''
         }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
-            color: var(--text-primary); overflow-x: hidden;
+            color: var(--text-primary); overflow-x: hidden; -webkit-tap-highlight-color: transparent;
         }
         .sidebar {
             position: fixed; left: 0; top: 0; width: 260px; height: 100vh;
@@ -3646,7 +3939,7 @@ HTML_TEMPLATE = '''
         .nav-item {
             padding: 12px 16px; margin: 8px 0; border-radius: 8px; cursor: pointer;
             transition: all 0.3s; display: flex; align-items: center; gap: 12px;
-            color: var(--text-secondary);
+            color: var(--text-secondary); touch-action: manipulation;
         }
         .nav-item:hover {
             background: var(--bg-card-hover); color: var(--text-primary);
@@ -3767,7 +4060,7 @@ HTML_TEMPLATE = '''
         .chart-option-btn {
             padding: 8px 16px; border: 1px solid var(--border); background: transparent;
             color: var(--text-secondary); border-radius: 6px; cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.3s; touch-action: manipulation;
         }
         .chart-option-btn:hover {
             background: var(--bg-card-hover); color: var(--text-primary);
@@ -3887,6 +4180,7 @@ HTML_TEMPLATE = '''
         .btn {
             padding: 12px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
             cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px;
+            touch-action: manipulation;
         }
         .btn-primary {
             background: var(--primary); color: white;
@@ -4069,32 +4363,118 @@ HTML_TEMPLATE = '''
         .person-badge.not-detected {
             background: linear-gradient(135deg, #64748b, #475569); color: rgba(255,255,255,0.7);
         }
+        /* ===== MOBILE (≤ 768px) ===== */
         @media (max-width: 768px) {
-        .sidebar {
-            transform: translateX(-100%); transition: transform 0.3s ease; z-index: 2000;
-        }
+            /* Sidebar slide-in */
+            .sidebar {
+                transform: translateX(-100%); transition: transform 0.3s ease; z-index: 2000;
+                width: 240px;
+            }
             .sidebar.open { transform: translateX(0); }
-            .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
-            .stats-grid { grid-template-columns: 1fr; }
-            .dashboard-grid { grid-template-columns: 1fr; }
-            .feedback-grid { grid-template-columns: 1fr; }
-            .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
+
+            /* Main content area */
+            .main-content {
+                margin-left: 0; padding: 10px; padding-top: 62px;
+            }
+
+            /* Header card */
+            .header {
+                padding: 14px 14px 12px; border-radius: 10px;
+            }
+            .header h1 { font-size: 20px; margin-bottom: 4px; }
+            .header p  { font-size: 12px; }
+            #device-status-bar { gap: 6px; margin-top: 8px; }
+            .device-status-item { padding: 4px 9px; font-size: 11px; }
+
+            /* Sensor health bar */
+            #sensor-health-bar {
+                padding: 5px 10px; gap: 8px; font-size: 11px;
+            }
+            .sensor-health-badge { padding: 2px 8px; font-size: 11px; }
+
+            /* Grids → single column */
+            .stats-grid       { grid-template-columns: 1fr; gap: 10px; }
+            .dashboard-grid   { grid-template-columns: 1fr; gap: 10px; }
+            .feedback-grid    { grid-template-columns: 1fr; }
+            .occupancy-top    { grid-template-columns: 1fr; gap: 12px; }
+            .ml-param-grid    { grid-template-columns: 1fr; }
+
+            /* Stat cards */
+            .stat-card { padding: 14px; border-radius: 10px; }
+            .stat-value { font-size: 26px; }
+            .stat-icon  { width: 34px; height: 34px; font-size: 16px; }
+
+            /* Chart containers */
+            .chart-container { padding: 14px 12px; border-radius: 10px; margin-bottom: 14px; }
+            .chart-header {
+                flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 12px;
+            }
+            .chart-title { font-size: 15px; }
+            .chart-options { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+            .chart-option-btn { padding: 6px 10px; font-size: 11px; }
+
+            /* Energy page */
+            #energy .chart-container { padding: 12px 10px; }
+            #energy canvas { height: 200px !important; max-height: 200px; }
+            #energy .chart-header { flex-direction: column; align-items: flex-start; gap: 6px; }
+            #energy .chart-options { flex-wrap: wrap; gap: 5px; }
+            #energy .chart-option-btn { padding: 5px 9px; font-size: 11px; }
+
+            /* Control panels */
+            .control-panel { padding: 14px; border-radius: 10px; }
+            .control-title { font-size: 15px; }
+
+            /* Buttons */
+            .btn { padding: 10px 18px; font-size: 13px; }
+
+            /* Alert banner — full width on mobile */
+            .alert-banner {
+                top: auto; bottom: 12px;
+                left: 10px; right: 10px;
+                max-width: none; width: auto;
+                border-radius: 10px;
+            }
+
+            /* Tables — horizontal scroll */
+            .ml-table-wrap, .table-wrap {
+                overflow-x: auto; -webkit-overflow-scrolling: touch;
+            }
+            .ml-table { min-width: 520px; }
+
+            /* Logo */
+            .logo { font-size: 20px; margin-bottom: 20px; }
+
+            /* ML page stat cards */
+            #ml-optimization .stats-grid { gap: 8px; }
+
+            /* Occupancy KPI card */
+            .occupancy-kpi .kpi-value { font-size: 28px; }
         }
+
+        /* ===== EXTRA SMALL (≤ 480px) — e.g. narrow phones ===== */
+        @media (max-width: 480px) {
+            .main-content { padding: 8px; padding-top: 60px; }
+            .header h1 { font-size: 17px; }
+            .stat-value { font-size: 24px; }
+            .chart-option-btn { padding: 5px 8px; font-size: 10px; }
+            .btn { padding: 9px 14px; font-size: 12px; }
+            .hamburger-btn { width: 40px; height: 40px; font-size: 17px; top: 10px; left: 10px; }
+            .device-status-item { font-size: 10px; padding: 3px 7px; }
+            #sensor-health-bar { font-size: 10px; padding: 4px 8px; }
+        }
+
         @media (min-width: 769px) and (max-width: 1200px) {
-        .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
+            .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .occupancy-top { grid-template-columns: 1fr; }
         }
         @media (min-width: 1201px) {
-        .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
+            .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         .hamburger-btn {
             display: none; position: fixed; top: 12px; left: 12px; z-index: 1998; width: 44px; height: 44px; border-radius: 10px;
             background: var(--primary); color: white; border: none; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+            touch-action: manipulation;
         }
         .sidebar-overlay {
             display: none; position: fixed; top: 0; left: 0;
@@ -4109,6 +4489,12 @@ HTML_TEMPLATE = '''
             display: flex; align-items: center; gap: 6px; padding: 5px 12px;
             background: var(--bg-card-hover); border-radius: 20px; font-size: 12px; font-weight: 500;
             color: var(--text-secondary);
+        }
+        .sensor-health-badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 3px 10px; border-radius: 14px;
+            background: var(--bg-secondary); font-size: 12px; font-weight: 600;
+            border: 1px solid var(--border);
         }
         .device-dot {
             width: 8px; height: 8px; border-radius: 50%; display: inline-block;
@@ -4229,6 +4615,17 @@ HTML_TEMPLATE = '''
 
     <!-- Main Content -->
     <div class="main-content">
+        <!-- Sensor Health Bar (global, shown on all pages) -->
+        <div id="sensor-health-bar" style="
+            display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+            padding: 7px 18px; margin-bottom: 4px;
+            background: var(--card-bg); border-radius: 10px;
+            border: 1px solid var(--border);
+            font-size: 12.5px; font-weight: 500; min-height: 34px;
+        ">
+            <span style="color:var(--text-secondary); font-size:11px; font-weight:600; letter-spacing:.5px;">SENSOR:</span>
+        </div>
+        <!-- /Sensor Health Bar -->
         <!-- AC Dashboard Page -->
         <div id="dashboard-ac" class="page active">
             <div class="header">
@@ -5588,8 +5985,11 @@ HTML_TEMPLATE = '''
                         <span class="stat-title">Optimized Brightness</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-brightness" style="color: #6366f1;">--</span>%</div>
-                    <div class="stat-change"><span>Lamp Level</span></div>
+                    <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
+                        PWM1: <span id="ml-pso-brightness1" style="color: #6366f1; font-weight:700;">--</span>%<br>
+                        PWM2: <span id="ml-pso-brightness2" style="color: #a855f7; font-weight:700;">--</span>%
+                    </div>
+                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>Avg: <span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>% &nbsp;|&nbsp; Lamp Level</div>
                 </div>
 
                 <div class="stat-card">
@@ -5619,7 +6019,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             Run GA
@@ -7028,6 +7428,12 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
             setEl('ml-pso-brightness', data.pso_brightness || '--');
+            var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
+            var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
+            var bAvg = (b1 !== '--' && b2 !== '--') ? Math.round((parseFloat(b1) + parseFloat(b2)) / 2) : (data.pso_brightness || '--');
+            setEl('ml-pso-brightness1', b1);
+            setEl('ml-pso-brightness2', b2);
+            setEl('ml-pso-brightness-avg', bAvg);
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
             // Update convergence charts if history available
@@ -7166,6 +7572,26 @@ HTML_TEMPLATE = '''
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
+        }
+
+        function exportGAReport() {
+            fetch('/api/ga/export-csv')
+                .then(function(r) {
+                    if (!r.ok) {
+                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                    }
+                    return r.blob();
+                })
+                .then(function(blob) {
+                    var ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '');
+                    var link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'ga_report_' + ts + '.csv';
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                    showToast('Laporan GA berhasil diexport!', 'success');
+                })
+                .catch(function(e) { showToast('Export GA gagal: ' + e.message, 'error'); });
         }
 
         function exportPSOReport() {
@@ -8783,6 +9209,46 @@ HTML_TEMPLATE = '''
             setTimeout(() => { if (banner.parentElement) banner.remove(); }, 8000);
         }
 
+        // ==================== SENSOR HEALTH ====================
+        var _sensorHealthState = {};
+
+        socket.on('sensor_health', function(health) {
+            _sensorHealthState = health;
+            updateSensorHealthBar(health);
+        });
+
+        socket.on('sensor_fault', function(data) {
+            // Update individual badge immediately on fault/recovery
+            var id = data.device;
+            if (_sensorHealthState[id]) _sensorHealthState[id].status = data.status;
+            else _sensorHealthState[id] = data;
+            updateSensorHealthBar(_sensorHealthState);
+        });
+
+        function updateSensorHealthBar(health) {
+            var bar = document.getElementById('sensor-health-bar');
+            if (!bar) return;
+            var html = '';
+            var statusIcon = {ok: '&#x25CF;', warn: '&#x25CF;', fault: '&#x25CF;'};
+            var statusColor = {ok: '#22c55e', warn: '#f59e0b', fault: '#ef4444'};
+            var statusText  = {ok: 'Online', warn: 'Stale', fault: 'Offline'};
+            for (var dev in health) {
+                var h = health[dev];
+                var col  = statusColor[h.status]  || '#6b7280';
+                var icon = statusIcon[h.status]   || '&#x25CF;';
+                var txt  = statusText[h.status]   || h.status;
+                html += '<span class="sensor-health-badge" style="color:' + col + ';" title="' + h.label + ': ' + h.age + '">'
+                      + icon + ' ' + h.label + ' <small style="opacity:.7;">' + txt + '</small></span>';
+            }
+            bar.innerHTML = html;
+        }
+
+        // Fetch initial health on load
+        fetch('/api/sensor/health').then(function(r){ return r.json(); }).then(function(h){
+            _sensorHealthState = h;
+            updateSensorHealthBar(h);
+        }).catch(function(){});
+
         // ==================== SOCKET.IO EVENTS ====================
         // Ring buffer untuk chart MySQL realtime
         var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
@@ -9717,6 +10183,8 @@ HTML_TEMPLATE = '''
                 const gaTemp = data.data.ga_temp || 0;
                 const gaFan = data.data.ga_fan || 0;
                 const psoBrightness = data.data.pso_brightness || 0;
+                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : psoBrightness;
+                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : psoBrightness;
                 
                 // Update GA fitness display
                 const gaEl = document.getElementById('ga-fitness');
@@ -9752,11 +10220,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: ' + psoBrightness + '% (' + psoFitness.toFixed(1) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
                     showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast('PSO->Lamp: ' + psoBrightness + '% (Fitness: ' + psoFitness.toFixed(2) + ')', 'success');
+                    showToast('PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (Error: ' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -10403,6 +10871,15 @@ if __name__ == '__main__':
     opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
+
+    # Restore last GA/PSO results from InfluxDB (survive restarts)
+    print("  [RESTORE] Loading last optimization results from InfluxDB...")
+    restore_opt_results()
+
+    # Start sensor fault detection thread
+    fault_thread = threading.Thread(target=sensor_fault_loop, daemon=True)
+    fault_thread.start()
+    print("  [FAULT] Sensor fault detection thread started")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
 
