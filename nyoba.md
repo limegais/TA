@@ -361,56 +361,34 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     return max(0.0, round(fitness, 2))
 
 def calculate_lamp_fitness_2d(brightness1, brightness2):
-    """Zone-aware 2D fitness: brightness1 controls zone near sensor1, brightness2 near sensor3.
-    3 sensors measure actual lux. Target: 400 lux uniform across all zones."""
-    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 200))
-    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 200))
-    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 200))
-    # Use debounced confirmation (20-min window) so brief camera misses don't cause PSO
-    # to optimize for darkness while a person is actually still in the room.
+    """PSO fitness function — MINIMIZE (smaller = better).
+    Formula dari PDF:
+        Error_lux = ((L1 - TARGET)^2 + (L2 - TARGET)^2 + (L3 - TARGET)^2) / 3
+        Fitness    = Error_lux
+    Target 350 lux saat ada orang; 0 lux saat kosong (lampu mati).
+    Lux diestimasi dengan delta model dari brightness saat ini.
+    """
+    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
+    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
+    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
-    TARGET_LUX = 400.0
-    fitness = 0.0
+    TARGET_LUX = 350.0 if person_detected else 0.0
 
-    # Delta-based lux estimation: sensors already include current lamp + ambient contribution.
-    # We estimate how lux will change relative to the CURRENT brightness setting.
-    # This correctly handles daylight — if room is already bright, large brightness adds little.
+    # Delta-based lux estimation: perubahan dari brightness saat ini
     curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
     curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
-    delta1 = (brightness1 - curr_b1) * 4.0   # sensitivity: ~4 lux per 1% brightness change
+    delta1 = (brightness1 - curr_b1) * 4.0   # ~4 lux per 1% brightness
     delta2 = (brightness2 - curr_b2) * 4.0
-    # Zone model: lamp1 mainly affects sensor1/2, lamp2 mainly affects sensor2/3
+    # Zone model: lamp1 → sensor1/2, lamp2 → sensor2/3
     est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
     est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
     est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
 
-    if person_detected:
-        # === COMFORT: Each zone should be near target (max 45 pts) ===
-        for est in [est_lux1, est_lux2, est_lux3]:
-            fitness += _gaussian_score(est, TARGET_LUX, 100.0, 15.0)
-
-        # === UNIFORMITY: All zones similar brightness (max 20 pts) ===
-        lux_values = [est_lux1, est_lux2, est_lux3]
-        lux_range = max(lux_values) - min(lux_values)
-        uniformity = math.exp(-(lux_range ** 2) / (2 * 150.0 ** 2))
-        fitness += uniformity * 20.0
-
-        # === ENERGY: Lower brightness = less power (max 15 pts) ===
-        total_power = (brightness1 + brightness2) * 0.5
-        max_power = 100.0  # 2 lamps at 100%
-        energy_ratio = 1.0 - (total_power / max_power)
-        fitness += energy_ratio * 15.0
-    else:
-        # No person: minimize energy, keep minimal light
-        if brightness1 <= 5 and brightness2 <= 5:
-            fitness += 80.0
-        elif brightness1 <= 15 and brightness2 <= 15:
-            fitness += 50.0
-        else:
-            avg_b = (brightness1 + brightness2) / 2.0
-            fitness += max(0, 80.0 - avg_b * 1.5)
-
-    return max(0.0, round(fitness, 2))
+    # Rumus PDF: rata-rata kuadrat selisih dari target
+    error = ((est_lux1 - TARGET_LUX) ** 2
+             + (est_lux2 - TARGET_LUX) ** 2
+             + (est_lux3 - TARGET_LUX) ** 2) / 3.0
+    return round(error, 2)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -596,75 +574,101 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: optimizes (brightness1, brightness2) for 2 lamps independently."""
+    """2D PSO: minimizes Error_lux = ((L1-TARGET)^2 + (L2-TARGET)^2 + (L3-TARGET)^2) / 3
+    Sesuai rumus PDF. Gbest = partikel dengan error terkecil.
+    Persamaan update:
+        V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
+        X_i(t+1) = X_i(t) + V_i(t+1)
+    """
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
     w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
     w_end = 0.3
-    DIM = 2  # brightness1, brightness2
+    DIM = 2  # [PWM1, PWM2] sesuai PDF
     max_vel = 15
 
-    # Initialize swarm with 2D positions
-    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)] for _ in range(swarm_size)]
-    velocities = [[random.uniform(-10, 10) for _ in range(DIM)] for _ in range(swarm_size)]
+    # Inisialisasi posisi dan kecepatan secara acak (sesuai PDF)
+    # X_i = X_min + rand() * (X_max - X_min)
+    positions = [
+        [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
+         for _ in range(DIM)]
+        for _ in range(swarm_size)
+    ]
+    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
 
-    # Smart seeding: use last result UNLESS it was a "no person" low-brightness solution
-    # and person is currently present — avoids slow convergence from a bad starting point
+    # Smart seeding dari hasil sebelumnya
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
     seed_b1 = last_opt_results['pso'].get('brightness1', 0)
     seed_b2 = last_opt_results['pso'].get('brightness2', 0)
-    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)  # "no person" result
+    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)
     if seed_b1 > 0 and not (person_now and seed_is_dark):
         positions[0] = [seed_b1, seed_b2]
         for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(0, min(100, seed_b1 + random.randint(-10, 10))),
-                            max(0, min(100, seed_b2 + random.randint(-10, 10)))]
+            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b1 + random.randint(-10, 10))),
+                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b2 + random.randint(-10, 10)))]
 
+    # Pbest = posisi terbaik tiap partikel (error terkecil)
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
-    g_idx = pb_fit.index(max(pb_fit))
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]  # error (minimize)
+
+    # Gbest = partikel dengan error terkecil di seluruh swarm
+    g_idx = pb_fit.index(min(pb_fit))
     g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+
     fitness_history = []
     stagnation_counter = 0
-    stagnation_limit = max(8, iterations // 6)  # ~8 iterations before re-diversify
-    prev_g_fit = -1.0
+    stagnation_limit = max(8, iterations // 6)
+    prev_g_fit = float('inf')  # minimize: awal infinity
 
     for it in range(iterations):
+        # Inertia weight linear decay: w_start → w_end
         cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
+
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
+                # Persamaan kecepatan (sesuai PDF)
                 velocities[i][d] = (cur_w * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
                     + c2 * r2 * (g_pos[d] - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
-                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][d] + velocities[i][d]))))
+                # Persamaan posisi (sesuai PDF)
+                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
+                                      int(round(positions[i][d] + velocities[i][d]))))
+
             fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
-            if fit > pb_fit[i]:
+
+            # Update Pbest: Pbest_i = X_i jika Fitness(X_i) < Fitness(Pbest_i)
+            if fit < pb_fit[i]:
                 pb_fit[i], pb_pos[i] = fit, positions[i][:]
-            if fit > g_fit:
+
+            # Update Gbest: Gbest = min(Fitness(Pbest_i))
+            if fit < g_fit:
                 g_fit, g_pos = fit, positions[i][:]
+
         fitness_history.append(g_fit)
-        # Stagnation detection: re-randomize worst particles when stuck at local minimum
-        if g_fit - prev_g_fit < 0.1:
-            stagnation_counter += 1
-        else:
-            stagnation_counter = 0
+
+        # Stagnation: jika penurunan error < 0.1 selama beberapa iterasi
+        improvement = prev_g_fit - g_fit
+        stagnation_counter = stagnation_counter + 1 if improvement < 0.1 else 0
         prev_g_fit = g_fit
+
         if stagnation_counter >= stagnation_limit:
+            # Re-randomize partikel terburuk (error tertinggi)
             re_count = max(2, swarm_size // 5)
-            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si])[:re_count]
+            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si], reverse=True)[:re_count]
             for si in worst_idx:
-                positions[si] = [random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)]
-                velocities[si] = [random.uniform(-10, 10) for _ in range(DIM)]
+                positions[si] = [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
+                                 for _ in range(DIM)]
+                velocities[si] = [random.uniform(-max_vel, max_vel) for _ in range(DIM)]
                 new_fit = calculate_lamp_fitness_2d(positions[si][0], positions[si][1])
                 pb_pos[si] = positions[si][:]
                 pb_fit[si] = new_fit
-                if new_fit > g_fit:
+                if new_fit < g_fit:
                     g_fit, g_pos = new_fit, positions[si][:]
             stagnation_counter = 0
 
-    # Return 2D result
+    # Gbest = [PWM1, PWM2] optimal (sesuai PDF)
     return g_pos, g_fit, fitness_history
 
 def run_optimization_cycle(algo='both'):
@@ -688,7 +692,7 @@ def run_optimization_cycle(algo='both'):
             sol, fit, hist = run_pso_optimization()
             b1, b2 = sol[0], sol[1]
             last_opt_results['pso'] = {'fitness': fit, 'brightness': int((b1 + b2) / 2), 'brightness1': b1, 'brightness2': b2, 'stats': hist}
-            print(f"[PSO] Done: L1={b1}% L2={b2}% fitness={fit:.2f}")
+            print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -715,7 +719,10 @@ def run_optimization_cycle(algo='both'):
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
-            'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
+            'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
+            # combined_fitness: GA maximize, PSO minimize — normalize PSO error to 0-100 scale before combining
+            'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
+                                + max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 100.0) * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
         global _last_adaptive_ac_apply
@@ -731,15 +738,28 @@ def run_optimization_cycle(algo='both'):
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
         # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
-        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
-            opt_b1, opt_b2 = _safe_lamp_brightness(last_opt_results['pso'].get('brightness1', 0), last_opt_results['pso'].get('brightness2', 0))
-            if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                # Update locally so auto-ON block doesn't re-fire before ESP32 confirms
-                mqtt_data['lamp']['brightness1'] = opt_b1
-                mqtt_data['lamp']['brightness2'] = opt_b2
-                mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                _record_lamp_apply(opt_b1, opt_b2)
+        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            person_present = _person_present_recently_lamp()
+            raw_b1 = last_opt_results['pso'].get('brightness1', 0)
+            raw_b2 = last_opt_results['pso'].get('brightness2', 0)
+            if person_present:
+                # Person detected: apply with safety floor
+                opt_b1, opt_b2 = _safe_lamp_brightness(raw_b1, raw_b2)
+                if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
+                    mqtt_data['lamp']['brightness1'] = opt_b1
+                    mqtt_data['lamp']['brightness2'] = opt_b2
+                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+                    _record_lamp_apply(opt_b1, opt_b2)
+            else:
+                # No person: PSO recommends brightness=0, allow sending 0 to turn off lamp
+                opt_b1, opt_b2 = int(raw_b1), int(raw_b2)
+                if _should_apply_lamp(opt_b1, opt_b2):
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
+                    mqtt_data['lamp']['brightness1'] = opt_b1
+                    mqtt_data['lamp']['brightness2'] = opt_b2
+                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+                    _record_lamp_apply(opt_b1, opt_b2)
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
@@ -1760,7 +1780,9 @@ def on_message(client, userdata, msg):
                 'ga_temp': float(mqtt_data['system']['ga_temp']),
                 'ga_fan': float(mqtt_data['system']['ga_fan']),
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
-                'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
+                # PSO is minimize (error), GA is maximize — normalize before combining
+                'combined_fitness': float(mqtt_data['system']['ga_fitness']) * 0.5
+                                    + max(0.0, 100.0 - float(mqtt_data['system']['pso_fitness']) / 100.0) * 0.5
             })
             # AUTO-APPLY AC — only if ga_solution was present in this payload
             if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
@@ -5423,7 +5445,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
-                    <div class="stat-change"><span>Best Fitness</span></div>
+                    <div class="stat-change"><span>Lux Error (lower = better)</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -5475,7 +5497,7 @@ HTML_TEMPLATE = '''
             <!-- PSO Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO Fitness Convergence (Lamp Optimization)</div>
+                    <div class="chart-title">PSO Error Convergence — Lamp (lower = better, target 350 lux)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
@@ -6065,7 +6087,8 @@ HTML_TEMPLATE = '''
                 return false;
             }
 
-            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) {
+            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore
+                || !charts.gaFitness || !charts.psoFitness || !charts.comparison) {
                 try {
                     initCharts();
                 } catch (e) {
@@ -6716,7 +6739,19 @@ HTML_TEMPLATE = '''
                 try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
+                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ML ensureCharts error:', e); }
                 try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
+                // Canvas initialised in a hidden page needs a resize pass to render correctly
+                setTimeout(function() {
+                    ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                        try {
+                            if (charts[k] && typeof charts[k].resize === 'function') {
+                                charts[k].resize();
+                                charts[k].update('none');
+                            }
+                        } catch(e) {}
+                    });
+                }, 150);
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -6796,8 +6831,12 @@ HTML_TEMPLATE = '''
         }
 
         function updateMLChart(chartName, history, algo) {
+            // Re-init charts if not yet created (page was visited before Chart.js was ready)
+            if (!charts[chartName]) {
+                try { ensureChartsReady(); } catch(e) {}
+            }
             const chart = charts[chartName];
-            if (!chart) return;
+            if (!chart || !history || history.length === 0) return;
 
             chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
             chart.data.datasets[0].data = history;
