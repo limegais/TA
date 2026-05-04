@@ -696,7 +696,24 @@ def run_optimization_cycle(algo='both'):
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
-                'stats': hist, 'brute_force': bf
+                'stats': hist, 'brute_force': bf,
+                'initial_fitness': round(hist[0], 2) if hist else 0,
+                'final_fitness': round(fit, 2),
+                'run_time': datetime.now().strftime('%d %b %Y %H:%M'),
+                'params': {
+                    'population_size': ga_params['population_size'],
+                    'generations': ga_params['generations'],
+                    'mutation_rate': ga_params['mutation_rate'],
+                    'crossover_rate': ga_params['crossover_rate'],
+                    'elitism_ratio': ga_params['elitism_ratio'],
+                },
+                'sensor_snapshot': {
+                    'temp_room': round(opt_sensor_data.get('temperature', 0), 1),
+                    'humidity': round(opt_sensor_data.get('humidity', 0), 1),
+                    'person_detected': opt_sensor_data.get('person_detected', False),
+                    'person_count': opt_sensor_data.get('person_count', 0),
+                    'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
+                },
             }
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
         if algo in ('pso', 'both'):
@@ -2856,6 +2873,102 @@ def ml_status():
         'ga_history': mqtt_data['system'].get('ga_history', []),
         'pso_history': mqtt_data['system'].get('pso_history', [])
     })
+
+@app.route('/api/ga/export-csv')
+@admin_required
+def ga_export_csv():
+    """Export laporan hasil GA (AC Optimization) dalam format CSV lengkap."""
+    import io, csv as csv_mod
+    ga = last_opt_results.get('ga', {})
+    if not ga or ga.get('fitness', 0) == 0:
+        return jsonify({'error': 'Belum ada hasil GA. Jalankan GA terlebih dahulu.'}), 404
+
+    params    = ga.get('params', ga_params)
+    run_time  = ga.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
+    temp_opt  = ga.get('temp', 0)
+    fan_opt   = ga.get('fan', 0)
+    mode_opt  = ga.get('mode', 'COOL')
+    init_fit  = ga.get('initial_fitness', '-')
+    final_fit = ga.get('final_fitness', round(ga.get('fitness', 0), 2))
+    bf        = ga.get('brute_force', {})
+    snap      = ga.get('sensor_snapshot', {})
+    history   = ga.get('stats', [])
+
+    # Fan label
+    fan_label_map = {1: 'Low', 2: 'Medium', 3: 'High', 4: 'Turbo'}
+    fan_label = fan_label_map.get(int(fan_opt), str(fan_opt))
+
+    # Improvement %
+    if isinstance(init_fit, (int, float)) and init_fit > 0:
+        improvement = round((final_fit - init_fit) / init_fit * 100, 1)
+    else:
+        improvement = '-'
+
+    buf = io.StringIO()
+    wr  = csv_mod.writer(buf)
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    wr.writerow(['=== LAPORAN HASIL GA (GENETIC ALGORITHM) - SMART ROOM ==='])
+    wr.writerow([])
+    wr.writerow(['Tanggal Run', run_time])
+    wr.writerow([])
+
+    # ── Parameter GA ────────────────────────────────────────────────────────
+    wr.writerow(['--- PARAMETER GA ---'])
+    wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
+    wr.writerow(['Jumlah Generasi',   params.get('generations', '-')])
+    wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
+    wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
+    wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
+    wr.writerow([])
+
+    # ── Kondisi Ruangan Saat Run ─────────────────────────────────────────────
+    wr.writerow(['--- KONDISI RUANGAN SAAT OPTIMASI ---'])
+    wr.writerow(['Suhu Ruangan',   f"{snap.get('temp_room', '-')} °C"])
+    wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
+    wr.writerow(['Orang Terdeteksi', 'Ya' if snap.get('person_detected') else 'Tidak'])
+    wr.writerow(['Jumlah Orang',  snap.get('person_count', 0)])
+    wr.writerow(['Daya AC (real)', f"{snap.get('actual_watt', '-')} W"])
+    wr.writerow([])
+
+    # ── Hasil Optimal ────────────────────────────────────────────────────────
+    wr.writerow(['--- HASIL OPTIMASI AC ---'])
+    wr.writerow(['Suhu AC Optimal',        f"{temp_opt} °C"])
+    wr.writerow(['Kecepatan Fan Optimal',   f"{fan_opt} ({fan_label})"])
+    wr.writerow(['Mode AC Optimal',         mode_opt])
+    wr.writerow([])
+
+    # ── Performa GA ─────────────────────────────────────────────────────────
+    wr.writerow(['--- PERFORMA ALGORITMA ---'])
+    wr.writerow(['Fitness Awal (Gen 1)',     init_fit])
+    wr.writerow(['Fitness Akhir (Terbaik)',  final_fit])
+    wr.writerow(['Peningkatan Fitness',      f"{improvement}%" if improvement != '-' else '-'])
+    if bf:
+        wr.writerow(['Brute-Force Validation',
+                     f"Temp={bf.get('solution', ['-','-','-'])[0]}°C "
+                     f"Fan={bf.get('solution', ['-','-','-'])[1]} "
+                     f"Mode={AC_MODE_NAMES.get(bf.get('solution', [None,None,0])[2], 'COOL')} "
+                     f"Fitness={round(bf.get('fitness', 0), 2)}"])
+    wr.writerow([])
+
+    # ── Riwayat Konvergensi ──────────────────────────────────────────────────
+    if history:
+        wr.writerow(['=== RIWAYAT KONVERGENSI FITNESS ==='])
+        wr.writerow(['Generasi', 'Fitness Terbaik', 'Delta'])
+        prev = None
+        for idx, val in enumerate(history, 1):
+            v = round(val, 4)
+            delta = round(v - prev, 4) if prev is not None else '-'
+            wr.writerow([idx, v, delta])
+            prev = v
+
+    output = buf.getvalue().encode('utf-8-sig')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return Response(
+        output,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=ga_report_{ts}.csv'}
+    )
 
 @app.route('/api/pso/export-csv')
 @admin_required
@@ -5588,8 +5701,11 @@ HTML_TEMPLATE = '''
                         <span class="stat-title">Optimized Brightness</span>
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-brightness" style="color: #6366f1;">--</span>%</div>
-                    <div class="stat-change"><span>Lamp Level</span></div>
+                    <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
+                        PWM1: <span id="ml-pso-brightness1" style="color: #6366f1; font-weight:700;">--</span>%<br>
+                        PWM2: <span id="ml-pso-brightness2" style="color: #a855f7; font-weight:700;">--</span>%
+                    </div>
+                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>Avg: <span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>% &nbsp;|&nbsp; Lamp Level</div>
                 </div>
 
                 <div class="stat-card">
@@ -5619,7 +5735,7 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('gaFitness', 'GA Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             Run GA
@@ -7028,6 +7144,12 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
             setEl('ml-pso-brightness', data.pso_brightness || '--');
+            var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
+            var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
+            var bAvg = (b1 !== '--' && b2 !== '--') ? Math.round((parseFloat(b1) + parseFloat(b2)) / 2) : (data.pso_brightness || '--');
+            setEl('ml-pso-brightness1', b1);
+            setEl('ml-pso-brightness2', b2);
+            setEl('ml-pso-brightness-avg', bAvg);
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
             // Update convergence charts if history available
@@ -7166,6 +7288,26 @@ HTML_TEMPLATE = '''
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
+        }
+
+        function exportGAReport() {
+            fetch('/api/ga/export-csv')
+                .then(function(r) {
+                    if (!r.ok) {
+                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                    }
+                    return r.blob();
+                })
+                .then(function(blob) {
+                    var ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '');
+                    var link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'ga_report_' + ts + '.csv';
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                    showToast('Laporan GA berhasil diexport!', 'success');
+                })
+                .catch(function(e) { showToast('Export GA gagal: ' + e.message, 'error'); });
         }
 
         function exportPSOReport() {
@@ -9717,6 +9859,8 @@ HTML_TEMPLATE = '''
                 const gaTemp = data.data.ga_temp || 0;
                 const gaFan = data.data.ga_fan || 0;
                 const psoBrightness = data.data.pso_brightness || 0;
+                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : psoBrightness;
+                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : psoBrightness;
                 
                 // Update GA fitness display
                 const gaEl = document.getElementById('ga-fitness');
@@ -9752,11 +9896,11 @@ HTML_TEMPLATE = '''
                 
                 // Show toast with specific results
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: ' + psoBrightness + '% (' + psoFitness.toFixed(1) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
                     showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast('PSO->Lamp: ' + psoBrightness + '% (Fitness: ' + psoFitness.toFixed(2) + ')', 'success');
+                    showToast('PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (Error: ' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
