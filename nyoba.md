@@ -6112,7 +6112,9 @@ HTML_TEMPLATE = '''
                 return false;
             }
 
-            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) {
+            // Only call initCharts() if core charts (temp, hum) are also missing — meaning initCharts never ran.
+            // If charts.temp already exists, initCharts() already ran and calling it again will crash on duplicate canvases.
+            if ((!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) && !charts.temp) {
                 try {
                     initCharts();
                 } catch (e) {
@@ -6871,9 +6873,15 @@ HTML_TEMPLATE = '''
         }
 
         function updateMLChart(chartName, history, algo) {
-            // Re-init charts if not yet created (page was visited before Chart.js was ready)
+            // Re-init ML charts if not yet created - call initMLCharts directly, NOT ensureChartsReady
+            // (ensureChartsReady calls initCharts which crashes on already-existing canvases)
             if (!charts[chartName]) {
-                try { ensureChartsReady(); } catch(e) {}
+                var mlCanvas = document.getElementById('gaFitnessChart');
+                if (mlCanvas && mlCanvas.offsetWidth > 0) {
+                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); }
+                } else {
+                    return; // ML page not visible yet, skip
+                }
             }
             const chart = charts[chartName];
             if (!chart || !history || history.length === 0) return;
