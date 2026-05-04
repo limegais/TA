@@ -21,9 +21,11 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Authentication Credentials
-AUTH_USERNAME = "admin"
-AUTH_PASSWORD = "smartroom2024"
+# Authentication Credentials (role-based)
+USERS = {
+    'admin': {'password': 'admin', 'role': 'admin'},
+    'user':  {'password': 'user',  'role': 'user'},
+}
 
 # Device Status Tracking
 device_last_seen = {
@@ -434,6 +436,14 @@ def _fetch_mysql_power():
         opt_sensor_data['actual_watt'] = active_power
         opt_sensor_data['power_factor'] = pf
         print(f"[OPT] MySQL power: {active_power:.1f}W PF={pf:.2f}")
+        # Write to InfluxDB so AC Power chart on analytics page has historical data
+        try:
+            write_to_influxdb('energy_monitor', {
+                'power':      active_power,
+                'power_factor': pf,
+            }, tags={'device': 'esp32_ac', 'source': 'mysql'})
+        except Exception as _ie:
+            print(f"[OPT] InfluxDB write after MySQL fetch failed: {_ie}")
     except Exception as e:
         print(f"[OPT] MySQL power fetch failed: {e}")
 
@@ -1969,6 +1979,19 @@ def get_influx_data(measurement, field, hours=1, device_tag=None):
         return []
 
 # ==================== AUTHENTICATION ====================
+from functools import wraps
+
+def admin_required(f):
+    """Decorator: restrict route to admin role only."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('logged_in'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if session.get('role') != 'admin':
+            return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
 @app.before_request
 def require_login():
     public_paths = ['/login', '/api/optimization/update']
@@ -1985,18 +2008,29 @@ def require_login():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username', '')
+        username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
-        if username == AUTH_USERNAME and password == AUTH_PASSWORD:
+        user = USERS.get(username)
+        if user and user['password'] == password:
             session['logged_in'] = True
+            session['username'] = username
+            session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid credentials')
+        return render_template_string(LOGIN_TEMPLATE, error='Username atau password salah')
     return render_template_string(LOGIN_TEMPLATE, error=None)
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect('/login')
+
+@app.route('/api/auth/role')
+def get_auth_role():
+    """Return current session role for frontend."""
+    return jsonify({
+        'role': session.get('role', 'user'),
+        'username': session.get('username', ''),
+    })
 
 # ==================== API ROUTES ====================
 @app.route('/')
@@ -2023,6 +2057,7 @@ def camera_status():
         return jsonify({'status': 'error'})
 
 @app.route('/api/camera/restart', methods=['POST'])
+@admin_required
 def restart_camera():
     global camera
     with camera_lock:
@@ -2037,6 +2072,7 @@ def restart_camera():
             return jsonify({'status': 'error', 'message': 'Camera failed to restart'}), 500
 
 @app.route('/api/camera/toggle', methods=['POST'])
+@admin_required
 def toggle_camera():
     global camera_enabled, camera
     camera_enabled = not camera_enabled
@@ -2239,6 +2275,7 @@ def rec_data_api():
 
 # ==================== EXPORT CSV DARI INFLUXDB ====================
 @app.route('/api/export/csv')
+@admin_required
 def export_csv_from_db():
     """
     Query InfluxDB by date range and stream a CSV file.
@@ -2596,6 +2633,7 @@ def energy_compare():
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
 @app.route('/api/energy/export-csv')
+@admin_required
 def energy_export_csv():
     """Export data energi sebagai CSV — dari ring buffer realtime atau PHP proxy.
     ?device=ac|lamp|all   (default: all)
@@ -2790,6 +2828,7 @@ def ml_status():
     })
 
 @app.route('/api/ml/run', methods=['POST'])
+@admin_required
 def ml_run():
     """Trigger optimization run (GA, PSO, or both) — runs embedded engine"""
     try:
@@ -4031,6 +4070,8 @@ HTML_TEMPLATE = '''
         .theme-divider {
             border: none; border-top: 1px solid var(--border); margin: 15px 0;
         }
+        /* Role-based access: hide admin-only nav items for user role */
+        body.role-user .admin-only { display: none !important; }
         /* Light theme adjustments */
         .slider {
             background: var(--border);
@@ -4052,22 +4093,28 @@ HTML_TEMPLATE = '''
         <div class="logo">
             Smart Room
         </div>
+        <!-- Role badge -->
+        <div id="role-badge" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.25);">
+            <i class="fas fa-user-circle" style="color:#6366f1;font-size:16px;"></i>
+            <span id="role-username" style="color:var(--text-primary);font-size:13px;font-weight:600;">-</span>
+            <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
+        </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
             <span>AC Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('dashboard-lamp')">
             <span>Lamp Dashboard</span>
         </div>
-        <div class="nav-item" onclick="showPage('ac-analytics')">
+        <div class="nav-item admin-only" onclick="showPage('ac-analytics')">
             <span>AC Analytics</span>
         </div>
-        <div class="nav-item" onclick="showPage('lamp-analytics')">
+        <div class="nav-item admin-only" onclick="showPage('lamp-analytics')">
             <span>Lamp Analytics</span>
         </div>
-        <div class="nav-item" onclick="showPage('camera')">
+        <div class="nav-item admin-only" onclick="showPage('camera')">
             <span>Camera</span>
         </div>
-        <div class="nav-item" onclick="showPage('energy')">
+        <div class="nav-item admin-only" onclick="showPage('energy')">
             <span>Energy Usage</span>
         </div>
         <div class="nav-item" onclick="showPage('control-ac')">
@@ -4076,13 +4123,13 @@ HTML_TEMPLATE = '''
         <div class="nav-item" onclick="showPage('control-lamp')">
             <span>Lamp Control</span>
         </div>
-        <div class="nav-item" onclick="showPage('ml-optimization')">
+        <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
             <span>ML Optimization</span>
         </div>
-        <div class="nav-item" onclick="showPage('logs')">
+        <div class="nav-item admin-only" onclick="showPage('logs')">
             <span>System Logs</span>
         </div>
-        <div class="nav-item" onclick="showPage('occupancy-feedback')">
+        <div class="nav-item admin-only" onclick="showPage('occupancy-feedback')">
             <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
@@ -5754,6 +5801,26 @@ HTML_TEMPLATE = '''
         }
         
         var charts = {};
+
+        // ==================== ROLE-BASED ACCESS CONTROL ====================
+        var userRole = 'admin'; // default until /api/auth/role responds
+        var ADMIN_PAGES = ['ac-analytics','lamp-analytics','camera','energy','ml-optimization','logs','occupancy-feedback'];
+
+        function applyRoleRestrictions(role, username) {
+            userRole = role;
+            var uEl = document.getElementById('role-username');
+            var lEl = document.getElementById('role-label');
+            if (uEl) uEl.textContent = username || role;
+            if (lEl) {
+                lEl.textContent = role === 'admin' ? 'ADMIN' : 'USER';
+                lEl.style.background = role === 'admin' ? '#6366f1' : '#10b981';
+            }
+            if (role !== 'admin') {
+                document.body.classList.add('role-user');
+            } else {
+                document.body.classList.remove('role-user');
+            }
+        }
         var chartRanges = {
             temp: 1,
             hum: 1,
@@ -6746,6 +6813,11 @@ HTML_TEMPLATE = '''
 
         function showPage(pageId) {
             console.log('[NAV] showPage called:', pageId);
+            // Block user role from accessing admin-only pages
+            if (userRole !== 'admin' && ADMIN_PAGES.indexOf(pageId) !== -1) {
+                console.warn('[NAV] Access denied for role:', userRole, '→ page:', pageId);
+                pageId = 'dashboard-ac';
+            }
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             
@@ -6794,6 +6866,16 @@ HTML_TEMPLATE = '''
                     // Refresh data after resize so charts render with actual values
                     try { refreshMLData(); } catch(e) {}
                 }, 200);
+            }
+            if (pageId === 'ac-analytics') {
+                ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
+                    try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
+                });
+            }
+            if (pageId === 'lamp-analytics') {
+                ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
+                    try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
+                });
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -9855,6 +9937,10 @@ HTML_TEMPLATE = '''
 
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
+            // Fetch role first so nav is hidden before user sees it
+            fetch('/api/auth/role').then(function(r){ return r.json(); }).then(function(d){
+                applyRoleRestrictions(d.role, d.username);
+            }).catch(function(){ applyRoleRestrictions('user', ''); });
             try {
                 var ovInit = document.getElementById('sidebar-overlay');
                 if (ovInit) {
