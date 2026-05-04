@@ -7168,8 +7168,6 @@ HTML_TEMPLATE = '''
             showToast('Logs exported', 'success');
         }
 
-        function exportFeedback() {
-
         function exportPSOReport() {
             fetch('/api/pso/export-csv')
                 .then(function(r) {
