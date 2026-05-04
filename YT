@@ -716,6 +716,7 @@ def run_optimization_cycle(algo='both'):
                 },
             }
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
             b1, b2 = sol[0], sol[1]
@@ -750,6 +751,7 @@ def run_optimization_cycle(algo='both'):
                 },
             }
             print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
+            persist_opt_results('pso')
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -844,6 +846,161 @@ def run_optimization_cycle(algo='both'):
         return False
     finally:
         optimization_lock.release()
+
+# ==================== PERSIST & RESTORE OPT RESULTS ====================
+OPT_PERSIST_MEASUREMENT = 'opt_results'  # InfluxDB measurement name
+
+def persist_opt_results(algo):
+    """Write current GA or PSO results to InfluxDB so they survive restarts."""
+    try:
+        if algo == 'ga':
+            ga = last_opt_results['ga']
+            if not ga or ga.get('fitness', 0) == 0:
+                return
+            fields = {
+                'fitness':          float(ga['fitness']),
+                'temp':             float(ga.get('temp', 0)),
+                'fan':              float(ga.get('fan', 0)),
+                'mode_idx':         float(ga.get('mode_idx', 0)),
+                'initial_fitness':  float(ga.get('initial_fitness', 0)),
+                'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
+                'run_time':         str(ga.get('run_time', '')),
+            }
+            write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
+                              tags={'algo': 'ga', 'version': '1'})
+        elif algo == 'pso':
+            pso = last_opt_results['pso']
+            if not pso or pso.get('fitness', 0) == 0 and pso.get('brightness1', 0) == 0:
+                return
+            fields = {
+                'fitness':        float(pso['fitness']),
+                'brightness':     float(pso.get('brightness', 0)),
+                'brightness1':    float(pso.get('brightness1', 0)),
+                'brightness2':    float(pso.get('brightness2', 0)),
+                'initial_error':  float(pso.get('initial_error', 0)),
+                'final_error':    float(pso.get('final_error', pso['fitness'])),
+                'lux_achieved':   float(pso.get('lux_achieved', 0)),
+                'target_lux':     float(pso.get('target_lux', 350.0)),
+                'run_time':       str(pso.get('run_time', '')),
+            }
+            write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
+                              tags={'algo': 'pso', 'version': '1'})
+    except Exception as e:
+        print(f"[PERSIST] Error saving {algo} results: {e}")
+
+def restore_opt_results():
+    """Read the latest GA and PSO results from InfluxDB on startup."""
+    try:
+        _, _, query_api = _get_influx_client()
+        for algo in ('ga', 'pso'):
+            q = (f'from(bucket: "{INFLUX_BUCKET}")'
+                 f' |> range(start: -30d)'
+                 f' |> filter(fn:(r) => r._measurement == "{OPT_PERSIST_MEASUREMENT}" and r.algo == "{algo}")'
+                 f' |> last()')
+            rec_map = {}
+            for table in query_api.query(q):
+                for rec in table.records:
+                    rec_map[rec.get_field()] = rec.get_value()
+            if not rec_map:
+                continue
+            if algo == 'ga' and rec_map.get('fitness', 0) > 0:
+                last_opt_results['ga'].update({
+                    'fitness':          float(rec_map.get('fitness', 0)),
+                    'temp':             int(rec_map.get('temp', 0)),
+                    'fan':              int(rec_map.get('fan', 0)),
+                    'mode_idx':         int(rec_map.get('mode_idx', 0)),
+                    'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
+                    'final_fitness':    float(rec_map.get('final_fitness', 0)),
+                    'run_time':         str(rec_map.get('run_time', '')),
+                    'stats':            [],  # history not stored (too large)
+                })
+                mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
+                mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
+                mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
+            elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
+                last_opt_results['pso'].update({
+                    'fitness':       float(rec_map.get('fitness', 0)),
+                    'brightness':    int(rec_map.get('brightness', 0)),
+                    'brightness1':   int(rec_map.get('brightness1', 0)),
+                    'brightness2':   int(rec_map.get('brightness2', 0)),
+                    'initial_error': float(rec_map.get('initial_error', 0)),
+                    'final_error':   float(rec_map.get('final_error', 0)),
+                    'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
+                    'target_lux':    float(rec_map.get('target_lux', 350.0)),
+                    'run_time':      str(rec_map.get('run_time', '')),
+                    'stats':         [],
+                })
+                mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
+                mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
+                mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
+                mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['brightness1']}% PWM2={last_opt_results['pso']['brightness2']}% error={last_opt_results['pso']['fitness']:.2f}")
+    except Exception as e:
+        print(f"  [RESTORE] Could not restore opt results: {e}")
+
+# ==================== SENSOR FAULT DETECTION ====================
+# Thresholds: how many seconds without a message = sensor is "stale"
+SENSOR_STALE_WARN_S  = 120   # 2 min  → WARNING  (yellow)
+SENSOR_STALE_FAULT_S = 300   # 5 min  → FAULT    (red)
+# Track per-sensor last emit time so we don't spam the same fault
+_fault_last_emit = {}
+
+def sensor_fault_loop():
+    """Background thread: check sensor staleness every 60 s and push alerts."""
+    time.sleep(20)  # let devices connect first
+    print("[FAULT] Sensor fault detection started")
+    while True:
+        try:
+            now = datetime.now()
+            checks = [
+                ('esp32_ac',   'AC Sensor (ESP32)',  ['temperature', 'humidity']),
+                ('esp32_lamp', 'Lamp Sensor (ESP32)', ['lux1', 'lux2', 'lux3']),
+                ('camera',     'Camera (YOLO)',       []),
+            ]
+            health = {}
+            for dev_id, dev_label, fields in checks:
+                last = device_last_seen[dev_id]['last_seen']
+                if last is None:
+                    age = float('inf')
+                else:
+                    age = (now - last).total_seconds()
+
+                if age == float('inf') or age > SENSOR_STALE_FAULT_S:
+                    lvl = 'fault'
+                elif age > SENSOR_STALE_WARN_S:
+                    lvl = 'warn'
+                else:
+                    lvl = 'ok'
+
+                age_str = 'never' if age == float('inf') else f"{int(age)}s ago"
+                health[dev_id] = {'label': dev_label, 'status': lvl, 'age': age_str}
+
+                # Only emit alert once per transition to avoid spam
+                prev = _fault_last_emit.get(dev_id, 'ok')
+                if lvl != 'ok' and prev == 'ok':
+                    msg = f'[SENSOR FAULT] {dev_label} tidak ada data ({age_str})'
+                    level = 'danger' if lvl == 'fault' else 'warning'
+                    socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': lvl, 'age': age_str})
+                    socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
+                    log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': level})
+                    print(msg)
+                elif lvl == 'ok' and prev != 'ok':
+                    # Recovery
+                    msg = f'[SENSOR OK] {dev_label} kembali online'
+                    socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': 'ok', 'age': age_str})
+                    socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
+                    log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
+                    print(msg)
+                _fault_last_emit[dev_id] = lvl
+
+            # Push health snapshot to frontend every cycle
+            socketio.emit('sensor_health', health)
+        except Exception as e:
+            print(f"[FAULT] sensor_fault_loop error: {e}")
+        time.sleep(60)
 
 def optimization_auto_loop():
     """Background thread: GA (AC) and PSO (Lamp) always run in separate cycles.
@@ -3608,6 +3765,29 @@ def get_device_status():
             dev['status'] = 'online'
     return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
 
+@app.route('/api/sensor/health')
+def sensor_health_api():
+    """Return real-time sensor health: status (ok/warn/fault) and data age."""
+    now = datetime.now()
+    health = {}
+    labels = {'esp32_ac': 'AC Sensor', 'esp32_lamp': 'Lamp Sensor', 'camera': 'Camera'}
+    for dev_id, dev in device_last_seen.items():
+        last = dev['last_seen']
+        age = float('inf') if last is None else (now - last).total_seconds()
+        if age == float('inf') or age > SENSOR_STALE_FAULT_S:
+            status = 'fault'
+        elif age > SENSOR_STALE_WARN_S:
+            status = 'warn'
+        else:
+            status = 'ok'
+        health[dev_id] = {
+            'label':   labels.get(dev_id, dev_id),
+            'status':  status,
+            'age':     'never' if age == float('inf') else f"{int(age)}s ago",
+            'last_seen': last.strftime('%H:%M:%S') if last else None,
+        }
+    return jsonify(health)
+
 @app.route('/api/alerts')
 def get_alerts():
     return jsonify({'rules': alert_rules, 'active': list(active_alerts)})
@@ -4223,6 +4403,12 @@ HTML_TEMPLATE = '''
             background: var(--bg-card-hover); border-radius: 20px; font-size: 12px; font-weight: 500;
             color: var(--text-secondary);
         }
+        .sensor-health-badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 3px 10px; border-radius: 14px;
+            background: var(--bg-secondary); font-size: 12px; font-weight: 600;
+            border: 1px solid var(--border);
+        }
         .device-dot {
             width: 8px; height: 8px; border-radius: 50%; display: inline-block;
         }
@@ -4342,6 +4528,17 @@ HTML_TEMPLATE = '''
 
     <!-- Main Content -->
     <div class="main-content">
+        <!-- Sensor Health Bar (global, shown on all pages) -->
+        <div id="sensor-health-bar" style="
+            display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+            padding: 7px 18px; margin-bottom: 4px;
+            background: var(--card-bg); border-radius: 10px;
+            border: 1px solid var(--border);
+            font-size: 12.5px; font-weight: 500; min-height: 34px;
+        ">
+            <span style="color:var(--text-secondary); font-size:11px; font-weight:600; letter-spacing:.5px;">SENSOR:</span>
+        </div>
+        <!-- /Sensor Health Bar -->
         <!-- AC Dashboard Page -->
         <div id="dashboard-ac" class="page active">
             <div class="header">
@@ -8925,6 +9122,46 @@ HTML_TEMPLATE = '''
             setTimeout(() => { if (banner.parentElement) banner.remove(); }, 8000);
         }
 
+        // ==================== SENSOR HEALTH ====================
+        var _sensorHealthState = {};
+
+        socket.on('sensor_health', function(health) {
+            _sensorHealthState = health;
+            updateSensorHealthBar(health);
+        });
+
+        socket.on('sensor_fault', function(data) {
+            // Update individual badge immediately on fault/recovery
+            var id = data.device;
+            if (_sensorHealthState[id]) _sensorHealthState[id].status = data.status;
+            else _sensorHealthState[id] = data;
+            updateSensorHealthBar(_sensorHealthState);
+        });
+
+        function updateSensorHealthBar(health) {
+            var bar = document.getElementById('sensor-health-bar');
+            if (!bar) return;
+            var html = '';
+            var statusIcon = {ok: '&#x25CF;', warn: '&#x25CF;', fault: '&#x25CF;'};
+            var statusColor = {ok: '#22c55e', warn: '#f59e0b', fault: '#ef4444'};
+            var statusText  = {ok: 'Online', warn: 'Stale', fault: 'Offline'};
+            for (var dev in health) {
+                var h = health[dev];
+                var col  = statusColor[h.status]  || '#6b7280';
+                var icon = statusIcon[h.status]   || '&#x25CF;';
+                var txt  = statusText[h.status]   || h.status;
+                html += '<span class="sensor-health-badge" style="color:' + col + ';" title="' + h.label + ': ' + h.age + '">'
+                      + icon + ' ' + h.label + ' <small style="opacity:.7;">' + txt + '</small></span>';
+            }
+            bar.innerHTML = html;
+        }
+
+        // Fetch initial health on load
+        fetch('/api/sensor/health').then(function(r){ return r.json(); }).then(function(h){
+            _sensorHealthState = h;
+            updateSensorHealthBar(h);
+        }).catch(function(){});
+
         // ==================== SOCKET.IO EVENTS ====================
         // Ring buffer untuk chart MySQL realtime
         var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
@@ -10547,6 +10784,15 @@ if __name__ == '__main__':
     opt_thread = threading.Thread(target=optimization_auto_loop, daemon=True)
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
+
+    # Restore last GA/PSO results from InfluxDB (survive restarts)
+    print("  [RESTORE] Loading last optimization results from InfluxDB...")
+    restore_opt_results()
+
+    # Start sensor fault detection thread
+    fault_thread = threading.Thread(target=sensor_fault_loop, daemon=True)
+    fault_thread.start()
+    print("  [FAULT] Sensor fault detection thread started")
     
     print("  [URL] Dashboard: http://172.20.0.65:5000")
 
