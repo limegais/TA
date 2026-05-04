@@ -2780,7 +2780,10 @@ def ml_status():
         'pso_fitness': mqtt_data['system'].get('pso_fitness', 0),
         'ga_temp': mqtt_data['system'].get('ga_temp', 0),
         'ga_fan': mqtt_data['system'].get('ga_fan', 0),
+        'ga_mode': mqtt_data['system'].get('ga_mode', 'COOL'),
         'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
+        'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
+        'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
         'ga_history': mqtt_data['system'].get('ga_history', []),
         'pso_history': mqtt_data['system'].get('pso_history', [])
@@ -6038,6 +6041,29 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
+            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
+            // ML charts (gaFitness, psoFitness, comparison) are initialized separately via initMLCharts()
+        }
+
+        function initMLCharts() {
+            function makeOpts(showLegend) {
+                var opts = {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: !!showLegend } },
+                    scales: {
+                        y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
+                    }
+                };
+                if (showLegend) {
+                    opts.plugins.legend.labels = { color: '#94a3b8', font: { size: 12 } };
+                }
+                return opts;
+            }
+            if (charts.gaFitness) { try { charts.gaFitness.destroy(); } catch(e){} charts.gaFitness = null; }
+            if (charts.psoFitness) { try { charts.psoFitness.destroy(); } catch(e){} charts.psoFitness = null; }
+            if (charts.comparison) { try { charts.comparison.destroy(); } catch(e){} charts.comparison = null; }
+
             charts.gaFitness = new Chart(document.getElementById('gaFitnessChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
@@ -6045,7 +6071,7 @@ HTML_TEMPLATE = '''
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'PSO Best Fitness', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
+                data: { labels: [], datasets: [{ label: 'PSO Error (\u2193 better)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
@@ -6058,8 +6084,6 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
-
-            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -6074,6 +6098,7 @@ HTML_TEMPLATE = '''
                         s.onload = function() {
                             console.log('[CHART] Fallback Chart.js loaded');
                             try { initCharts(); } catch(e) { console.error('[CHART] init after fallback failed:', e); }
+                            try { initMLCharts(); } catch(e) { console.error('[CHART] initML after fallback failed:', e); }
                             try { loadAllEnergyCharts(); } catch(e) { console.error('[CHART] load after fallback failed:', e); }
                         };
                         s.onerror = function() {
@@ -6087,13 +6112,26 @@ HTML_TEMPLATE = '''
                 return false;
             }
 
-            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore
-                || !charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) {
                 try {
                     initCharts();
                 } catch (e) {
                     console.error('[CHART] initCharts retry failed:', e);
                     return false;
+                }
+            }
+
+            // ML charts are independent — init separately to avoid destroying already-created canvases
+            // Guard: only init when canvas is visible (has positive width), to avoid 0px Chart.js failures
+            if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                var mlCanvas = document.getElementById('gaFitnessChart');
+                if (mlCanvas && mlCanvas.offsetWidth > 0) {
+                    try {
+                        initMLCharts();
+                    } catch (e) {
+                        console.error('[CHART] initMLCharts failed:', e);
+                        return false;
+                    }
                 }
             }
 
@@ -6741,7 +6779,7 @@ HTML_TEMPLATE = '''
             if (pageId === 'ml-optimization') {
                 try { ensureChartsReady(); } catch(e) { console.error('[NAV] ML ensureCharts error:', e); }
                 try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
-                // Canvas initialised in a hidden page needs a resize pass to render correctly
+                // Canvas in hidden page has 0px dimensions — resize after page is visible
                 setTimeout(function() {
                     ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
                         try {
@@ -6751,7 +6789,9 @@ HTML_TEMPLATE = '''
                             }
                         } catch(e) {}
                     });
-                }, 150);
+                    // Refresh data after resize so charts render with actual values
+                    try { refreshMLData(); } catch(e) {}
+                }, 200);
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -6872,7 +6912,8 @@ HTML_TEMPLATE = '''
                 ga_fan: data.ga_fan || '--',
                 pso_fitness: data.pso_fitness || 0,
                 pso_brightness: data.pso_brightness || '--',
-                combined: ((data.ga_fitness || 0) + (data.pso_fitness || 0)) / 2
+                // GA maximize (score) vs PSO minimize (error) — normalize PSO before combining
+                combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100 - (data.pso_fitness || 0) / 100) * 0.5
             };
             mlHistory.unshift(entry);
             if (mlHistory.length > 50) mlHistory.pop();
@@ -6890,16 +6931,17 @@ HTML_TEMPLATE = '''
             }
 
             tbody.innerHTML = mlHistory.map(e => {
-                const getBadge = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
+                const getBadgeGA  = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
+                const getBadgePSO = (err) => err <= 100 ? 'good' : err <= 500 ? 'mid' : 'low'; // PSO: lower error = better
                 return '<tr>' +
                     '<td>' + e.run + '</td>' +
                     '<td>' + e.time + '</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgeGA(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.ga_temp + '\u00b0C</td>' +
                     '<td>' + e.ga_fan + '</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgePSO(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.pso_brightness + '%</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgeGA(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
                 '</tr>';
             }).join('');
         }
@@ -9826,7 +9868,7 @@ HTML_TEMPLATE = '''
                 });
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
-            try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
+            // ML charts initialized lazily on first showPage('ml-optimization') — canvas must be visible first
             // Restore recording previews from sessionStorage
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
