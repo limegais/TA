@@ -21,9 +21,11 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Authentication Credentials
-AUTH_USERNAME = "admin"
-AUTH_PASSWORD = "smartroom2024"
+# Authentication Credentials (role-based)
+USERS = {
+    'admin': {'password': 'admin', 'role': 'admin'},
+    'user':  {'password': 'user',  'role': 'user'},
+}
 
 # Device Status Tracking
 device_last_seen = {
@@ -218,7 +220,10 @@ opt_sensor_data = {
     'temperature': 28.0, 'humidity': 55.0, 'person_detected': False,
     'lux': 200, 'lux1': 200, 'lux2': 200, 'lux3': 200,
     'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
-    'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default'
+    'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default',
+    'actual_watt': 0.0, 'power_factor': 1.0,          # real power from MySQL energy meter (0 = not fetched yet)
+    'curr_brightness1': 0, 'curr_brightness2': 0,      # current lamp brightness for delta lux model
+    'person_count': 0,                                  # number of people detected (0 = empty)
 }
 
 # Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
@@ -255,6 +260,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     humidity = opt_sensor_data['humidity']
     # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently()
+    person_count = max(0, int(opt_sensor_data.get('person_count', 1 if person_detected else 0)))
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
@@ -266,6 +272,15 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
     target_temp = target_map.get(time_period, 25.0)
     sigma = sigma_map.get(time_period, 2.0)
+    # Crowd cooling offset: more people = more body heat = lower target temp
+    # 1 person:  0°C offset (baseline)
+    # 2 people: -0.5°C
+    # 3 people: -1.0°C
+    # 4+ people: -1.5°C (capped to prevent over-cooling)
+    if person_detected and person_count >= 2:
+        crowd_offset = min(1.5, (person_count - 1) * 0.5)
+        target_temp = max(target_temp - crowd_offset, 22.0)  # never below 22°C
+        sigma = max(1.0, sigma - 0.2)  # tighter comfort band for crowded room
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
     adjusted_target = target_temp + trend_offset
     fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
@@ -279,12 +294,28 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
     temp_gap = abs(temp_room - temp_set)
-    ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
+    # More people = need more airflow for comfort (crowd effect)
+    base_ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
+    if person_detected and person_count >= 3:
+        ideal_fan = min(float(OPT_FAN_MAX), base_ideal_fan + (person_count - 2) * 0.5)
+    else:
+        ideal_fan = base_ideal_fan
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    ac_power = (30.0 - temp_set) * 50.0 + fan_speed * 30.0
-    max_power = (30.0 - 16.0) * 50.0 + 3 * 30.0
-    energy_ratio = 1.0 - (ac_power / max_power)
-    fitness += energy_ratio * (5.0 if person_detected else 15.0)
+    # ── Energy efficiency ─────────────────────────────────────────────────────
+    # Use real PZEM watt data when available; fall back to COP-based model.
+    # COP model: efficiency drops exponentially as setpoint moves further below room temp.
+    # Fan also consumes power — penalise high fan speed when gap is small.
+    actual_watt = opt_sensor_data.get('actual_watt', 0.0)
+    if actual_watt > 50.0:   # MySQL energy meter has live data and AC is drawing power
+        MAX_WATT_REF = 1500.0
+        energy_ratio = max(0.0, 1.0 - actual_watt / MAX_WATT_REF)
+    else:
+        temp_delta = max(0.0, temp_room - temp_set)   # how hard AC must work
+        cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
+        fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
+        energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
+    energy_weight = 12.0 if person_detected else 20.0
+    fitness += energy_ratio * energy_weight
     uniformity = _get_temp_uniformity()
     if uniformity < 0.7 and fan_speed >= 2:
         fitness += 8.0 * (1 - uniformity) * (fan_speed / 3.0)
@@ -300,6 +331,13 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         fitness -= (24.0 - temp_set) * 3.0
     if temp_set < 18 and fan_speed == 3:
         fitness -= 10.0
+    # Overcooling: penalise setting more than 1.5°C below comfort target (wasteful + uncomfortable)
+    if person_detected and temp_set < target_temp - 1.5:
+        fitness -= (target_temp - 1.5 - temp_set) * 5.0
+    # Unnecessary high fan: penalise when room is already at/near target (noise + energy waste)
+    # Suppress penalty when crowd >= 3 since high fan is needed for circulation
+    if fan_speed >= 3 and abs(temp_room - target_temp) <= 1.0 and person_count < 3:
+        fitness -= (fan_speed - 2) * 4.0
 
     # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
@@ -325,52 +363,34 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     return max(0.0, round(fitness, 2))
 
 def calculate_lamp_fitness_2d(brightness1, brightness2):
-    """Zone-aware 2D fitness: brightness1 controls zone near sensor1, brightness2 near sensor3.
-    3 sensors measure actual lux. Target: 400 lux uniform across all zones."""
-    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 200))
-    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 200))
-    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 200))
-    # Use debounced confirmation (20-min window) so brief camera misses don't cause PSO
-    # to optimize for darkness while a person is actually still in the room.
+    """PSO fitness function — MINIMIZE (smaller = better).
+    Formula dari PDF:
+        Error_lux = ((L1 - TARGET)^2 + (L2 - TARGET)^2 + (L3 - TARGET)^2) / 3
+        Fitness    = Error_lux
+    Target 350 lux saat ada orang; 0 lux saat kosong (lampu mati).
+    Lux diestimasi dengan delta model dari brightness saat ini.
+    """
+    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
+    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
+    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
-    TARGET_LUX = 400.0
-    fitness = 0.0
+    TARGET_LUX = 350.0 if person_detected else 0.0
 
-    # Estimate contributed lux from each lamp (empirical: 1% brightness ≈ 3-5 lux)
-    lamp1_lux = brightness1 * 4.0
-    lamp2_lux = brightness2 * 4.0
-    # Zone model: lamp1 mainly affects sensor1/2, lamp2 mainly affects sensor2/3
-    est_lux1 = lux1 + lamp1_lux * 0.8 + lamp2_lux * 0.2
-    est_lux2 = lux2 + lamp1_lux * 0.5 + lamp2_lux * 0.5
-    est_lux3 = lux3 + lamp1_lux * 0.2 + lamp2_lux * 0.8
+    # Delta-based lux estimation: perubahan dari brightness saat ini
+    curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
+    curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
+    delta1 = (brightness1 - curr_b1) * 4.0   # ~4 lux per 1% brightness
+    delta2 = (brightness2 - curr_b2) * 4.0
+    # Zone model: lamp1 → sensor1/2, lamp2 → sensor2/3
+    est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
+    est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
+    est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
 
-    if person_detected:
-        # === COMFORT: Each zone should be near target (max 45 pts) ===
-        for est in [est_lux1, est_lux2, est_lux3]:
-            fitness += _gaussian_score(est, TARGET_LUX, 100.0, 15.0)
-
-        # === UNIFORMITY: All zones similar brightness (max 20 pts) ===
-        lux_values = [est_lux1, est_lux2, est_lux3]
-        lux_range = max(lux_values) - min(lux_values)
-        uniformity = math.exp(-(lux_range ** 2) / (2 * 150.0 ** 2))
-        fitness += uniformity * 20.0
-
-        # === ENERGY: Lower brightness = less power (max 15 pts) ===
-        total_power = (brightness1 + brightness2) * 0.5
-        max_power = 100.0  # 2 lamps at 100%
-        energy_ratio = 1.0 - (total_power / max_power)
-        fitness += energy_ratio * 15.0
-    else:
-        # No person: minimize energy, keep minimal light
-        if brightness1 <= 5 and brightness2 <= 5:
-            fitness += 80.0
-        elif brightness1 <= 15 and brightness2 <= 15:
-            fitness += 50.0
-        else:
-            avg_b = (brightness1 + brightness2) / 2.0
-            fitness += max(0, 80.0 - avg_b * 1.5)
-
-    return max(0.0, round(fitness, 2))
+    # Rumus PDF: rata-rata kuadrat selisih dari target
+    error = ((est_lux1 - TARGET_LUX) ** 2
+             + (est_lux2 - TARGET_LUX) ** 2
+             + (est_lux3 - TARGET_LUX) ** 2) / 3.0
+    return round(error, 2)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -388,7 +408,48 @@ def update_opt_sensor_data(**kwargs):
             if dt_min > 0.1:
                 opt_sensor_data['temp_trend'] = round((h[-1][1] - h[0][1]) / dt_min, 3)
 
+# PHP proxy URL for MySQL energy meter
+MYSQL_ENERGY_PHP_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024'
+_last_mysql_power_fetch = 0.0
+MYSQL_POWER_FETCH_INTERVAL = 60  # fetch at most once per minute
+
+def _fetch_mysql_power():
+    """Fetch latest AC active_power from MySQL via PHP proxy.
+    Updates opt_sensor_data['actual_watt'] and ['power_factor'].
+    Runs at most once per MYSQL_POWER_FETCH_INTERVAL seconds.
+    """
+    global _last_mysql_power_fetch
+    now = time.time()
+    if now - _last_mysql_power_fetch < MYSQL_POWER_FETCH_INTERVAL:
+        return
+    _last_mysql_power_fetch = now
+    try:
+        import urllib.request as _ureq
+        req = _ureq.Request(MYSQL_ENERGY_PHP_URL,
+                            headers={'User-Agent': 'SmartRoom-Optimizer/1.0'})
+        with _ureq.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        ac_data = data.get('ac') or {}
+        active_power = float(ac_data.get('active_power') or ac_data.get('daya_aktif') or 0)
+        apparent_power = float(ac_data.get('apparent_power') or 0)
+        pf = round(active_power / apparent_power, 3) if apparent_power > 0.001 else 1.0
+        opt_sensor_data['actual_watt'] = active_power
+        opt_sensor_data['power_factor'] = pf
+        print(f"[OPT] MySQL power: {active_power:.1f}W PF={pf:.2f}")
+        # Write to InfluxDB so AC Power chart on analytics page has historical data
+        try:
+            write_to_influxdb('energy_monitor', {
+                'power':      active_power,
+                'power_factor': pf,
+            }, tags={'device': 'esp32_ac', 'source': 'mysql'})
+        except Exception as _ie:
+            print(f"[OPT] InfluxDB write after MySQL fetch failed: {_ie}")
+    except Exception as e:
+        print(f"[OPT] MySQL power fetch failed: {e}")
+
 def fetch_sensor_data_from_db(time_range_minutes=30):
+    # Fetch real power from MySQL energy meter first
+    _fetch_mysql_power()
     try:
         _, _, query_api = _get_influx_client()
         ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
@@ -523,76 +584,103 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: optimizes (brightness1, brightness2) for 2 lamps independently."""
+    """2D PSO: minimizes Error_lux = ((L1-TARGET)^2 + (L2-TARGET)^2 + (L3-TARGET)^2) / 3
+    Sesuai rumus PDF. Gbest = partikel dengan error terkecil.
+    Persamaan update:
+        V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
+        X_i(t+1) = X_i(t) + V_i(t+1)
+    """
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
     w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
     w_end = 0.3
-    DIM = 2  # brightness1, brightness2
+    DIM = 2  # [PWM1, PWM2] sesuai PDF
     max_vel = 15
 
-    # Initialize swarm with 2D positions
-    positions = [[random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)] for _ in range(swarm_size)]
-    velocities = [[random.uniform(-10, 10) for _ in range(DIM)] for _ in range(swarm_size)]
+    # Inisialisasi posisi dan kecepatan secara acak (sesuai PDF)
+    # X_i = X_min + rand() * (X_max - X_min)
+    positions = [
+        [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
+         for _ in range(DIM)]
+        for _ in range(swarm_size)
+    ]
+    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
 
-    # Smart seeding: use last result UNLESS it was a "no person" low-brightness solution
-    # and person is currently present — avoids slow convergence from a bad starting point
+    # Smart seeding dari hasil sebelumnya
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
     seed_b1 = last_opt_results['pso'].get('brightness1', 0)
     seed_b2 = last_opt_results['pso'].get('brightness2', 0)
-    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)  # "no person" result
+    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)
     if seed_b1 > 0 and not (person_now and seed_is_dark):
         positions[0] = [seed_b1, seed_b2]
         for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(0, min(100, seed_b1 + random.randint(-10, 10))),
-                            max(0, min(100, seed_b2 + random.randint(-10, 10)))]
+            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b1 + random.randint(-10, 10))),
+                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b2 + random.randint(-10, 10)))]
 
+    # Pbest = posisi terbaik tiap partikel (error terkecil)
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
-    g_idx = pb_fit.index(max(pb_fit))
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]  # error (minimize)
+
+    # Gbest = partikel dengan error terkecil di seluruh swarm
+    g_idx = pb_fit.index(min(pb_fit))
     g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+
     fitness_history = []
     stagnation_counter = 0
-    stagnation_limit = max(8, iterations // 6)  # ~8 iterations before re-diversify
-    prev_g_fit = -1.0
+    stagnation_limit = max(8, iterations // 6)
+    prev_g_fit = float('inf')  # minimize: awal infinity
 
     for it in range(iterations):
+        # Inertia weight linear decay: w_start → w_end
         cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
+
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
+                # Persamaan kecepatan (sesuai PDF)
                 velocities[i][d] = (cur_w * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
                     + c2 * r2 * (g_pos[d] - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
-                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(round(positions[i][d] + velocities[i][d]))))
+                # Persamaan posisi (sesuai PDF)
+                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
+                                      int(round(positions[i][d] + velocities[i][d]))))
+
             fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
-            if fit > pb_fit[i]:
+
+            # Update Pbest: Pbest_i = X_i jika Fitness(X_i) < Fitness(Pbest_i)
+            if fit < pb_fit[i]:
                 pb_fit[i], pb_pos[i] = fit, positions[i][:]
-            if fit > g_fit:
+
+            # Update Gbest: Gbest = min(Fitness(Pbest_i))
+            if fit < g_fit:
                 g_fit, g_pos = fit, positions[i][:]
+
         fitness_history.append(g_fit)
-        # Stagnation detection: re-randomize worst particles when stuck at local minimum
-        if g_fit - prev_g_fit < 0.1:
-            stagnation_counter += 1
-        else:
-            stagnation_counter = 0
+
+        # Stagnation: jika penurunan error < 0.1 selama beberapa iterasi
+        improvement = prev_g_fit - g_fit
+        stagnation_counter = stagnation_counter + 1 if improvement < 0.1 else 0
         prev_g_fit = g_fit
+
         if stagnation_counter >= stagnation_limit:
+            # Re-randomize partikel terburuk (error tertinggi)
             re_count = max(2, swarm_size // 5)
-            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si])[:re_count]
+            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si], reverse=True)[:re_count]
             for si in worst_idx:
-                positions[si] = [random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX) for _ in range(DIM)]
-                velocities[si] = [random.uniform(-10, 10) for _ in range(DIM)]
+                positions[si] = [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
+                                 for _ in range(DIM)]
+                velocities[si] = [random.uniform(-max_vel, max_vel) for _ in range(DIM)]
                 new_fit = calculate_lamp_fitness_2d(positions[si][0], positions[si][1])
                 pb_pos[si] = positions[si][:]
                 pb_fit[si] = new_fit
-                if new_fit > g_fit:
+                if new_fit < g_fit:
                     g_fit, g_pos = new_fit, positions[si][:]
             stagnation_counter = 0
 
-    # Return 2D result
-    return g_pos, g_fit, fitness_history
+    # Gbest = [PWM1, PWM2] optimal (sesuai PDF)
+    initial_error = fitness_history[0] if fitness_history else g_fit
+    return g_pos, g_fit, fitness_history, initial_error
 
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
@@ -612,10 +700,39 @@ def run_optimization_cycle(algo='both'):
             }
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
         if algo in ('pso', 'both'):
-            sol, fit, hist = run_pso_optimization()
+            sol, fit, hist, initial_err = run_pso_optimization()
             b1, b2 = sol[0], sol[1]
-            last_opt_results['pso'] = {'fitness': fit, 'brightness': int((b1 + b2) / 2), 'brightness1': b1, 'brightness2': b2, 'stats': hist}
-            print(f"[PSO] Done: L1={b1}% L2={b2}% fitness={fit:.2f}")
+            # Estimate achieved lux from optimal brightness
+            person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+            target_lux = 350.0 if person_now else 0.0
+            lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
+            lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
+            lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
+            curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
+            curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
+            d1 = (b1 - curr_b1) * 4.0
+            d2 = (b2 - curr_b2) * 4.0
+            est1 = max(0.0, lux1 + d1 * 0.8 + d2 * 0.2)
+            est2 = max(0.0, lux2 + d1 * 0.5 + d2 * 0.5)
+            est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
+            lux_achieved = round((est1 + est2 + est3) / 3.0, 1)
+            last_opt_results['pso'] = {
+                'fitness': fit, 'brightness': int((b1 + b2) / 2),
+                'brightness1': b1, 'brightness2': b2, 'stats': hist,
+                'initial_error': round(initial_err, 2),
+                'final_error': round(fit, 2),
+                'lux_achieved': lux_achieved,
+                'target_lux': target_lux,
+                'run_time': datetime.now().strftime('%d %b %Y %H:%M'),
+                'params': {
+                    'swarm_size': pso_params['swarm_size'],
+                    'iterations': pso_params['iterations'],
+                    'w': pso_params['w'],
+                    'c1': pso_params['c1'],
+                    'c2': pso_params['c2'],
+                },
+            }
+            print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
@@ -642,30 +759,47 @@ def run_optimization_cycle(algo='both'):
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
-            'combined_fitness': float(last_opt_results['ga']['fitness'] + last_opt_results['pso']['fitness']) / 2
+            'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
+            # combined_fitness: GA maximize, PSO minimize — normalize PSO error to 0-100 scale before combining
+            'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
+                                + max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 100.0) * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
+        global _last_adaptive_ac_apply
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
-                    opt_temp = last_opt_results['ga']['temp']
-                    opt_fan  = last_opt_results['ga']['fan']
-                    opt_mode = last_opt_results['ga'].get('mode', 'COOL')
-                    if 16 <= opt_temp <= 30 and opt_fan >= 1:
-                        now = time.time()
-                        if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
-                            _last_adaptive_ac_apply = now
-                            ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
-                            mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+            opt_temp = last_opt_results['ga']['temp']
+            opt_fan  = last_opt_results['ga']['fan']
+            opt_mode = last_opt_results['ga'].get('mode', 'COOL')
+            if 16 <= opt_temp <= 30 and opt_fan >= 1:
+                now = time.time()
+                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
+                    _last_adaptive_ac_apply = now
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
         # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
-        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
-            opt_b1, opt_b2 = _safe_lamp_brightness(last_opt_results['pso'].get('brightness1', 0), last_opt_results['pso'].get('brightness2', 0))
-            if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                # Update locally so auto-ON block doesn't re-fire before ESP32 confirms
-                mqtt_data['lamp']['brightness1'] = opt_b1
-                mqtt_data['lamp']['brightness2'] = opt_b2
-                mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                _record_lamp_apply(opt_b1, opt_b2)
+        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
+            person_present = _person_present_recently_lamp()
+            raw_b1 = last_opt_results['pso'].get('brightness1', 0)
+            raw_b2 = last_opt_results['pso'].get('brightness2', 0)
+            if person_present:
+                # Person detected: apply with safety floor
+                opt_b1, opt_b2 = _safe_lamp_brightness(raw_b1, raw_b2)
+                if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
+                    mqtt_data['lamp']['brightness1'] = opt_b1
+                    mqtt_data['lamp']['brightness2'] = opt_b2
+                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+                    _record_lamp_apply(opt_b1, opt_b2)
+            else:
+                # No person: PSO recommends brightness=0, allow sending 0 to turn off lamp
+                opt_b1, opt_b2 = int(raw_b1), int(raw_b2)
+                if _should_apply_lamp(opt_b1, opt_b2):
+                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
+                    mqtt_data['lamp']['brightness1'] = opt_b1
+                    mqtt_data['lamp']['brightness2'] = opt_b2
+                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+                    _record_lamp_apply(opt_b1, opt_b2)
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
@@ -1387,7 +1521,7 @@ def camera_detection_loop():
                 mqtt_data['camera']['count'] = person_count
                 mqtt_data['camera']['confidence'] = int(confidence * 100)
                 # Sync to opt_sensor_data so PSO fitness function uses current local YOLO result
-                update_opt_sensor_data(person_detected=person_count > 0)
+                update_opt_sensor_data(person_detected=person_count > 0, person_count=person_count)
                 
                 # * Smart auto ON/OFF -- only on YOLO frames
                 handle_person_based_control(person_count)
@@ -1612,7 +1746,8 @@ def on_message(client, userdata, msg):
             })
             # Save lamp data to InfluxDB
             save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
-            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3)
+            update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3,
+                                    curr_brightness1=b1, curr_brightness2=b2)
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -1657,7 +1792,8 @@ def on_message(client, userdata, msg):
                 global _last_person_confirmed_time
                 _last_person_confirmed_time = time.time()
             socketio.emit('mqtt_update', {'type': 'camera', 'data': mqtt_data['camera']})
-            update_opt_sensor_data(person_detected=person_from_mqtt)
+            update_opt_sensor_data(person_detected=person_from_mqtt,
+                                   person_count=int(payload.get('count', 1 if person_from_mqtt else 0)))
             # Track device status
             device_last_seen['camera']['last_seen'] = datetime.now()
             device_last_seen['camera']['status'] = 'online'
@@ -1684,7 +1820,9 @@ def on_message(client, userdata, msg):
                 'ga_temp': float(mqtt_data['system']['ga_temp']),
                 'ga_fan': float(mqtt_data['system']['ga_fan']),
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
-                'combined_fitness': float(mqtt_data['system']['ga_fitness'] + mqtt_data['system']['pso_fitness']) / 2
+                # PSO is minimize (error), GA is maximize — normalize before combining
+                'combined_fitness': float(mqtt_data['system']['ga_fitness']) * 0.5
+                                    + max(0.0, 100.0 - float(mqtt_data['system']['pso_fitness']) / 100.0) * 0.5
             })
             # AUTO-APPLY AC — only if ga_solution was present in this payload
             if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
@@ -1871,6 +2009,19 @@ def get_influx_data(measurement, field, hours=1, device_tag=None):
         return []
 
 # ==================== AUTHENTICATION ====================
+from functools import wraps
+
+def admin_required(f):
+    """Decorator: restrict route to admin role only."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('logged_in'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if session.get('role') != 'admin':
+            return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
 @app.before_request
 def require_login():
     public_paths = ['/login', '/api/optimization/update']
@@ -1887,18 +2038,29 @@ def require_login():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username', '')
+        username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
-        if username == AUTH_USERNAME and password == AUTH_PASSWORD:
+        user = USERS.get(username)
+        if user and user['password'] == password:
             session['logged_in'] = True
+            session['username'] = username
+            session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid credentials')
+        return render_template_string(LOGIN_TEMPLATE, error='Username atau password salah')
     return render_template_string(LOGIN_TEMPLATE, error=None)
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect('/login')
+
+@app.route('/api/auth/role')
+def get_auth_role():
+    """Return current session role for frontend."""
+    return jsonify({
+        'role': session.get('role', 'user'),
+        'username': session.get('username', ''),
+    })
 
 # ==================== API ROUTES ====================
 @app.route('/')
@@ -1925,6 +2087,7 @@ def camera_status():
         return jsonify({'status': 'error'})
 
 @app.route('/api/camera/restart', methods=['POST'])
+@admin_required
 def restart_camera():
     global camera
     with camera_lock:
@@ -1939,6 +2102,7 @@ def restart_camera():
             return jsonify({'status': 'error', 'message': 'Camera failed to restart'}), 500
 
 @app.route('/api/camera/toggle', methods=['POST'])
+@admin_required
 def toggle_camera():
     global camera_enabled, camera
     camera_enabled = not camera_enabled
@@ -2141,6 +2305,7 @@ def rec_data_api():
 
 # ==================== EXPORT CSV DARI INFLUXDB ====================
 @app.route('/api/export/csv')
+@admin_required
 def export_csv_from_db():
     """
     Query InfluxDB by date range and stream a CSV file.
@@ -2184,11 +2349,25 @@ def export_csv_from_db():
 
     try:
         _, _, query_api = _get_influx_client()
-        # Query each field separately then merge by timestamp
+        # Query each field separately then merge by timestamp.
+        # For occupancy: aggregate to 1-hour buckets (max person_count, mean confidence)
+        # to keep CSV compact and meaningful (one row per hour).
+        # For other types: export raw records as-is.
         rows_by_ts = {}
         for field in fields:
             tag_filter = f'|> filter(fn: (r) => r["{tag_key}"] == "{tag_val}")\n' if tag_key else ''
-            q = f'''
+            if dtype == 'occupancy':
+                agg_fn = 'max' if field == 'person_count' else 'mean'
+                q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_iso}, stop: {end_iso})
+  |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+  |> filter(fn: (r) => r["_field"] == "{field}")
+  {tag_filter}  |> aggregateWindow(every: 1h, fn: {agg_fn}, createEmpty: false)
+  |> yield(name: "agg")
+'''
+            else:
+                q = f'''
 from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {start_iso}, stop: {end_iso})
   |> filter(fn: (r) => r["_measurement"] == "{measurement}")
@@ -2484,6 +2663,7 @@ def energy_compare():
         return jsonify({'error': str(e), 'before': [], 'after': [], 'summary': {}}), 500
 
 @app.route('/api/energy/export-csv')
+@admin_required
 def energy_export_csv():
     """Export data energi sebagai CSV — dari ring buffer realtime atau PHP proxy.
     ?device=ac|lamp|all   (default: all)
@@ -2668,13 +2848,72 @@ def ml_status():
         'pso_fitness': mqtt_data['system'].get('pso_fitness', 0),
         'ga_temp': mqtt_data['system'].get('ga_temp', 0),
         'ga_fan': mqtt_data['system'].get('ga_fan', 0),
+        'ga_mode': mqtt_data['system'].get('ga_mode', 'COOL'),
         'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
+        'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
+        'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
         'ga_history': mqtt_data['system'].get('ga_history', []),
         'pso_history': mqtt_data['system'].get('pso_history', [])
     })
 
+@app.route('/api/pso/export-csv')
+@admin_required
+def pso_export_csv():
+    """Export laporan hasil PSO dalam format CSV informatif."""
+    import io, csv as csv_mod
+    pso = last_opt_results.get('pso', {})
+    if not pso or pso.get('brightness1', 0) == 0:
+        return jsonify({'error': 'Belum ada hasil PSO. Jalankan PSO terlebih dahulu.'}), 404
+
+    params = pso.get('params', pso_params)
+    run_time = pso.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
+    b1 = pso.get('brightness1', 0)
+    b2 = pso.get('brightness2', 0)
+    initial_err = pso.get('initial_error', '-')
+    final_err = pso.get('final_error', pso.get('fitness', '-'))
+    lux_achieved = pso.get('lux_achieved', '-')
+    target_lux = pso.get('target_lux', 350.0)
+    history = pso.get('stats', [])
+
+    buf = io.StringIO()
+    wr = csv_mod.writer(buf)
+
+    # --- Laporan header ---
+    wr.writerow(['=== LAPORAN HASIL PSO - SMART ROOM ==='])
+    wr.writerow([])
+    wr.writerow(['Tanggal run', run_time])
+    wr.writerow(['Parameter PSO',
+                f"swarm={params.get('swarm_size', '-')}, "
+                f"iterasi={params.get('iterations', '-')}, "
+                f"w={params.get('w', '-')}, "
+                f"c1={params.get('c1', '-')}, "
+                f"c2={params.get('c2', '-')}"])
+    wr.writerow(['Error awal', f"{initial_err} lux^2"])
+    wr.writerow(['Error akhir', f"{final_err} lux^2"])
+    wr.writerow(['PWM1 optimal', f"{b1}%"])
+    wr.writerow(['PWM2 optimal', f"{b2}%"])
+    wr.writerow(['Lux tercapai (estimasi)', f"{lux_achieved} lux"])
+    wr.writerow(['Target lux', f"{target_lux} lux"])
+    wr.writerow([])
+
+    # --- Riwayat konvergensi ---
+    if history:
+        wr.writerow(['=== RIWAYAT KONVERGENSI ==='])
+        wr.writerow(['Iterasi', 'Lux Error (lux^2)'])
+        for idx, val in enumerate(history, 1):
+            wr.writerow([idx, round(val, 2)])
+
+    output = buf.getvalue().encode('utf-8-sig')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return Response(
+        output,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=pso_report_{ts}.csv'}
+    )
+
 @app.route('/api/ml/run', methods=['POST'])
+@admin_required
 def ml_run():
     """Trigger optimization run (GA, PSO, or both) — runs embedded engine"""
     try:
@@ -3916,6 +4155,8 @@ HTML_TEMPLATE = '''
         .theme-divider {
             border: none; border-top: 1px solid var(--border); margin: 15px 0;
         }
+        /* Role-based access: hide admin-only nav items for user role */
+        body.role-user .admin-only { display: none !important; }
         /* Light theme adjustments */
         .slider {
             background: var(--border);
@@ -3937,22 +4178,28 @@ HTML_TEMPLATE = '''
         <div class="logo">
             Smart Room
         </div>
+        <!-- Role badge -->
+        <div id="role-badge" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.25);">
+            <i class="fas fa-user-circle" style="color:#6366f1;font-size:16px;"></i>
+            <span id="role-username" style="color:var(--text-primary);font-size:13px;font-weight:600;">-</span>
+            <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
+        </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
             <span>AC Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('dashboard-lamp')">
             <span>Lamp Dashboard</span>
         </div>
-        <div class="nav-item" onclick="showPage('ac-analytics')">
+        <div class="nav-item admin-only" onclick="showPage('ac-analytics')">
             <span>AC Analytics</span>
         </div>
-        <div class="nav-item" onclick="showPage('lamp-analytics')">
+        <div class="nav-item admin-only" onclick="showPage('lamp-analytics')">
             <span>Lamp Analytics</span>
         </div>
-        <div class="nav-item" onclick="showPage('camera')">
+        <div class="nav-item admin-only" onclick="showPage('camera')">
             <span>Camera</span>
         </div>
-        <div class="nav-item" onclick="showPage('energy')">
+        <div class="nav-item admin-only" onclick="showPage('energy')">
             <span>Energy Usage</span>
         </div>
         <div class="nav-item" onclick="showPage('control-ac')">
@@ -3961,13 +4208,13 @@ HTML_TEMPLATE = '''
         <div class="nav-item" onclick="showPage('control-lamp')">
             <span>Lamp Control</span>
         </div>
-        <div class="nav-item" onclick="showPage('ml-optimization')">
+        <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
             <span>ML Optimization</span>
         </div>
-        <div class="nav-item" onclick="showPage('logs')">
+        <div class="nav-item admin-only" onclick="showPage('logs')">
             <span>System Logs</span>
         </div>
-        <div class="nav-item" onclick="showPage('occupancy-feedback')">
+        <div class="nav-item admin-only" onclick="showPage('occupancy-feedback')">
             <span>Occupancy Trend & Feedback</span>
         </div>
         <hr class="theme-divider">
@@ -5333,7 +5580,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
-                    <div class="stat-change"><span>Best Fitness</span></div>
+                    <div class="stat-change"><span>Lux Error (lower = better)</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -5385,9 +5632,9 @@ HTML_TEMPLATE = '''
             <!-- PSO Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO Fitness Convergence (Lamp Optimization)</div>
+                    <div class="chart-title">PSO Error Convergence — Lamp (lower = better, target 350 lux)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('psoFitness', 'PSO Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
                             Run PSO
@@ -5639,6 +5886,26 @@ HTML_TEMPLATE = '''
         }
         
         var charts = {};
+
+        // ==================== ROLE-BASED ACCESS CONTROL ====================
+        var userRole = 'admin'; // default until /api/auth/role responds
+        var ADMIN_PAGES = ['ac-analytics','lamp-analytics','camera','energy','ml-optimization','logs','occupancy-feedback'];
+
+        function applyRoleRestrictions(role, username) {
+            userRole = role;
+            var uEl = document.getElementById('role-username');
+            var lEl = document.getElementById('role-label');
+            if (uEl) uEl.textContent = username || role;
+            if (lEl) {
+                lEl.textContent = role === 'admin' ? 'ADMIN' : 'USER';
+                lEl.style.background = role === 'admin' ? '#6366f1' : '#10b981';
+            }
+            if (role !== 'admin') {
+                document.body.classList.add('role-user');
+            } else {
+                document.body.classList.remove('role-user');
+            }
+        }
         var chartRanges = {
             temp: 1,
             hum: 1,
@@ -5926,6 +6193,29 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
+            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
+            // ML charts (gaFitness, psoFitness, comparison) are initialized separately via initMLCharts()
+        }
+
+        function initMLCharts() {
+            function makeOpts(showLegend) {
+                var opts = {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    plugins: { legend: { display: !!showLegend } },
+                    scales: {
+                        y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
+                    }
+                };
+                if (showLegend) {
+                    opts.plugins.legend.labels = { color: '#94a3b8', font: { size: 12 } };
+                }
+                return opts;
+            }
+            if (charts.gaFitness) { try { charts.gaFitness.destroy(); } catch(e){} charts.gaFitness = null; }
+            if (charts.psoFitness) { try { charts.psoFitness.destroy(); } catch(e){} charts.psoFitness = null; }
+            if (charts.comparison) { try { charts.comparison.destroy(); } catch(e){} charts.comparison = null; }
+
             charts.gaFitness = new Chart(document.getElementById('gaFitnessChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
@@ -5933,7 +6223,7 @@ HTML_TEMPLATE = '''
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'PSO Best Fitness', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
+                data: { labels: [], datasets: [{ label: 'PSO Error (\u2193 better)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
@@ -5946,8 +6236,6 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
-
-            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -5962,6 +6250,7 @@ HTML_TEMPLATE = '''
                         s.onload = function() {
                             console.log('[CHART] Fallback Chart.js loaded');
                             try { initCharts(); } catch(e) { console.error('[CHART] init after fallback failed:', e); }
+                            try { initMLCharts(); } catch(e) { console.error('[CHART] initML after fallback failed:', e); }
                             try { loadAllEnergyCharts(); } catch(e) { console.error('[CHART] load after fallback failed:', e); }
                         };
                         s.onerror = function() {
@@ -5975,12 +6264,28 @@ HTML_TEMPLATE = '''
                 return false;
             }
 
-            if (!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) {
+            // Only call initCharts() if core charts (temp, hum) are also missing — meaning initCharts never ran.
+            // If charts.temp already exists, initCharts() already ran and calling it again will crash on duplicate canvases.
+            if ((!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) && !charts.temp) {
                 try {
                     initCharts();
                 } catch (e) {
                     console.error('[CHART] initCharts retry failed:', e);
                     return false;
+                }
+            }
+
+            // ML charts are independent — init separately to avoid destroying already-created canvases
+            // Guard: only init when canvas is visible (has positive width), to avoid 0px Chart.js failures
+            if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                var mlCanvas = document.getElementById('gaFitnessChart');
+                if (mlCanvas && mlCanvas.offsetWidth > 0) {
+                    try {
+                        initMLCharts();
+                    } catch (e) {
+                        console.error('[CHART] initMLCharts failed:', e);
+                        return false;
+                    }
                 }
             }
 
@@ -6593,6 +6898,11 @@ HTML_TEMPLATE = '''
 
         function showPage(pageId) {
             console.log('[NAV] showPage called:', pageId);
+            // Block user role from accessing admin-only pages
+            if (userRole !== 'admin' && ADMIN_PAGES.indexOf(pageId) !== -1) {
+                console.warn('[NAV] Access denied for role:', userRole, '→ page:', pageId);
+                pageId = 'dashboard-ac';
+            }
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             
@@ -6626,7 +6936,31 @@ HTML_TEMPLATE = '''
                 try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
+                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ML ensureCharts error:', e); }
                 try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
+                // Canvas in hidden page has 0px dimensions — resize after page is visible
+                setTimeout(function() {
+                    ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                        try {
+                            if (charts[k] && typeof charts[k].resize === 'function') {
+                                charts[k].resize();
+                                charts[k].update('none');
+                            }
+                        } catch(e) {}
+                    });
+                    // Refresh data after resize so charts render with actual values
+                    try { refreshMLData(); } catch(e) {}
+                }, 200);
+            }
+            if (pageId === 'ac-analytics') {
+                ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
+                    try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
+                });
+            }
+            if (pageId === 'lamp-analytics') {
+                ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
+                    try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
+                });
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -6706,8 +7040,18 @@ HTML_TEMPLATE = '''
         }
 
         function updateMLChart(chartName, history, algo) {
+            // Re-init ML charts if not yet created - call initMLCharts directly, NOT ensureChartsReady
+            // (ensureChartsReady calls initCharts which crashes on already-existing canvases)
+            if (!charts[chartName]) {
+                var mlCanvas = document.getElementById('gaFitnessChart');
+                if (mlCanvas && mlCanvas.offsetWidth > 0) {
+                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); }
+                } else {
+                    return; // ML page not visible yet, skip
+                }
+            }
             const chart = charts[chartName];
-            if (!chart) return;
+            if (!chart || !history || history.length === 0) return;
 
             chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
             chart.data.datasets[0].data = history;
@@ -6743,7 +7087,8 @@ HTML_TEMPLATE = '''
                 ga_fan: data.ga_fan || '--',
                 pso_fitness: data.pso_fitness || 0,
                 pso_brightness: data.pso_brightness || '--',
-                combined: ((data.ga_fitness || 0) + (data.pso_fitness || 0)) / 2
+                // GA maximize (score) vs PSO minimize (error) — normalize PSO before combining
+                combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100 - (data.pso_fitness || 0) / 100) * 0.5
             };
             mlHistory.unshift(entry);
             if (mlHistory.length > 50) mlHistory.pop();
@@ -6761,16 +7106,17 @@ HTML_TEMPLATE = '''
             }
 
             tbody.innerHTML = mlHistory.map(e => {
-                const getBadge = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
+                const getBadgeGA  = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
+                const getBadgePSO = (err) => err <= 100 ? 'good' : err <= 500 ? 'mid' : 'low'; // PSO: lower error = better
                 return '<tr>' +
                     '<td>' + e.run + '</td>' +
                     '<td>' + e.time + '</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgeGA(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.ga_temp + '\u00b0C</td>' +
                     '<td>' + e.ga_fan + '</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgePSO(e.pso_fitness) + '">' + e.pso_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.pso_brightness + '%</td>' +
-                    '<td><span class="ml-badge ' + getBadge(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
+                    '<td><span class="ml-badge ' + getBadgeGA(e.combined) + '">' + e.combined.toFixed(2) + '</span></td>' +
                 '</tr>';
             }).join('');
         }
@@ -6820,6 +7166,28 @@ HTML_TEMPLATE = '''
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
+        }
+
+        function exportFeedback() {
+
+        function exportPSOReport() {
+            fetch('/api/pso/export-csv')
+                .then(function(r) {
+                    if (!r.ok) {
+                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                    }
+                    return r.blob();
+                })
+                .then(function(blob) {
+                    var ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '');
+                    var link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'pso_report_' + ts + '.csv';
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                    showToast('Laporan PSO berhasil diexport!', 'success');
+                })
+                .catch(function(e) { showToast('Export PSO gagal: ' + e.message, 'error'); });
         }
 
         function exportFeedback() {
@@ -9676,6 +10044,10 @@ HTML_TEMPLATE = '''
 
         window.onload = function() {
             console.log('[INIT] Smart Room Dashboard Loading...');
+            // Fetch role first so nav is hidden before user sees it
+            fetch('/api/auth/role').then(function(r){ return r.json(); }).then(function(d){
+                applyRoleRestrictions(d.role, d.username);
+            }).catch(function(){ applyRoleRestrictions('user', ''); });
             try {
                 var ovInit = document.getElementById('sidebar-overlay');
                 if (ovInit) {
@@ -9697,7 +10069,7 @@ HTML_TEMPLATE = '''
                 });
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
-            try { ensureChartsReady(); } catch(e) { console.error('[ERROR] ensureChartsReady:', e); }
+            // ML charts initialized lazily on first showPage('ml-optimization') — canvas must be visible first
             // Restore recording previews from sessionStorage
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
