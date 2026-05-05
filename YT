@@ -209,7 +209,7 @@ load_energy_recording()
 # Optimization bounds
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
-OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
+OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 255  # PWM range 0-255 sesuai spesifikasi
 
 # AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
 OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
@@ -233,11 +233,11 @@ optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
     'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
-    'pso': {'fitness': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
+    'pso': {'fitness': 0, 'pwm1': 0, 'pwm2': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
 }
 
 ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 25, 'iterations': 50, 'w': 0.7, 'c1': 1.8, 'c2': 2.2}
+pso_params = {'swarm_size': 15, 'iterations': 30, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # sesuai spesifikasi
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -362,31 +362,34 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
 
     return max(0.0, round(fitness, 2))
 
-def calculate_lamp_fitness_2d(brightness1, brightness2):
+def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
-    Formula dari PDF:
-        Error_lux = ((L1 - TARGET)^2 + (L2 - TARGET)^2 + (L3 - TARGET)^2) / 3
-        Fitness    = Error_lux
-    Target 350 lux saat ada orang; 0 lux saat kosong (lampu mati).
-    Lux diestimasi dengan delta model dari brightness saat ini.
+    Sesuai spesifikasi:
+        Fitness = Error_lux = ((L1 - 350)^2 + (L2 - 350)^2 + (L3 - 350)^2) / 3
+    Parameter pwm1, pwm2 dalam range 0-255.
+    Lux diestimasi dengan delta model dari PWM saat ini ke kandidat.
     """
-    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
-    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
-    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
+    lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+    lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+    lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX = 350.0 if person_detected else 0.0
 
-    # Delta-based lux estimation: perubahan dari brightness saat ini
-    curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
-    curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
-    delta1 = (brightness1 - curr_b1) * 4.0   # ~4 lux per 1% brightness
-    delta2 = (brightness2 - curr_b2) * 4.0
-    # Zone model: lamp1 → sensor1/2, lamp2 → sensor2/3
+    # Konversi brightness saat ini (0-100%) ke PWM (0-255)
+    curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
+    curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+
+    # Delta lux: ~1.57 lux per 1 unit PWM (setara 4 lux per 1% brightness)
+    gain_per_pwm = 4.0 / 2.55
+    delta1 = (pwm1 - curr_pwm1) * gain_per_pwm
+    delta2 = (pwm2 - curr_pwm2) * gain_per_pwm
+
+    # Zone model: lamp1 -> sensor1/2, lamp2 -> sensor2/3
     est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
     est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
     est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
 
-    # Rumus PDF: rata-rata kuadrat selisih dari target
+    # Rumus sesuai spesifikasi
     error = ((est_lux1 - TARGET_LUX) ** 2
              + (est_lux2 - TARGET_LUX) ** 2
              + (est_lux3 - TARGET_LUX) ** 2) / 3.0
@@ -584,21 +587,21 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: minimizes Error_lux = ((L1-TARGET)^2 + (L2-TARGET)^2 + (L3-TARGET)^2) / 3
-    Sesuai rumus PDF. Gbest = partikel dengan error terkecil.
+    """2D PSO: minimizes Error_lux = ((L1-350)^2 + (L2-350)^2 + (L3-350)^2) / 3
+    Sesuai spesifikasi. X = [PWM1, PWM2], range 0-255.
     Persamaan update:
         V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
         X_i(t+1) = X_i(t) + V_i(t+1)
+    Output: list [pwm1, pwm2] dalam PWM 0-255 (konversi ke % dilakukan oleh caller).
     """
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
     w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    w_end = 0.3
-    DIM = 2  # [PWM1, PWM2] sesuai PDF
-    max_vel = 15
+    DIM = 2  # [PWM1, PWM2]
+    max_vel = 60  # proporsional dengan range 0-255
 
-    # Inisialisasi posisi dan kecepatan secara acak (sesuai PDF)
-    # X_i = X_min + rand() * (X_max - X_min)
+    # Inisialisasi posisi dan kecepatan secara acak
+    # X_i = random(0, 255)
     positions = [
         [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
          for _ in range(DIM)]
@@ -606,16 +609,18 @@ def run_pso_optimization(verbose=False):
     ]
     velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
 
-    # Smart seeding dari hasil sebelumnya
+    # Smart seeding dari hasil sebelumnya (brightness % -> PWM)
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
-    seed_b1 = last_opt_results['pso'].get('brightness1', 0)
-    seed_b2 = last_opt_results['pso'].get('brightness2', 0)
-    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)
-    if seed_b1 > 0 and not (person_now and seed_is_dark):
-        positions[0] = [seed_b1, seed_b2]
+    seed_b1 = last_opt_results['pso'].get('brightness1', 0)  # 0-100%
+    seed_b2 = last_opt_results['pso'].get('brightness2', 0)  # 0-100%
+    seed_pwm1 = int(seed_b1 * 255 / 100)
+    seed_pwm2 = int(seed_b2 * 255 / 100)
+    seed_is_dark = (seed_pwm1 <= 13 and seed_pwm2 <= 13)
+    if seed_pwm1 > 0 and not (person_now and seed_is_dark):
+        positions[0] = [seed_pwm1, seed_pwm2]
         for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b1 + random.randint(-10, 10))),
-                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b2 + random.randint(-10, 10)))]
+            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm1 + random.randint(-26, 26))),
+                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm2 + random.randint(-26, 26)))]
 
     # Pbest = posisi terbaik tiap partikel (error terkecil)
     pb_pos = [p[:] for p in positions]
@@ -631,14 +636,11 @@ def run_pso_optimization(verbose=False):
     prev_g_fit = float('inf')  # minimize: awal infinity
 
     for it in range(iterations):
-        # Inertia weight linear decay: w_start → w_end
-        cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
-
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
-                # Persamaan kecepatan (sesuai PDF)
-                velocities[i][d] = (cur_w * velocities[i][d]
+                # Update kecepatan: V = w*V + c1*r1*(Pbest-X) + c2*r2*(Gbest-X)
+                velocities[i][d] = (w_start * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
                     + c2 * r2 * (g_pos[d] - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
@@ -678,9 +680,9 @@ def run_pso_optimization(verbose=False):
                     g_fit, g_pos = new_fit, positions[si][:]
             stagnation_counter = 0
 
-    # Gbest = [PWM1, PWM2] optimal (sesuai PDF)
+    # Kembalikan Gbest dalam PWM (0-255) langsung — konversi ke % dilakukan oleh caller
     initial_error = fitness_history[0] if fitness_history else g_fit
-    return g_pos, g_fit, fitness_history, initial_error
+    return list(g_pos), g_fit, fitness_history, initial_error
 
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
@@ -719,7 +721,12 @@ def run_optimization_cycle(algo='both'):
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
-            b1, b2 = sol[0], sol[1]
+            # sol adalah PWM 0-255 langsung dari algoritma
+            pwm1_val = int(round(min(255, max(0, sol[0]))))
+            pwm2_val = int(round(min(255, max(0, sol[1]))))
+            # Konversi ke brightness % untuk MQTT/ESP32
+            b1 = round(pwm1_val * 100 / 255)
+            b2 = round(pwm2_val * 100 / 255)
             # Estimate achieved lux from optimal brightness
             person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
             target_lux = 350.0 if person_now else 0.0
@@ -735,8 +742,11 @@ def run_optimization_cycle(algo='both'):
             est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
             lux_achieved = round((est1 + est2 + est3) / 3.0, 1)
             last_opt_results['pso'] = {
-                'fitness': fit, 'brightness': int((b1 + b2) / 2),
-                'brightness1': b1, 'brightness2': b2, 'stats': hist,
+                'fitness': fit,
+                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
+                'brightness': int((b1 + b2) / 2),           # rata-rata brightness % untuk referensi
+                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 untuk MQTT/ESP32
+                'stats': hist,
                 'initial_error': round(initial_err, 2),
                 'final_error': round(fit, 2),
                 'lux_achieved': lux_achieved,
@@ -750,7 +760,7 @@ def run_optimization_cycle(algo='both'):
                     'c2': pso_params['c2'],
                 },
             }
-            print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
+            print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
         optimization_run_count += 1
         # Update mqtt_data system
@@ -761,6 +771,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
+            'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
             'pso_brightness1': last_opt_results['pso'].get('brightness1', 0),
             'pso_brightness2': last_opt_results['pso'].get('brightness2', 0),
@@ -775,6 +787,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
+            'pso_pwm1': float(last_opt_results['pso'].get('pwm1', 0)),
+            'pso_pwm2': float(last_opt_results['pso'].get('pwm2', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
@@ -836,7 +850,7 @@ def run_optimization_cycle(algo='both'):
                 'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
             }
         if algo in ('pso', 'both'):
-            status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)}
+            status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
         socketio.emit('ml_status', status_payload)
         return True
     except Exception as e:
@@ -874,6 +888,8 @@ def persist_opt_results(algo):
                 return
             fields = {
                 'fitness':        float(pso['fitness']),
+                'pwm1':           float(pso.get('pwm1', 0)),
+                'pwm2':           float(pso.get('pwm2', 0)),
                 'brightness':     float(pso.get('brightness', 0)),
                 'brightness1':    float(pso.get('brightness1', 0)),
                 'brightness2':    float(pso.get('brightness2', 0)),
@@ -921,11 +937,15 @@ def restore_opt_results():
                 mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
                 print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
+                b1_restored = int(rec_map.get('brightness1', 0))
+                b2_restored = int(rec_map.get('brightness2', 0))
                 last_opt_results['pso'].update({
                     'fitness':       float(rec_map.get('fitness', 0)),
+                    'pwm1':          int(rec_map.get('pwm1', round(b1_restored * 255 / 100))),
+                    'pwm2':          int(rec_map.get('pwm2', round(b2_restored * 255 / 100))),
                     'brightness':    int(rec_map.get('brightness', 0)),
-                    'brightness1':   int(rec_map.get('brightness1', 0)),
-                    'brightness2':   int(rec_map.get('brightness2', 0)),
+                    'brightness1':   b1_restored,
+                    'brightness2':   b2_restored,
                     'initial_error': float(rec_map.get('initial_error', 0)),
                     'final_error':   float(rec_map.get('final_error', 0)),
                     'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
@@ -934,10 +954,12 @@ def restore_opt_results():
                     'stats':         [],
                 })
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
+                mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
+                mqtt_data['system']['pso_pwm2']       = last_opt_results['pso']['pwm2']
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
-                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['brightness1']}% PWM2={last_opt_results['pso']['brightness2']}% error={last_opt_results['pso']['fitness']:.2f}")
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
 
@@ -1088,7 +1110,7 @@ mqtt_data = {
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
-    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
+    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
 }
@@ -2040,7 +2062,11 @@ def on_message(client, userdata, msg):
                         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0) + 1,
                         'ga_temp': ga_sol.get('temperature', payload.get('ga_temp', mqtt_data['system'].get('ga_temp', 0))),
                         'ga_fan': ga_sol.get('fan_speed', payload.get('ga_fan', mqtt_data['system'].get('ga_fan', 0))),
+                        'pso_pwm1': pso_sol.get('pwm1', payload.get('pso_pwm1', mqtt_data['system'].get('pso_pwm1', 0))),
+                        'pso_pwm2': pso_sol.get('pwm2', payload.get('pso_pwm2', mqtt_data['system'].get('pso_pwm2', 0))),
                         'pso_brightness': pso_sol.get('brightness', payload.get('pso_brightness', mqtt_data['system'].get('pso_brightness', 0))),
+                        'pso_brightness1': pso_sol.get('brightness1', payload.get('pso_brightness1', mqtt_data['system'].get('pso_brightness1', 0))),
+                        'pso_brightness2': pso_sol.get('brightness2', payload.get('pso_brightness2', mqtt_data['system'].get('pso_brightness2', 0))),
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
@@ -3026,6 +3052,8 @@ def ml_status():
         'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
         'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
         'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
+        'pso_pwm1': mqtt_data['system'].get('pso_pwm1', 0),
+        'pso_pwm2': mqtt_data['system'].get('pso_pwm2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
         'ga_history': mqtt_data['system'].get('ga_history', []),
         'pso_history': mqtt_data['system'].get('pso_history', [])
@@ -3149,6 +3177,9 @@ def pso_export_csv():
     buf = io.StringIO()
     wr = csv_mod.writer(buf)
 
+    pwm1 = pso.get('pwm1', int(round(b1 * 255 / 100)))
+    pwm2 = pso.get('pwm2', int(round(b2 * 255 / 100)))
+
     # --- Laporan header ---
     wr.writerow(['=== LAPORAN HASIL PSO - SMART ROOM ==='])
     wr.writerow([])
@@ -3161,8 +3192,10 @@ def pso_export_csv():
                 f"c2={params.get('c2', '-')}"])
     wr.writerow(['Error awal', f"{initial_err} lux^2"])
     wr.writerow(['Error akhir', f"{final_err} lux^2"])
-    wr.writerow(['PWM1 optimal', f"{b1}%"])
-    wr.writerow(['PWM2 optimal', f"{b2}%"])
+    wr.writerow(['PWM1 optimal (0-255)', f"{pwm1}"])
+    wr.writerow(['PWM2 optimal (0-255)', f"{pwm2}"])
+    wr.writerow(['Brightness1 (% untuk ESP32)', f"{b1}%"])
+    wr.writerow(['Brightness2 (% untuk ESP32)', f"{b2}%"])
     wr.writerow(['Lux tercapai (estimasi)', f"{lux_achieved} lux"])
     wr.writerow(['Target lux', f"{target_lux} lux"])
     wr.writerow([])
@@ -3907,7 +3940,7 @@ HTML_TEMPLATE = '''
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Smart Room IoT Dashboard</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
@@ -3927,7 +3960,7 @@ HTML_TEMPLATE = '''
         }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
-            color: var(--text-primary); overflow-x: hidden;
+            color: var(--text-primary); overflow-x: hidden; -webkit-tap-highlight-color: transparent;
         }
         .sidebar {
             position: fixed; left: 0; top: 0; width: 260px; height: 100vh;
@@ -3939,7 +3972,7 @@ HTML_TEMPLATE = '''
         .nav-item {
             padding: 12px 16px; margin: 8px 0; border-radius: 8px; cursor: pointer;
             transition: all 0.3s; display: flex; align-items: center; gap: 12px;
-            color: var(--text-secondary);
+            color: var(--text-secondary); touch-action: manipulation;
         }
         .nav-item:hover {
             background: var(--bg-card-hover); color: var(--text-primary);
@@ -4060,7 +4093,7 @@ HTML_TEMPLATE = '''
         .chart-option-btn {
             padding: 8px 16px; border: 1px solid var(--border); background: transparent;
             color: var(--text-secondary); border-radius: 6px; cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.3s; touch-action: manipulation;
         }
         .chart-option-btn:hover {
             background: var(--bg-card-hover); color: var(--text-primary);
@@ -4180,6 +4213,7 @@ HTML_TEMPLATE = '''
         .btn {
             padding: 12px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
             cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px;
+            touch-action: manipulation;
         }
         .btn-primary {
             background: var(--primary); color: white;
@@ -4362,32 +4396,118 @@ HTML_TEMPLATE = '''
         .person-badge.not-detected {
             background: linear-gradient(135deg, #64748b, #475569); color: rgba(255,255,255,0.7);
         }
+        /* ===== MOBILE (≤ 768px) ===== */
         @media (max-width: 768px) {
-        .sidebar {
-            transform: translateX(-100%); transition: transform 0.3s ease; z-index: 2000;
-        }
+            /* Sidebar slide-in */
+            .sidebar {
+                transform: translateX(-100%); transition: transform 0.3s ease; z-index: 2000;
+                width: 240px;
+            }
             .sidebar.open { transform: translateX(0); }
-            .main-content { margin-left: 0; padding: 15px; padding-top: 60px; }
-            .stats-grid { grid-template-columns: 1fr; }
-            .dashboard-grid { grid-template-columns: 1fr; }
-            .feedback-grid { grid-template-columns: 1fr; }
-            .occupancy-top { grid-template-columns: 1fr; }
             .hamburger-btn { display: flex !important; }
+
+            /* Main content area */
+            .main-content {
+                margin-left: 0; padding: 10px; padding-top: 62px;
+            }
+
+            /* Header card */
+            .header {
+                padding: 14px 14px 12px; border-radius: 10px;
+            }
+            .header h1 { font-size: 20px; margin-bottom: 4px; }
+            .header p  { font-size: 12px; }
+            #device-status-bar { gap: 6px; margin-top: 8px; }
+            .device-status-item { padding: 4px 9px; font-size: 11px; }
+
+            /* Sensor health bar */
+            #sensor-health-bar {
+                padding: 5px 10px; gap: 8px; font-size: 11px;
+            }
+            .sensor-health-badge { padding: 2px 8px; font-size: 11px; }
+
+            /* Grids → single column */
+            .stats-grid       { grid-template-columns: 1fr; gap: 10px; }
+            .dashboard-grid   { grid-template-columns: 1fr; gap: 10px; }
+            .feedback-grid    { grid-template-columns: 1fr; }
+            .occupancy-top    { grid-template-columns: 1fr; gap: 12px; }
+            .ml-param-grid    { grid-template-columns: 1fr; }
+
+            /* Stat cards */
+            .stat-card { padding: 14px; border-radius: 10px; }
+            .stat-value { font-size: 26px; }
+            .stat-icon  { width: 34px; height: 34px; font-size: 16px; }
+
+            /* Chart containers */
+            .chart-container { padding: 14px 12px; border-radius: 10px; margin-bottom: 14px; }
+            .chart-header {
+                flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 12px;
+            }
+            .chart-title { font-size: 15px; }
+            .chart-options { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+            .chart-option-btn { padding: 6px 10px; font-size: 11px; }
+
+            /* Energy page */
+            #energy .chart-container { padding: 12px 10px; }
+            #energy canvas { height: 200px !important; max-height: 200px; }
+            #energy .chart-header { flex-direction: column; align-items: flex-start; gap: 6px; }
+            #energy .chart-options { flex-wrap: wrap; gap: 5px; }
+            #energy .chart-option-btn { padding: 5px 9px; font-size: 11px; }
+
+            /* Control panels */
+            .control-panel { padding: 14px; border-radius: 10px; }
+            .control-title { font-size: 15px; }
+
+            /* Buttons */
+            .btn { padding: 10px 18px; font-size: 13px; }
+
+            /* Alert banner — full width on mobile */
+            .alert-banner {
+                top: auto; bottom: 12px;
+                left: 10px; right: 10px;
+                max-width: none; width: auto;
+                border-radius: 10px;
+            }
+
+            /* Tables — horizontal scroll */
+            .ml-table-wrap, .table-wrap {
+                overflow-x: auto; -webkit-overflow-scrolling: touch;
+            }
+            .ml-table { min-width: 520px; }
+
+            /* Logo */
+            .logo { font-size: 20px; margin-bottom: 20px; }
+
+            /* ML page stat cards */
+            #ml-optimization .stats-grid { gap: 8px; }
+
+            /* Occupancy KPI card */
+            .occupancy-kpi .kpi-value { font-size: 28px; }
         }
+
+        /* ===== EXTRA SMALL (≤ 480px) — e.g. narrow phones ===== */
+        @media (max-width: 480px) {
+            .main-content { padding: 8px; padding-top: 60px; }
+            .header h1 { font-size: 17px; }
+            .stat-value { font-size: 24px; }
+            .chart-option-btn { padding: 5px 8px; font-size: 10px; }
+            .btn { padding: 9px 14px; font-size: 12px; }
+            .hamburger-btn { width: 40px; height: 40px; font-size: 17px; top: 10px; left: 10px; }
+            .device-status-item { font-size: 10px; padding: 3px 7px; }
+            #sensor-health-bar { font-size: 10px; padding: 4px 8px; }
+        }
+
         @media (min-width: 769px) and (max-width: 1200px) {
-        .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
+            .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .occupancy-top { grid-template-columns: 1fr; }
         }
         @media (min-width: 1201px) {
-        .dashboard-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
+            .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         .hamburger-btn {
             display: none; position: fixed; top: 12px; left: 12px; z-index: 1998; width: 44px; height: 44px; border-radius: 10px;
             background: var(--primary); color: white; border: none; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+            touch-action: manipulation;
         }
         .sidebar-overlay {
             display: none; position: fixed; top: 0; left: 0;
@@ -5899,10 +6019,10 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
                     <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
-                        PWM1: <span id="ml-pso-brightness1" style="color: #6366f1; font-weight:700;">--</span>%<br>
-                        PWM2: <span id="ml-pso-brightness2" style="color: #a855f7; font-weight:700;">--</span>%
+                        PWM1: <span id="ml-pso-pwm1" style="color: #6366f1; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
+                        PWM2: <span id="ml-pso-pwm2" style="color: #a855f7; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
                     </div>
-                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>Avg: <span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>% &nbsp;|&nbsp; Lamp Level</div>
+                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>B1:<span id="ml-pso-brightness1" style="color:#6366f1;font-weight:600;">--</span>% B2:<span id="ml-pso-brightness2" style="color:#a855f7;font-weight:600;">--</span>% &nbsp;|&nbsp; Avg:<span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>/255</div>
                 </div>
 
                 <div class="stat-card">
@@ -7343,10 +7463,15 @@ HTML_TEMPLATE = '''
             setEl('ml-pso-brightness', data.pso_brightness || '--');
             var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
             var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
-            var bAvg = (b1 !== '--' && b2 !== '--') ? Math.round((parseFloat(b1) + parseFloat(b2)) / 2) : (data.pso_brightness || '--');
-            setEl('ml-pso-brightness1', b1);
-            setEl('ml-pso-brightness2', b2);
-            setEl('ml-pso-brightness-avg', bAvg);
+            // PWM values 0-255: use pso_pwm1/2 if available, else derive from brightness %
+            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : (b1 !== '--' ? Math.round(parseFloat(b1) * 255 / 100) : '--');
+            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : (b2 !== '--' ? Math.round(parseFloat(b2) * 255 / 100) : '--');
+            var pAvg = (p1 !== '--' && p2 !== '--') ? Math.round((parseFloat(p1) + parseFloat(p2)) / 2) : '--';
+            setEl('ml-pso-pwm1', p1);
+            setEl('ml-pso-pwm2', p2);
+            setEl('ml-pso-brightness1', b1 !== '--' ? b1 : '--');
+            setEl('ml-pso-brightness2', b2 !== '--' ? b2 : '--');
+            setEl('ml-pso-brightness-avg', pAvg);
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
             // Update convergence charts if history available
@@ -8938,11 +9063,10 @@ HTML_TEMPLATE = '''
                         psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
                     }
                     
-                    // PSO Brightness
+                    // PSO Brightness — pso-brightness element tidak ada di halaman utama (hanya di ML page)
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
-                        const psoBright = num(system.pso_brightness);
-                        psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
+                        psoBrightEl.textContent = Math.round(num(system.pso_brightness));
                     }
                     
                     // Optimization Runs
@@ -10095,9 +10219,12 @@ HTML_TEMPLATE = '''
                 const runs = data.data.optimization_runs || 0;
                 const gaTemp = data.data.ga_temp || 0;
                 const gaFan = data.data.ga_fan || 0;
-                const psoBrightness = data.data.pso_brightness || 0;
-                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : psoBrightness;
-                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : psoBrightness;
+                // PWM 0-255 values (actual algorithm output)
+                const psoPwm1 = data.data.pso_pwm1 != null ? data.data.pso_pwm1 : 0;
+                const psoPwm2 = data.data.pso_pwm2 != null ? data.data.pso_pwm2 : 0;
+                // Brightness % values (for MQTT/ESP32)
+                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : 0;
+                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : 0;
                 
                 // Update GA fitness display
                 const gaEl = document.getElementById('ga-fitness');
@@ -10121,23 +10248,19 @@ HTML_TEMPLATE = '''
                     if (psoFitness > 0) psoEl.style.textShadow = '0 0 10px rgba(245, 158, 11, 0.5)';
                 }
                 
-                // Update PSO solution details (Lamp brightness)
-                const psoBrightEl = document.getElementById('pso-brightness');
-                if (psoBrightEl && psoBrightness > 0) psoBrightEl.textContent = psoBrightness;
-                
                 console.log('[ML] Optimization Update:', {
                     ga: gaFitness.toFixed(2), ac_temp: gaTemp, ac_fan: gaFan,
-                    pso: psoFitness.toFixed(2), lamp_brightness: psoBrightness,
-                    runs: runs
+                    pso: psoFitness.toFixed(2), pwm1: psoPwm1, pwm2: psoPwm2,
+                    b1: psoBrightness1 + '%', b2: psoBrightness2 + '%', runs: runs
                 });
                 
-                // Show toast with specific results
+                // Show toast with actual PWM values
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (' + psoFitness.toFixed(1) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
                     showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast('PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (Error: ' + psoFitness.toFixed(2) + ')', 'success');
+                    showToast('PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -10146,7 +10269,7 @@ HTML_TEMPLATE = '''
                     addToComparisonChart(gaFitness, psoFitness);
                     addMLHistoryRow({
                         ga_fitness: gaFitness, ga_temp: gaTemp, ga_fan: gaFan,
-                        pso_fitness: psoFitness, pso_brightness: psoBrightness
+                        pso_fitness: psoFitness, pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
                     });
                 }
                 // Update GA/PSO convergence charts from history arrays
