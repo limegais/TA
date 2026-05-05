@@ -228,7 +228,7 @@ opt_sensor_data = {
 
 # Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
 AUTO_OPT_INTERVAL_AC = 300   # 5 min for AC (temperature changes slowly)
-AUTO_OPT_INTERVAL_LAMP = 180 # 3 min for Lamp (light changes faster)
+AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — selaras dengan LAMP_ADAPTIVE_DEBOUNCE agar setiap run bisa apply
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
@@ -453,26 +453,66 @@ def _fetch_mysql_power():
 def fetch_sensor_data_from_db(time_range_minutes=30):
     # Fetch real power from MySQL energy meter first
     _fetch_mysql_power()
+
+    # --- Prioritas 1: gunakan data MQTT real-time jika tersedia (paling segar) ---
+    # lux dan brightness sudah di-sync ke opt_sensor_data setiap pesan ESP32 masuk
+    # via update_opt_sensor_data() di MQTT callback. Hanya fallback ke InfluxDB
+    # jika ESP32 belum terhubung sama sekali (semua nilai nol).
+    mqtt_lux1 = mqtt_data['lamp'].get('lux1', 0)
+    mqtt_lux2 = mqtt_data['lamp'].get('lux2', 0)
+    mqtt_lux3 = mqtt_data['lamp'].get('lux3', 0)
+    mqtt_has_lux = (mqtt_lux1 > 0 or mqtt_lux2 > 0 or mqtt_lux3 > 0)
+    if mqtt_has_lux:
+        # Data MQTT sudah fresh — update opt_sensor_data langsung, skip lamp InfluxDB query
+        opt_sensor_data['lux1'] = round(float(mqtt_lux1), 1)
+        opt_sensor_data['lux2'] = round(float(mqtt_lux2), 1)
+        opt_sensor_data['lux3'] = round(float(mqtt_lux3), 1)
+        opt_sensor_data['lux']  = round((mqtt_lux1 + mqtt_lux2 + mqtt_lux3) / 3.0, 1)
+        opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
+        opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
+        print(f"[OPT] Lux dari MQTT: L1={opt_sensor_data['lux1']} L2={opt_sensor_data['lux2']} L3={opt_sensor_data['lux3']} B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
+
     try:
         _, _, query_api = _get_influx_client()
-        ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
-        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2" or r._field == "lux3" or r._field == "lux_avg") |> mean()'
+        # AC: pakai mean() — suhu berubah lambat, rata-rata masih relevan untuk GA
+        ac_query = (f'from(bucket: "{INFLUX_BUCKET}")'
+                    f' |> range(start: -{time_range_minutes}m)'
+                    f' |> filter(fn: (r) => r._measurement == "ac_sensor")'
+                    f' |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity")'
+                    f' |> mean()')
         for table in query_api.query(ac_query):
             for rec in table.records:
                 if rec.get_field() == 'temperature' and rec.get_value() is not None:
                     opt_sensor_data['temperature'] = round(float(rec.get_value()), 1)
                 elif rec.get_field() == 'humidity' and rec.get_value() is not None:
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
-        for table in query_api.query(lamp_query):
-            for rec in table.records:
-                field = rec.get_field()
-                val = rec.get_value()
-                if val is not None:
-                    if field == 'lux_avg':
-                        opt_sensor_data['lux'] = round(float(val), 1)
-                    elif field in ('lux1', 'lux2', 'lux3'):
-                        opt_sensor_data[field] = round(float(val), 1)
-        opt_sensor_data['data_source'] = 'influxdb'
+
+        # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
+        # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
+        if not mqtt_has_lux:
+            lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
+                          f' |> range(start: -{time_range_minutes}m)'
+                          f' |> filter(fn: (r) => r._measurement == "lamp_sensor")'
+                          f' |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2"'
+                          f'            or r._field == "lux3" or r._field == "lux_avg"'
+                          f'            or r._field == "brightness1" or r._field == "brightness2")'
+                          f' |> last()')
+            for table in query_api.query(lamp_query):
+                for rec in table.records:
+                    field = rec.get_field()
+                    val = rec.get_value()
+                    if val is not None:
+                        if field == 'lux_avg':
+                            opt_sensor_data['lux'] = round(float(val), 1)
+                        elif field in ('lux1', 'lux2', 'lux3'):
+                            opt_sensor_data[field] = round(float(val), 1)
+                        elif field == 'brightness1':
+                            opt_sensor_data['curr_brightness1'] = round(float(val), 1)
+                        elif field == 'brightness2':
+                            opt_sensor_data['curr_brightness2'] = round(float(val), 1)
+            print(f"[OPT] Lux dari InfluxDB (last): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+
+        opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
         print(f"[OPT] InfluxDB fetch failed: {e}, using MQTT data")
         opt_sensor_data['data_source'] = 'mqtt_fallback'
