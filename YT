@@ -227,7 +227,7 @@ opt_sensor_data = {
 }
 
 # Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
-AUTO_OPT_INTERVAL_AC = 300   # 5 min for AC (temperature changes slowly)
+AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC — selaras dengan AC_ADAPTIVE_DEBOUNCE agar setiap run GA bisa apply
 AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — selaras dengan LAMP_ADAPTIVE_DEBOUNCE agar setiap run bisa apply
 optimization_lock = threading.Lock()
 optimization_run_count = 0
@@ -255,7 +255,13 @@ def _get_temp_uniformity():
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
 def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
-    """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO"""
+    """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+    Crowd-based tier:
+      Tier 0 — 0 orang     : energy saving (27-29°C, fan 1)
+      Tier 1 — 1-2 orang   : suhu standar per waktu (24-26°C, fan adaptive)
+      Tier 2 — 3-5 orang   : pendinginan menengah (22°C, fan 3)
+      Tier 3 — >5 orang    : AC sedingin mungkin (16°C, fan 4 max)
+    """
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
     # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
@@ -264,25 +270,39 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    if person_detected:
-        target_map = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
-        sigma_map = {'morning': 2.0, 'afternoon': 1.5, 'evening': 2.0, 'night': 2.5}
-    else:
+    # ── Crowd-based temperature & fan tier ───────────────────────────────────
+    ideal_fan_crowd = None  # None = hitung dari temp_gap (hanya untuk tier 1)
+    if not person_detected:
+        # Tier 0: tidak ada orang — mode hemat energi
         target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
-        sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
-    target_temp = target_map.get(time_period, 25.0)
-    sigma = sigma_map.get(time_period, 2.0)
-    # Crowd cooling offset: more people = more body heat = lower target temp
-    # 1 person:  0°C offset (baseline)
-    # 2 people: -0.5°C
-    # 3 people: -1.0°C
-    # 4+ people: -1.5°C (capped to prevent over-cooling)
-    if person_detected and person_count >= 2:
-        crowd_offset = min(1.5, (person_count - 1) * 0.5)
-        target_temp = max(target_temp - crowd_offset, 22.0)  # never below 22°C
-        sigma = max(1.0, sigma - 0.2)  # tighter comfort band for crowded room
+        sigma_map   = {'morning': 3.0,  'afternoon': 2.5,  'evening': 3.0,  'night': 3.5}
+        target_temp = target_map.get(time_period, 28.0)
+        sigma = sigma_map.get(time_period, 3.0)
+        ideal_fan_crowd = 1.0
+    elif person_count > 5:
+        # Tier 3: >5 orang — AC sedingin mungkin, fan maksimum
+        target_temp = OPT_TEMP_MIN   # 16°C (batas bawah GA)
+        sigma = 0.8                  # band sangat ketat — GA harus pilih suhu minimum
+        ideal_fan_crowd = float(OPT_FAN_MAX)  # fan 4
+    elif person_count >= 3:
+        # Tier 2: 3-5 orang — pendinginan menengah
+        target_temp = 22.0
+        sigma = 1.5
+        ideal_fan_crowd = 3.0
+    else:
+        # Tier 1: 1-2 orang — suhu standar per waktu
+        std_target = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
+        std_sigma  = {'morning': 2.0,  'afternoon': 1.5,  'evening': 2.0,  'night': 2.5}
+        target_temp = std_target.get(time_period, 25.0)
+        if person_count == 2:
+            target_temp = max(target_temp - 0.5, 22.0)  # sedikit lebih dingin untuk 2 orang
+        sigma = std_sigma.get(time_period, 2.0)
+        # ideal_fan_crowd = None → akan dihitung dari temp_gap di bawah
+    # Trend offset: jika suhu ruangan naik cepat, turunkan target; jika turun, naikkan
+    # Untuk tier >5, trend offset tetap diterapkan tapi target sudah di minimum
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
-    adjusted_target = target_temp + trend_offset
+    adjusted_target = max(OPT_TEMP_MIN, target_temp + trend_offset) if person_count > 5 \
+                      else target_temp + trend_offset
     fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
     if humidity > 60:
         excess_factor = min(1.0, (humidity - 60) / 30.0)
@@ -294,12 +314,11 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
     temp_gap = abs(temp_room - temp_set)
-    # More people = need more airflow for comfort (crowd effect)
-    base_ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
-    if person_detected and person_count >= 3:
-        ideal_fan = min(float(OPT_FAN_MAX), base_ideal_fan + (person_count - 2) * 0.5)
+    # Ideal fan: tier 2 & 3 sudah ditetapkan di atas; tier 1 hitung dari temp_gap
+    if ideal_fan_crowd is not None:
+        ideal_fan = ideal_fan_crowd
     else:
-        ideal_fan = base_ideal_fan
+        ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
     # ── Energy efficiency ─────────────────────────────────────────────────────
     # Use real PZEM watt data when available; fall back to COP-based model.
@@ -314,7 +333,13 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
         fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
         energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
-    energy_weight = 12.0 if person_detected else 20.0
+    # >5 orang: kenyamanan & pendinginan lebih prioritas dari efisiensi energi
+    if person_count > 5:
+        energy_weight = 4.0
+    elif person_detected:
+        energy_weight = 12.0
+    else:
+        energy_weight = 20.0
     fitness += energy_ratio * energy_weight
     uniformity = _get_temp_uniformity()
     if uniformity < 0.7 and fan_speed >= 2:
@@ -329,15 +354,18 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
     if not person_detected and temp_set < 24:
         fitness -= (24.0 - temp_set) * 3.0
-    if temp_set < 18 and fan_speed == 3:
+    # Suhu < 18 dengan fan mid: penalti hanya jika bukan tier >5 (tier >5 justru inginkan ini)
+    if temp_set < 18 and fan_speed == 3 and person_count <= 5:
         fitness -= 10.0
-    # Overcooling: penalise setting more than 1.5°C below comfort target (wasteful + uncomfortable)
-    if person_detected and temp_set < target_temp - 1.5:
+    # Overcooling: penalti HANYA untuk tier 1-2 (tier >5 memang inginkan suhu minimum)
+    if person_detected and person_count <= 5 and temp_set < target_temp - 1.5:
         fitness -= (target_temp - 1.5 - temp_set) * 5.0
-    # Unnecessary high fan: penalise when room is already at/near target (noise + energy waste)
-    # Suppress penalty when crowd >= 3 since high fan is needed for circulation
+    # Unnecessary high fan: penalti hanya untuk crowd kecil
     if fan_speed >= 3 and abs(temp_room - target_temp) <= 1.0 and person_count < 3:
         fitness -= (fan_speed - 2) * 4.0
+    # Bonus: reward fan maksimum saat crowd >5 (kenyamanan pendinginan maksimal)
+    if person_count > 5 and fan_speed == OPT_FAN_MAX:
+        fitness += 12.0
 
     # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
@@ -379,10 +407,9 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
     curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
     curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
 
-    # Delta lux: ~1.57 lux per 1 unit PWM (setara 4 lux per 1% brightness)
-    gain_per_pwm = 4.0 / 2.55
-    delta1 = (pwm1 - curr_pwm1) * gain_per_pwm
-    delta2 = (pwm2 - curr_pwm2) * gain_per_pwm
+    # Delta lux: gunakan gain yang sudah dikalibrasi (mulai ~1.57, update EMA setelah tiap apply)
+    delta1 = (pwm1 - curr_pwm1) * _gain_per_pwm
+    delta2 = (pwm2 - curr_pwm2) * _gain_per_pwm
 
     # Zone model: lamp1 -> sensor1/2, lamp2 -> sensor2/3
     est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
@@ -773,10 +800,12 @@ def run_optimization_cycle(algo='both'):
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
-            curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
-            d1 = (b1 - curr_b1) * 4.0
-            d2 = (b2 - curr_b2) * 4.0
+            # Gunakan PWM delta (bukan %) agar konsisten dengan calculate_lamp_fitness_2d
+            gain_per_pwm = 4.0 / 2.55  # ~1.57 lux per 1 unit PWM
+            curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
+            curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+            d1 = (pwm1_val - curr_pwm1) * gain_per_pwm
+            d2 = (pwm2_val - curr_pwm2) * gain_per_pwm
             est1 = max(0.0, lux1 + d1 * 0.8 + d2 * 0.2)
             est2 = max(0.0, lux2 + d1 * 0.5 + d2 * 0.5)
             est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
@@ -838,15 +867,19 @@ def run_optimization_cycle(algo='both'):
                                 + max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 100.0) * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
-        global _last_adaptive_ac_apply
+        global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = last_opt_results['ga']['temp']
             opt_fan  = last_opt_results['ga']['fan']
             opt_mode = last_opt_results['ga'].get('mode', 'COOL')
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 now = time.time()
-                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
+                temp_changed = abs(int(opt_temp) - _last_sent_ac_temp) >= AC_CHANGE_THRESHOLD_TEMP
+                fan_changed  = abs(int(opt_fan)  - _last_sent_ac_fan)  >= AC_CHANGE_THRESHOLD_FAN
+                if (now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE) and (temp_changed or fan_changed):
                     _last_adaptive_ac_apply = now
+                    _last_sent_ac_temp = int(opt_temp)
+                    _last_sent_ac_fan  = int(opt_fan)
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
@@ -1129,9 +1162,20 @@ _latest_frame_bytes = None
 _latest_frame_lock = threading.Lock()
 _detection_thread_running = False
 
+# ── Lamp gain auto-calibration (EMA) ─────────────────────────────────────────
+# gain_per_pwm: estimasi kenaikan lux per 1 unit PWM.
+# Nilai awal dari asumsi teoritis; di-update EMA setiap apply+feedback.
+_gain_per_pwm = 4.0 / 2.55          # ~1.57 lux/PWM (nilai awal)
+GAIN_EMA_ALPHA   = 0.2               # bobot data baru dalam EMA (0=tidak berubah, 1=replace langsung)
+GAIN_MIN, GAIN_MAX = 0.3, 6.0       # clamp: cegah gain outlier dari noise sensor
+# Closed-loop feedback: catat state sebelum apply agar bisa kalkulasi delta aktual
+_pending_calibration = None          # None | {'pwm1': x, 'pwm2': x, 'lux1': x, 'lux2': x, 'lux3': x, 'ts': t}
+
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
+_last_sent_ac_temp = 0          # last GA-recommended temp that was actually sent to AC
+_last_sent_ac_fan  = 0          # last GA-recommended fan speed that was actually sent to AC
 # Lamp adaptive: track last sent brightness AND lux snapshot to prevent PSO stochastic noise
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
@@ -1139,9 +1183,12 @@ _last_apply_lux1 = -1.0   # lux readings captured at last lamp apply (lux stabil
 _last_apply_lux2 = -1.0
 _last_apply_lux3 = -1.0
 AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
+AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1°C vs last sent
+AC_CHANGE_THRESHOLD_FAN = 1     # skip AC SET if fan speed unchanged vs last sent
 LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — PSO is stochastic, no need to apply every 3-min run
 LAMP_CHANGE_THRESHOLD = 8       # minimum 8% brightness change (PSO natural noise is ~5-7%)
 LUX_CHANGE_THRESHOLD = 30.0     # lux must change >30 before a new brightness is warranted
+LUX_FORCE_APPLY_TIMEOUT = 1800  # 30 min — bypass lux gate if PSO hasn't applied in this long (stable room)
 LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
 
 # Global data storage
@@ -1443,27 +1490,41 @@ def _should_apply_lamp(b1, b2):
     # changed >LUX_CHANGE_THRESHOLD on at least one sensor, or if this is the first apply
     # after a reset (_last_apply_lux1 == -1.0).
     if _last_apply_lux1 >= 0.0:
-        cur_lux1 = opt_sensor_data.get('lux1', -1.0)
-        cur_lux2 = opt_sensor_data.get('lux2', -1.0)
-        cur_lux3 = opt_sensor_data.get('lux3', -1.0)
-        if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
-            lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
-                           abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
-                           abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
-            if not lux_changed:
-                return False  # environment stable — PSO noise must not cause flicker
+        # Bypass lux gate jika sudah terlalu lama tidak apply (ruangan stabil, tetap perlu koreksi)
+        force_apply = (now - _last_adaptive_lamp_apply) >= LUX_FORCE_APPLY_TIMEOUT
+        if not force_apply:
+            cur_lux1 = opt_sensor_data.get('lux1', -1.0)
+            cur_lux2 = opt_sensor_data.get('lux2', -1.0)
+            cur_lux3 = opt_sensor_data.get('lux3', -1.0)
+            if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
+                lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
+                               abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
+                               abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
+                if not lux_changed:
+                    return False  # environment stable — PSO noise must not cause flicker
     return True
 
 def _record_lamp_apply(b1, b2):
-    """Update brightness tracking and capture lux snapshot for the stability gate."""
+    """Update brightness tracking and capture lux snapshot for the stability gate.
+    Also records pre-apply lux state for closed-loop gain calibration."""
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
+    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3, _pending_calibration
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
     _last_apply_lux1 = float(opt_sensor_data.get('lux1', _last_apply_lux1))
     _last_apply_lux2 = float(opt_sensor_data.get('lux2', _last_apply_lux2))
     _last_apply_lux3 = float(opt_sensor_data.get('lux3', _last_apply_lux3))
+    # Simpan state sebelum apply untuk kalkulasi gain setelah feedback tiba
+    pwm1 = b1 * 255.0 / 100.0
+    pwm2 = b2 * 255.0 / 100.0
+    _pending_calibration = {
+        'pwm1': pwm1, 'pwm2': pwm2,
+        'lux1': _last_apply_lux1, 'lux2': _last_apply_lux2, 'lux3': _last_apply_lux3,
+        'prev_pwm1': float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0,
+        'prev_pwm2': float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0,
+        'ts': time.time()
+    }
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
@@ -1984,6 +2045,32 @@ def on_message(client, userdata, msg):
             save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3,
                                     curr_brightness1=b1, curr_brightness2=b2)
+            # ── Closed-loop gain calibration ──────────────────────────────────
+            # Jika ada pending calibration (baru apply PSO), hitung gain aktual
+            # dari perubahan lux yang terjadi, lalu update EMA.
+            # Tunggu minimal 4 detik agar ESP32 sempat baca ulang sensor.
+            global _pending_calibration
+            if _pending_calibration is not None:
+                elapsed = time.time() - _pending_calibration['ts']
+                if elapsed >= 4.0:  # cukup waktu untuk sensor merespons
+                    delta_pwm1 = _pending_calibration['pwm1'] - _pending_calibration['prev_pwm1']
+                    delta_pwm2 = _pending_calibration['pwm2'] - _pending_calibration['prev_pwm2']
+                    total_delta_pwm = abs(delta_pwm1) + abs(delta_pwm2)
+                    if total_delta_pwm >= 10:  # hanya kalkulasi jika perubahan cukup besar
+                        # Rata-rata delta lux aktual dari ketiga sensor
+                        delta_lux_actual = ((l1 - _pending_calibration['lux1'])
+                                           + (l2 - _pending_calibration['lux2'])
+                                           + (l3 - _pending_calibration['lux3'])) / 3.0
+                        if total_delta_pwm > 0 and abs(delta_lux_actual) > 1.0:
+                            actual_gain = abs(delta_lux_actual) / total_delta_pwm
+                            if GAIN_MIN <= actual_gain <= GAIN_MAX:
+                                global _gain_per_pwm
+                                old_gain = _gain_per_pwm
+                                _gain_per_pwm = (1 - GAIN_EMA_ALPHA) * _gain_per_pwm + GAIN_EMA_ALPHA * actual_gain
+                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {_gain_per_pwm:.3f} '
+                                      f'(actual={actual_gain:.3f}, delta_pwm={total_delta_pwm:.1f}, '
+                                      f'delta_lux={delta_lux_actual:.1f})')
+                    _pending_calibration = None  # selesai, hapus pending
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
