@@ -16,6 +16,7 @@ import math
 import os
 import tempfile
 import subprocess
+import optimization_engine as _opt_eng
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -209,7 +210,7 @@ load_energy_recording()
 # Optimization bounds
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
-OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 100
+OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 255  # PWM range 0-255 sesuai spesifikasi
 
 # AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
 OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
@@ -227,17 +228,17 @@ opt_sensor_data = {
 }
 
 # Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
-AUTO_OPT_INTERVAL_AC = 300   # 5 min for AC (temperature changes slowly)
-AUTO_OPT_INTERVAL_LAMP = 180 # 3 min for Lamp (light changes faster)
+AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC — selaras dengan AC_ADAPTIVE_DEBOUNCE agar setiap run GA bisa apply
+AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — selaras dengan LAMP_ADAPTIVE_DEBOUNCE agar setiap run bisa apply
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
     'ga': {'fitness': 0, 'temp': 0, 'fan': 0, 'stats': []},
-    'pso': {'fitness': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
+    'pso': {'fitness': 0, 'pwm1': 0, 'pwm2': 0, 'brightness': 0, 'brightness1': 0, 'brightness2': 0, 'stats': []}
 }
 
 ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 25, 'iterations': 50, 'w': 0.7, 'c1': 1.8, 'c2': 2.2}
+pso_params = {'swarm_size': 15, 'iterations': 30, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # sesuai spesifikasi
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -255,7 +256,13 @@ def _get_temp_uniformity():
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
 def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
-    """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO"""
+    """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+    Crowd-based tier:
+      Tier 0 — 0 orang     : energy saving (27-29°C, fan 1)
+      Tier 1 — 1-2 orang   : suhu standar per waktu (24-26°C, fan adaptive)
+      Tier 2 — 3-5 orang   : pendinginan menengah (22°C, fan 3)
+      Tier 3 — >5 orang    : AC sedingin mungkin (16°C, fan 4 max)
+    """
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
     # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
@@ -264,25 +271,39 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    if person_detected:
-        target_map = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
-        sigma_map = {'morning': 2.0, 'afternoon': 1.5, 'evening': 2.0, 'night': 2.5}
-    else:
+    # ── Crowd-based temperature & fan tier ───────────────────────────────────
+    ideal_fan_crowd = None  # None = hitung dari temp_gap (hanya untuk tier 1)
+    if not person_detected:
+        # Tier 0: tidak ada orang — mode hemat energi
         target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
-        sigma_map = {'morning': 3.0, 'afternoon': 2.5, 'evening': 3.0, 'night': 3.5}
-    target_temp = target_map.get(time_period, 25.0)
-    sigma = sigma_map.get(time_period, 2.0)
-    # Crowd cooling offset: more people = more body heat = lower target temp
-    # 1 person:  0°C offset (baseline)
-    # 2 people: -0.5°C
-    # 3 people: -1.0°C
-    # 4+ people: -1.5°C (capped to prevent over-cooling)
-    if person_detected and person_count >= 2:
-        crowd_offset = min(1.5, (person_count - 1) * 0.5)
-        target_temp = max(target_temp - crowd_offset, 22.0)  # never below 22°C
-        sigma = max(1.0, sigma - 0.2)  # tighter comfort band for crowded room
+        sigma_map   = {'morning': 3.0,  'afternoon': 2.5,  'evening': 3.0,  'night': 3.5}
+        target_temp = target_map.get(time_period, 28.0)
+        sigma = sigma_map.get(time_period, 3.0)
+        ideal_fan_crowd = 1.0
+    elif person_count > 5:
+        # Tier 3: >5 orang — AC sedingin mungkin, fan maksimum
+        target_temp = OPT_TEMP_MIN   # 16°C (batas bawah GA)
+        sigma = 0.8                  # band sangat ketat — GA harus pilih suhu minimum
+        ideal_fan_crowd = float(OPT_FAN_MAX)  # fan 4
+    elif person_count >= 3:
+        # Tier 2: 3-5 orang — pendinginan menengah
+        target_temp = 22.0
+        sigma = 1.5
+        ideal_fan_crowd = 3.0
+    else:
+        # Tier 1: 1-2 orang — suhu standar per waktu
+        std_target = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
+        std_sigma  = {'morning': 2.0,  'afternoon': 1.5,  'evening': 2.0,  'night': 2.5}
+        target_temp = std_target.get(time_period, 25.0)
+        if person_count == 2:
+            target_temp = max(target_temp - 0.5, 22.0)  # sedikit lebih dingin untuk 2 orang
+        sigma = std_sigma.get(time_period, 2.0)
+        # ideal_fan_crowd = None → akan dihitung dari temp_gap di bawah
+    # Trend offset: jika suhu ruangan naik cepat, turunkan target; jika turun, naikkan
+    # Untuk tier >5, trend offset tetap diterapkan tapi target sudah di minimum
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
-    adjusted_target = target_temp + trend_offset
+    adjusted_target = max(OPT_TEMP_MIN, target_temp + trend_offset) if person_count > 5 \
+                      else target_temp + trend_offset
     fitness += _gaussian_score(temp_set, adjusted_target, sigma, 40.0)
     if humidity > 60:
         excess_factor = min(1.0, (humidity - 60) / 30.0)
@@ -294,12 +315,11 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
     temp_gap = abs(temp_room - temp_set)
-    # More people = need more airflow for comfort (crowd effect)
-    base_ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
-    if person_detected and person_count >= 3:
-        ideal_fan = min(float(OPT_FAN_MAX), base_ideal_fan + (person_count - 2) * 0.5)
+    # Ideal fan: tier 2 & 3 sudah ditetapkan di atas; tier 1 hitung dari temp_gap
+    if ideal_fan_crowd is not None:
+        ideal_fan = ideal_fan_crowd
     else:
-        ideal_fan = base_ideal_fan
+        ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
     # ── Energy efficiency ─────────────────────────────────────────────────────
     # Use real PZEM watt data when available; fall back to COP-based model.
@@ -314,7 +334,13 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
         fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
         energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
-    energy_weight = 12.0 if person_detected else 20.0
+    # >5 orang: kenyamanan & pendinginan lebih prioritas dari efisiensi energi
+    if person_count > 5:
+        energy_weight = 4.0
+    elif person_detected:
+        energy_weight = 12.0
+    else:
+        energy_weight = 20.0
     fitness += energy_ratio * energy_weight
     uniformity = _get_temp_uniformity()
     if uniformity < 0.7 and fan_speed >= 2:
@@ -329,15 +355,18 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
     if not person_detected and temp_set < 24:
         fitness -= (24.0 - temp_set) * 3.0
-    if temp_set < 18 and fan_speed == 3:
+    # Suhu < 18 dengan fan mid: penalti hanya jika bukan tier >5 (tier >5 justru inginkan ini)
+    if temp_set < 18 and fan_speed == 3 and person_count <= 5:
         fitness -= 10.0
-    # Overcooling: penalise setting more than 1.5°C below comfort target (wasteful + uncomfortable)
-    if person_detected and temp_set < target_temp - 1.5:
+    # Overcooling: penalti HANYA untuk tier 1-2 (tier >5 memang inginkan suhu minimum)
+    if person_detected and person_count <= 5 and temp_set < target_temp - 1.5:
         fitness -= (target_temp - 1.5 - temp_set) * 5.0
-    # Unnecessary high fan: penalise when room is already at/near target (noise + energy waste)
-    # Suppress penalty when crowd >= 3 since high fan is needed for circulation
+    # Unnecessary high fan: penalti hanya untuk crowd kecil
     if fan_speed >= 3 and abs(temp_room - target_temp) <= 1.0 and person_count < 3:
         fitness -= (fan_speed - 2) * 4.0
+    # Bonus: reward fan maksimum saat crowd >5 (kenyamanan pendinginan maksimal)
+    if person_count > 5 and fan_speed == OPT_FAN_MAX:
+        fitness += 12.0
 
     # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
@@ -362,31 +391,33 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
 
     return max(0.0, round(fitness, 2))
 
-def calculate_lamp_fitness_2d(brightness1, brightness2):
+def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
-    Formula dari PDF:
-        Error_lux = ((L1 - TARGET)^2 + (L2 - TARGET)^2 + (L3 - TARGET)^2) / 3
-        Fitness    = Error_lux
-    Target 350 lux saat ada orang; 0 lux saat kosong (lampu mati).
-    Lux diestimasi dengan delta model dari brightness saat ini.
+    Sesuai spesifikasi:
+        Fitness = Error_lux = ((L1 - 350)^2 + (L2 - 350)^2 + (L3 - 350)^2) / 3
+    Parameter pwm1, pwm2 dalam range 0-255.
+    Lux diestimasi dengan delta model dari PWM saat ini ke kandidat.
     """
-    lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
-    lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
-    lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
+    lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+    lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+    lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX = 350.0 if person_detected else 0.0
 
-    # Delta-based lux estimation: perubahan dari brightness saat ini
-    curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
-    curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
-    delta1 = (brightness1 - curr_b1) * 4.0   # ~4 lux per 1% brightness
-    delta2 = (brightness2 - curr_b2) * 4.0
-    # Zone model: lamp1 → sensor1/2, lamp2 → sensor2/3
+    # Konversi brightness saat ini (0-100%) ke PWM (0-255)
+    curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
+    curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+
+    # Delta lux: gunakan gain yang sudah dikalibrasi (mulai ~1.57, update EMA setelah tiap apply)
+    delta1 = (pwm1 - curr_pwm1) * _gain_per_pwm
+    delta2 = (pwm2 - curr_pwm2) * _gain_per_pwm
+
+    # Zone model: lamp1 -> sensor1/2, lamp2 -> sensor2/3
     est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
     est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
     est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
 
-    # Rumus PDF: rata-rata kuadrat selisih dari target
+    # Rumus sesuai spesifikasi
     error = ((est_lux1 - TARGET_LUX) ** 2
              + (est_lux2 - TARGET_LUX) ** 2
              + (est_lux3 - TARGET_LUX) ** 2) / 3.0
@@ -450,26 +481,66 @@ def _fetch_mysql_power():
 def fetch_sensor_data_from_db(time_range_minutes=30):
     # Fetch real power from MySQL energy meter first
     _fetch_mysql_power()
+
+    # --- Prioritas 1: gunakan data MQTT real-time jika tersedia (paling segar) ---
+    # lux dan brightness sudah di-sync ke opt_sensor_data setiap pesan ESP32 masuk
+    # via update_opt_sensor_data() di MQTT callback. Hanya fallback ke InfluxDB
+    # jika ESP32 belum terhubung sama sekali (semua nilai nol).
+    mqtt_lux1 = mqtt_data['lamp'].get('lux1', 0)
+    mqtt_lux2 = mqtt_data['lamp'].get('lux2', 0)
+    mqtt_lux3 = mqtt_data['lamp'].get('lux3', 0)
+    mqtt_has_lux = (mqtt_lux1 > 0 or mqtt_lux2 > 0 or mqtt_lux3 > 0)
+    if mqtt_has_lux:
+        # Data MQTT sudah fresh — update opt_sensor_data langsung, skip lamp InfluxDB query
+        opt_sensor_data['lux1'] = round(float(mqtt_lux1), 1)
+        opt_sensor_data['lux2'] = round(float(mqtt_lux2), 1)
+        opt_sensor_data['lux3'] = round(float(mqtt_lux3), 1)
+        opt_sensor_data['lux']  = round((mqtt_lux1 + mqtt_lux2 + mqtt_lux3) / 3.0, 1)
+        opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
+        opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
+        print(f"[OPT] Lux dari MQTT: L1={opt_sensor_data['lux1']} L2={opt_sensor_data['lux2']} L3={opt_sensor_data['lux3']} B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
+
     try:
         _, _, query_api = _get_influx_client()
-        ac_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "ac_sensor") |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity") |> mean()'
-        lamp_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -{time_range_minutes}m) |> filter(fn: (r) => r._measurement == "lamp_sensor") |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2" or r._field == "lux3" or r._field == "lux_avg") |> mean()'
+        # AC: pakai mean() — suhu berubah lambat, rata-rata masih relevan untuk GA
+        ac_query = (f'from(bucket: "{INFLUX_BUCKET}")'
+                    f' |> range(start: -{time_range_minutes}m)'
+                    f' |> filter(fn: (r) => r._measurement == "ac_sensor")'
+                    f' |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity")'
+                    f' |> mean()')
         for table in query_api.query(ac_query):
             for rec in table.records:
                 if rec.get_field() == 'temperature' and rec.get_value() is not None:
                     opt_sensor_data['temperature'] = round(float(rec.get_value()), 1)
                 elif rec.get_field() == 'humidity' and rec.get_value() is not None:
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
-        for table in query_api.query(lamp_query):
-            for rec in table.records:
-                field = rec.get_field()
-                val = rec.get_value()
-                if val is not None:
-                    if field == 'lux_avg':
-                        opt_sensor_data['lux'] = round(float(val), 1)
-                    elif field in ('lux1', 'lux2', 'lux3'):
-                        opt_sensor_data[field] = round(float(val), 1)
-        opt_sensor_data['data_source'] = 'influxdb'
+
+        # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
+        # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
+        if not mqtt_has_lux:
+            lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
+                          f' |> range(start: -{time_range_minutes}m)'
+                          f' |> filter(fn: (r) => r._measurement == "lamp_sensor")'
+                          f' |> filter(fn: (r) => r._field == "lux1" or r._field == "lux2"'
+                          f'            or r._field == "lux3" or r._field == "lux_avg"'
+                          f'            or r._field == "brightness1" or r._field == "brightness2")'
+                          f' |> last()')
+            for table in query_api.query(lamp_query):
+                for rec in table.records:
+                    field = rec.get_field()
+                    val = rec.get_value()
+                    if val is not None:
+                        if field == 'lux_avg':
+                            opt_sensor_data['lux'] = round(float(val), 1)
+                        elif field in ('lux1', 'lux2', 'lux3'):
+                            opt_sensor_data[field] = round(float(val), 1)
+                        elif field == 'brightness1':
+                            opt_sensor_data['curr_brightness1'] = round(float(val), 1)
+                        elif field == 'brightness2':
+                            opt_sensor_data['curr_brightness2'] = round(float(val), 1)
+            print(f"[OPT] Lux dari InfluxDB (last): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+
+        opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
         print(f"[OPT] InfluxDB fetch failed: {e}, using MQTT data")
         opt_sensor_data['data_source'] = 'mqtt_fallback'
@@ -584,21 +655,21 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: minimizes Error_lux = ((L1-TARGET)^2 + (L2-TARGET)^2 + (L3-TARGET)^2) / 3
-    Sesuai rumus PDF. Gbest = partikel dengan error terkecil.
+    """2D PSO: minimizes Error_lux = ((L1-350)^2 + (L2-350)^2 + (L3-350)^2) / 3
+    Sesuai spesifikasi. X = [PWM1, PWM2], range 0-255.
     Persamaan update:
         V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
         X_i(t+1) = X_i(t) + V_i(t+1)
+    Output: list [pwm1, pwm2] dalam PWM 0-255 (konversi ke % dilakukan oleh caller).
     """
     swarm_size = pso_params['swarm_size']
     iterations = pso_params['iterations']
     w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    w_end = 0.3
-    DIM = 2  # [PWM1, PWM2] sesuai PDF
-    max_vel = 15
+    DIM = 2  # [PWM1, PWM2]
+    max_vel = 60  # proporsional dengan range 0-255
 
-    # Inisialisasi posisi dan kecepatan secara acak (sesuai PDF)
-    # X_i = X_min + rand() * (X_max - X_min)
+    # Inisialisasi posisi dan kecepatan secara acak
+    # X_i = random(0, 255)
     positions = [
         [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
          for _ in range(DIM)]
@@ -606,16 +677,18 @@ def run_pso_optimization(verbose=False):
     ]
     velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
 
-    # Smart seeding dari hasil sebelumnya
+    # Smart seeding dari hasil sebelumnya (brightness % -> PWM)
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
-    seed_b1 = last_opt_results['pso'].get('brightness1', 0)
-    seed_b2 = last_opt_results['pso'].get('brightness2', 0)
-    seed_is_dark = (seed_b1 <= 5 and seed_b2 <= 5)
-    if seed_b1 > 0 and not (person_now and seed_is_dark):
-        positions[0] = [seed_b1, seed_b2]
+    seed_b1 = last_opt_results['pso'].get('brightness1', 0)  # 0-100%
+    seed_b2 = last_opt_results['pso'].get('brightness2', 0)  # 0-100%
+    seed_pwm1 = int(seed_b1 * 255 / 100)
+    seed_pwm2 = int(seed_b2 * 255 / 100)
+    seed_is_dark = (seed_pwm1 <= 13 and seed_pwm2 <= 13)
+    if seed_pwm1 > 0 and not (person_now and seed_is_dark):
+        positions[0] = [seed_pwm1, seed_pwm2]
         for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b1 + random.randint(-10, 10))),
-                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_b2 + random.randint(-10, 10)))]
+            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm1 + random.randint(-26, 26))),
+                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm2 + random.randint(-26, 26)))]
 
     # Pbest = posisi terbaik tiap partikel (error terkecil)
     pb_pos = [p[:] for p in positions]
@@ -631,14 +704,11 @@ def run_pso_optimization(verbose=False):
     prev_g_fit = float('inf')  # minimize: awal infinity
 
     for it in range(iterations):
-        # Inertia weight linear decay: w_start → w_end
-        cur_w = w_start - (w_start - w_end) * (it / max(1, iterations - 1))
-
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
-                # Persamaan kecepatan (sesuai PDF)
-                velocities[i][d] = (cur_w * velocities[i][d]
+                # Update kecepatan: V = w*V + c1*r1*(Pbest-X) + c2*r2*(Gbest-X)
+                velocities[i][d] = (w_start * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
                     + c2 * r2 * (g_pos[d] - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
@@ -678,9 +748,9 @@ def run_pso_optimization(verbose=False):
                     g_fit, g_pos = new_fit, positions[si][:]
             stagnation_counter = 0
 
-    # Gbest = [PWM1, PWM2] optimal (sesuai PDF)
+    # Kembalikan Gbest dalam PWM (0-255) langsung — konversi ke % dilakukan oleh caller
     initial_error = fitness_history[0] if fitness_history else g_fit
-    return g_pos, g_fit, fitness_history, initial_error
+    return list(g_pos), g_fit, fitness_history, initial_error
 
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
@@ -719,24 +789,34 @@ def run_optimization_cycle(algo='both'):
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
-            b1, b2 = sol[0], sol[1]
+            # sol adalah PWM 0-255 langsung dari algoritma
+            pwm1_val = int(round(min(255, max(0, sol[0]))))
+            pwm2_val = int(round(min(255, max(0, sol[1]))))
+            # Konversi ke brightness % untuk MQTT/ESP32
+            b1 = round(pwm1_val * 100 / 255)
+            b2 = round(pwm2_val * 100 / 255)
             # Estimate achieved lux from optimal brightness
             person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
             target_lux = 350.0 if person_now else 0.0
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            curr_b1 = float(opt_sensor_data.get('curr_brightness1', 0))
-            curr_b2 = float(opt_sensor_data.get('curr_brightness2', 0))
-            d1 = (b1 - curr_b1) * 4.0
-            d2 = (b2 - curr_b2) * 4.0
+            # Gunakan PWM delta (bukan %) agar konsisten dengan calculate_lamp_fitness_2d
+            gain_per_pwm = 4.0 / 2.55  # ~1.57 lux per 1 unit PWM
+            curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
+            curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+            d1 = (pwm1_val - curr_pwm1) * gain_per_pwm
+            d2 = (pwm2_val - curr_pwm2) * gain_per_pwm
             est1 = max(0.0, lux1 + d1 * 0.8 + d2 * 0.2)
             est2 = max(0.0, lux2 + d1 * 0.5 + d2 * 0.5)
             est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
             lux_achieved = round((est1 + est2 + est3) / 3.0, 1)
             last_opt_results['pso'] = {
-                'fitness': fit, 'brightness': int((b1 + b2) / 2),
-                'brightness1': b1, 'brightness2': b2, 'stats': hist,
+                'fitness': fit,
+                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
+                'brightness': int((b1 + b2) / 2),           # rata-rata brightness % untuk referensi
+                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 untuk MQTT/ESP32
+                'stats': hist,
                 'initial_error': round(initial_err, 2),
                 'final_error': round(fit, 2),
                 'lux_achieved': lux_achieved,
@@ -750,7 +830,7 @@ def run_optimization_cycle(algo='both'):
                     'c2': pso_params['c2'],
                 },
             }
-            print(f"[PSO] Done: L1={b1}% L2={b2}% lux_error={fit:.2f}")
+            print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
         optimization_run_count += 1
         # Update mqtt_data system
@@ -761,6 +841,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
+            'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
             'pso_brightness1': last_opt_results['pso'].get('brightness1', 0),
             'pso_brightness2': last_opt_results['pso'].get('brightness2', 0),
@@ -775,6 +857,8 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
+            'pso_pwm1': float(last_opt_results['pso'].get('pwm1', 0)),
+            'pso_pwm2': float(last_opt_results['pso'].get('pwm2', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
@@ -784,15 +868,19 @@ def run_optimization_cycle(algo='both'):
                                 + max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 100.0) * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
-        global _last_adaptive_ac_apply
+        global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = last_opt_results['ga']['temp']
             opt_fan  = last_opt_results['ga']['fan']
             opt_mode = last_opt_results['ga'].get('mode', 'COOL')
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 now = time.time()
-                if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
+                temp_changed = abs(int(opt_temp) - _last_sent_ac_temp) >= AC_CHANGE_THRESHOLD_TEMP
+                fan_changed  = abs(int(opt_fan)  - _last_sent_ac_fan)  >= AC_CHANGE_THRESHOLD_FAN
+                if (now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE) and (temp_changed or fan_changed):
                     _last_adaptive_ac_apply = now
+                    _last_sent_ac_temp = int(opt_temp)
+                    _last_sent_ac_fan  = int(opt_fan)
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
         # Auto-apply Lamp — only when PSO produced fresh results this cycle
@@ -836,7 +924,7 @@ def run_optimization_cycle(algo='both'):
                 'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
             }
         if algo in ('pso', 'both'):
-            status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0)}
+            status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
         socketio.emit('ml_status', status_payload)
         return True
     except Exception as e:
@@ -874,6 +962,8 @@ def persist_opt_results(algo):
                 return
             fields = {
                 'fitness':        float(pso['fitness']),
+                'pwm1':           float(pso.get('pwm1', 0)),
+                'pwm2':           float(pso.get('pwm2', 0)),
                 'brightness':     float(pso.get('brightness', 0)),
                 'brightness1':    float(pso.get('brightness1', 0)),
                 'brightness2':    float(pso.get('brightness2', 0)),
@@ -921,11 +1011,15 @@ def restore_opt_results():
                 mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
                 print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
+                b1_restored = int(rec_map.get('brightness1', 0))
+                b2_restored = int(rec_map.get('brightness2', 0))
                 last_opt_results['pso'].update({
                     'fitness':       float(rec_map.get('fitness', 0)),
+                    'pwm1':          int(rec_map.get('pwm1', round(b1_restored * 255 / 100))),
+                    'pwm2':          int(rec_map.get('pwm2', round(b2_restored * 255 / 100))),
                     'brightness':    int(rec_map.get('brightness', 0)),
-                    'brightness1':   int(rec_map.get('brightness1', 0)),
-                    'brightness2':   int(rec_map.get('brightness2', 0)),
+                    'brightness1':   b1_restored,
+                    'brightness2':   b2_restored,
                     'initial_error': float(rec_map.get('initial_error', 0)),
                     'final_error':   float(rec_map.get('final_error', 0)),
                     'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
@@ -934,10 +1028,12 @@ def restore_opt_results():
                     'stats':         [],
                 })
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
+                mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
+                mqtt_data['system']['pso_pwm2']       = last_opt_results['pso']['pwm2']
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
-                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['brightness1']}% PWM2={last_opt_results['pso']['brightness2']}% error={last_opt_results['pso']['fitness']:.2f}")
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
 
@@ -1067,9 +1163,20 @@ _latest_frame_bytes = None
 _latest_frame_lock = threading.Lock()
 _detection_thread_running = False
 
+# ── Lamp gain auto-calibration (EMA) ─────────────────────────────────────────
+# gain_per_pwm: estimasi kenaikan lux per 1 unit PWM.
+# Nilai awal dari asumsi teoritis; di-update EMA setiap apply+feedback.
+_gain_per_pwm = 4.0 / 2.55          # ~1.57 lux/PWM (nilai awal)
+GAIN_EMA_ALPHA   = 0.2               # bobot data baru dalam EMA (0=tidak berubah, 1=replace langsung)
+GAIN_MIN, GAIN_MAX = 0.3, 6.0       # clamp: cegah gain outlier dari noise sensor
+# Closed-loop feedback: catat state sebelum apply agar bisa kalkulasi delta aktual
+_pending_calibration = None          # None | {'pwm1': x, 'pwm2': x, 'lux1': x, 'lux2': x, 'lux3': x, 'ts': t}
+
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
+_last_sent_ac_temp = 0          # last GA-recommended temp that was actually sent to AC
+_last_sent_ac_fan  = 0          # last GA-recommended fan speed that was actually sent to AC
 # Lamp adaptive: track last sent brightness AND lux snapshot to prevent PSO stochastic noise
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
@@ -1077,9 +1184,12 @@ _last_apply_lux1 = -1.0   # lux readings captured at last lamp apply (lux stabil
 _last_apply_lux2 = -1.0
 _last_apply_lux3 = -1.0
 AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
+AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1°C vs last sent
+AC_CHANGE_THRESHOLD_FAN = 1     # skip AC SET if fan speed unchanged vs last sent
 LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — PSO is stochastic, no need to apply every 3-min run
 LAMP_CHANGE_THRESHOLD = 8       # minimum 8% brightness change (PSO natural noise is ~5-7%)
 LUX_CHANGE_THRESHOLD = 30.0     # lux must change >30 before a new brightness is warranted
+LUX_FORCE_APPLY_TIMEOUT = 1800  # 30 min — bypass lux gate if PSO hasn't applied in this long (stable room)
 LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
 
 # Global data storage
@@ -1088,7 +1198,7 @@ mqtt_data = {
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
-    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
+    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {}  # Track toggle states for power buttons
 }
@@ -1381,27 +1491,41 @@ def _should_apply_lamp(b1, b2):
     # changed >LUX_CHANGE_THRESHOLD on at least one sensor, or if this is the first apply
     # after a reset (_last_apply_lux1 == -1.0).
     if _last_apply_lux1 >= 0.0:
-        cur_lux1 = opt_sensor_data.get('lux1', -1.0)
-        cur_lux2 = opt_sensor_data.get('lux2', -1.0)
-        cur_lux3 = opt_sensor_data.get('lux3', -1.0)
-        if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
-            lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
-                           abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
-                           abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
-            if not lux_changed:
-                return False  # environment stable — PSO noise must not cause flicker
+        # Bypass lux gate jika sudah terlalu lama tidak apply (ruangan stabil, tetap perlu koreksi)
+        force_apply = (now - _last_adaptive_lamp_apply) >= LUX_FORCE_APPLY_TIMEOUT
+        if not force_apply:
+            cur_lux1 = opt_sensor_data.get('lux1', -1.0)
+            cur_lux2 = opt_sensor_data.get('lux2', -1.0)
+            cur_lux3 = opt_sensor_data.get('lux3', -1.0)
+            if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
+                lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
+                               abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
+                               abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
+                if not lux_changed:
+                    return False  # environment stable — PSO noise must not cause flicker
     return True
 
 def _record_lamp_apply(b1, b2):
-    """Update brightness tracking and capture lux snapshot for the stability gate."""
+    """Update brightness tracking and capture lux snapshot for the stability gate.
+    Also records pre-apply lux state for closed-loop gain calibration."""
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
+    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3, _pending_calibration
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
     _last_apply_lux1 = float(opt_sensor_data.get('lux1', _last_apply_lux1))
     _last_apply_lux2 = float(opt_sensor_data.get('lux2', _last_apply_lux2))
     _last_apply_lux3 = float(opt_sensor_data.get('lux3', _last_apply_lux3))
+    # Simpan state sebelum apply untuk kalkulasi gain setelah feedback tiba
+    pwm1 = b1 * 255.0 / 100.0
+    pwm2 = b2 * 255.0 / 100.0
+    _pending_calibration = {
+        'pwm1': pwm1, 'pwm2': pwm2,
+        'lux1': _last_apply_lux1, 'lux2': _last_apply_lux2, 'lux3': _last_apply_lux3,
+        'prev_pwm1': float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0,
+        'prev_pwm2': float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0,
+        'ts': time.time()
+    }
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
@@ -1922,6 +2046,32 @@ def on_message(client, userdata, msg):
             save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3,
                                     curr_brightness1=b1, curr_brightness2=b2)
+            # ── Closed-loop gain calibration ──────────────────────────────────
+            # Jika ada pending calibration (baru apply PSO), hitung gain aktual
+            # dari perubahan lux yang terjadi, lalu update EMA.
+            # Tunggu minimal 4 detik agar ESP32 sempat baca ulang sensor.
+            global _pending_calibration
+            if _pending_calibration is not None:
+                elapsed = time.time() - _pending_calibration['ts']
+                if elapsed >= 4.0:  # cukup waktu untuk sensor merespons
+                    delta_pwm1 = _pending_calibration['pwm1'] - _pending_calibration['prev_pwm1']
+                    delta_pwm2 = _pending_calibration['pwm2'] - _pending_calibration['prev_pwm2']
+                    total_delta_pwm = abs(delta_pwm1) + abs(delta_pwm2)
+                    if total_delta_pwm >= 10:  # hanya kalkulasi jika perubahan cukup besar
+                        # Rata-rata delta lux aktual dari ketiga sensor
+                        delta_lux_actual = ((l1 - _pending_calibration['lux1'])
+                                           + (l2 - _pending_calibration['lux2'])
+                                           + (l3 - _pending_calibration['lux3'])) / 3.0
+                        if total_delta_pwm > 0 and abs(delta_lux_actual) > 1.0:
+                            actual_gain = abs(delta_lux_actual) / total_delta_pwm
+                            if GAIN_MIN <= actual_gain <= GAIN_MAX:
+                                old_gain = _opt_eng.get_gain_per_pwm()
+                                new_gain = (1 - GAIN_EMA_ALPHA) * old_gain + GAIN_EMA_ALPHA * actual_gain
+                                _opt_eng.update_gain_per_pwm(new_gain)
+                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {new_gain:.3f} '
+                                      f'(actual={actual_gain:.3f}, delta_pwm={total_delta_pwm:.1f}, '
+                                      f'delta_lux={delta_lux_actual:.1f})')
+                    _pending_calibration = None  # selesai, hapus pending
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -2040,7 +2190,11 @@ def on_message(client, userdata, msg):
                         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0) + 1,
                         'ga_temp': ga_sol.get('temperature', payload.get('ga_temp', mqtt_data['system'].get('ga_temp', 0))),
                         'ga_fan': ga_sol.get('fan_speed', payload.get('ga_fan', mqtt_data['system'].get('ga_fan', 0))),
+                        'pso_pwm1': pso_sol.get('pwm1', payload.get('pso_pwm1', mqtt_data['system'].get('pso_pwm1', 0))),
+                        'pso_pwm2': pso_sol.get('pwm2', payload.get('pso_pwm2', mqtt_data['system'].get('pso_pwm2', 0))),
                         'pso_brightness': pso_sol.get('brightness', payload.get('pso_brightness', mqtt_data['system'].get('pso_brightness', 0))),
+                        'pso_brightness1': pso_sol.get('brightness1', payload.get('pso_brightness1', mqtt_data['system'].get('pso_brightness1', 0))),
+                        'pso_brightness2': pso_sol.get('brightness2', payload.get('pso_brightness2', mqtt_data['system'].get('pso_brightness2', 0))),
                         'ga_history': payload.get('ga_history', mqtt_data['system'].get('ga_history', [])),
                         'pso_history': payload.get('pso_history', mqtt_data['system'].get('pso_history', []))
                     })
@@ -3026,6 +3180,8 @@ def ml_status():
         'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
         'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
         'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
+        'pso_pwm1': mqtt_data['system'].get('pso_pwm1', 0),
+        'pso_pwm2': mqtt_data['system'].get('pso_pwm2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
         'ga_history': mqtt_data['system'].get('ga_history', []),
         'pso_history': mqtt_data['system'].get('pso_history', [])
@@ -3149,6 +3305,9 @@ def pso_export_csv():
     buf = io.StringIO()
     wr = csv_mod.writer(buf)
 
+    pwm1 = pso.get('pwm1', int(round(b1 * 255 / 100)))
+    pwm2 = pso.get('pwm2', int(round(b2 * 255 / 100)))
+
     # --- Laporan header ---
     wr.writerow(['=== LAPORAN HASIL PSO - SMART ROOM ==='])
     wr.writerow([])
@@ -3161,8 +3320,10 @@ def pso_export_csv():
                 f"c2={params.get('c2', '-')}"])
     wr.writerow(['Error awal', f"{initial_err} lux^2"])
     wr.writerow(['Error akhir', f"{final_err} lux^2"])
-    wr.writerow(['PWM1 optimal', f"{b1}%"])
-    wr.writerow(['PWM2 optimal', f"{b2}%"])
+    wr.writerow(['PWM1 optimal (0-255)', f"{pwm1}"])
+    wr.writerow(['PWM2 optimal (0-255)', f"{pwm2}"])
+    wr.writerow(['Brightness1 (% untuk ESP32)', f"{b1}%"])
+    wr.writerow(['Brightness2 (% untuk ESP32)', f"{b2}%"])
     wr.writerow(['Lux tercapai (estimasi)', f"{lux_achieved} lux"])
     wr.writerow(['Target lux', f"{target_lux} lux"])
     wr.writerow([])
@@ -5986,10 +6147,10 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
                     </div>
                     <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
-                        PWM1: <span id="ml-pso-brightness1" style="color: #6366f1; font-weight:700;">--</span>%<br>
-                        PWM2: <span id="ml-pso-brightness2" style="color: #a855f7; font-weight:700;">--</span>%
+                        PWM1: <span id="ml-pso-pwm1" style="color: #6366f1; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
+                        PWM2: <span id="ml-pso-pwm2" style="color: #a855f7; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
                     </div>
-                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>Avg: <span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>% &nbsp;|&nbsp; Lamp Level</div>
+                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>B1:<span id="ml-pso-brightness1" style="color:#6366f1;font-weight:600;">--</span>% B2:<span id="ml-pso-brightness2" style="color:#a855f7;font-weight:600;">--</span>% &nbsp;|&nbsp; Avg:<span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>/255</div>
                 </div>
 
                 <div class="stat-card">
@@ -7430,10 +7591,15 @@ HTML_TEMPLATE = '''
             setEl('ml-pso-brightness', data.pso_brightness || '--');
             var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
             var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
-            var bAvg = (b1 !== '--' && b2 !== '--') ? Math.round((parseFloat(b1) + parseFloat(b2)) / 2) : (data.pso_brightness || '--');
-            setEl('ml-pso-brightness1', b1);
-            setEl('ml-pso-brightness2', b2);
-            setEl('ml-pso-brightness-avg', bAvg);
+            // PWM values 0-255: use pso_pwm1/2 if available, else derive from brightness %
+            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : (b1 !== '--' ? Math.round(parseFloat(b1) * 255 / 100) : '--');
+            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : (b2 !== '--' ? Math.round(parseFloat(b2) * 255 / 100) : '--');
+            var pAvg = (p1 !== '--' && p2 !== '--') ? Math.round((parseFloat(p1) + parseFloat(p2)) / 2) : '--';
+            setEl('ml-pso-pwm1', p1);
+            setEl('ml-pso-pwm2', p2);
+            setEl('ml-pso-brightness1', b1 !== '--' ? b1 : '--');
+            setEl('ml-pso-brightness2', b2 !== '--' ? b2 : '--');
+            setEl('ml-pso-brightness-avg', pAvg);
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
             // Update convergence charts if history available
@@ -9025,11 +9191,10 @@ HTML_TEMPLATE = '''
                         psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
                     }
                     
-                    // PSO Brightness
+                    // PSO Brightness — pso-brightness element tidak ada di halaman utama (hanya di ML page)
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
-                        const psoBright = num(system.pso_brightness);
-                        psoBrightEl.textContent = Math.round(psoBright / 255 * 100);
+                        psoBrightEl.textContent = Math.round(num(system.pso_brightness));
                     }
                     
                     // Optimization Runs
@@ -10182,9 +10347,12 @@ HTML_TEMPLATE = '''
                 const runs = data.data.optimization_runs || 0;
                 const gaTemp = data.data.ga_temp || 0;
                 const gaFan = data.data.ga_fan || 0;
-                const psoBrightness = data.data.pso_brightness || 0;
-                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : psoBrightness;
-                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : psoBrightness;
+                // PWM 0-255 values (actual algorithm output)
+                const psoPwm1 = data.data.pso_pwm1 != null ? data.data.pso_pwm1 : 0;
+                const psoPwm2 = data.data.pso_pwm2 != null ? data.data.pso_pwm2 : 0;
+                // Brightness % values (for MQTT/ESP32)
+                const psoBrightness1 = data.data.pso_brightness1 != null ? data.data.pso_brightness1 : 0;
+                const psoBrightness2 = data.data.pso_brightness2 != null ? data.data.pso_brightness2 : 0;
                 
                 // Update GA fitness display
                 const gaEl = document.getElementById('ga-fitness');
@@ -10208,23 +10376,19 @@ HTML_TEMPLATE = '''
                     if (psoFitness > 0) psoEl.style.textShadow = '0 0 10px rgba(245, 158, 11, 0.5)';
                 }
                 
-                // Update PSO solution details (Lamp brightness)
-                const psoBrightEl = document.getElementById('pso-brightness');
-                if (psoBrightEl && psoBrightness > 0) psoBrightEl.textContent = psoBrightness;
-                
                 console.log('[ML] Optimization Update:', {
                     ga: gaFitness.toFixed(2), ac_temp: gaTemp, ac_fan: gaFan,
-                    pso: psoFitness.toFixed(2), lamp_brightness: psoBrightness,
-                    runs: runs
+                    pso: psoFitness.toFixed(2), pwm1: psoPwm1, pwm2: psoPwm2,
+                    b1: psoBrightness1 + '%', b2: psoBrightness2 + '%', runs: runs
                 });
                 
-                // Show toast with specific results
+                // Show toast with actual PWM values
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (' + psoFitness.toFixed(1) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
                     showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
-                    showToast('PSO->Lamp: PWM1=' + psoBrightness1 + '% PWM2=' + psoBrightness2 + '% (Error: ' + psoFitness.toFixed(2) + ')', 'success');
+                    showToast('PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
                 }
 
                 // === Update ML Optimization Page ===
@@ -10233,7 +10397,7 @@ HTML_TEMPLATE = '''
                     addToComparisonChart(gaFitness, psoFitness);
                     addMLHistoryRow({
                         ga_fitness: gaFitness, ga_temp: gaTemp, ga_fan: gaFan,
-                        pso_fitness: psoFitness, pso_brightness: psoBrightness
+                        pso_fitness: psoFitness, pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
                     });
                 }
                 // Update GA/PSO convergence charts from history arrays
@@ -10840,6 +11004,38 @@ HTML_TEMPLATE = '''
 </body>
 </html>
 '''
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OPTIMIZATION ENGINE — Wire modul terpisah ke shared state app.txt
+# Semua dict yang dipass adalah referensi Python, bukan copy.
+# Perubahan dari MQTT callback di app.txt akan langsung terlihat di optimization_engine.
+# ══════════════════════════════════════════════════════════════════════════════
+_opt_eng.bind_context(
+    opt_sensor_data   = opt_sensor_data,
+    last_opt_results  = last_opt_results,
+    ga_params         = ga_params,
+    pso_params        = pso_params,
+    bounds            = dict(
+        OPT_TEMP_MIN        = OPT_TEMP_MIN,
+        OPT_TEMP_MAX        = OPT_TEMP_MAX,
+        OPT_FAN_MIN         = OPT_FAN_MIN,
+        OPT_FAN_MAX         = OPT_FAN_MAX,
+        OPT_MODE_MIN        = OPT_MODE_MIN,
+        OPT_MODE_MAX        = OPT_MODE_MAX,
+        OPT_BRIGHTNESS_MIN  = OPT_BRIGHTNESS_MIN,
+        OPT_BRIGHTNESS_MAX  = OPT_BRIGHTNESS_MAX,
+        AC_MODE_NAMES       = AC_MODE_NAMES,
+    ),
+    person_fn         = _person_present_recently,
+    person_lamp_fn    = _person_present_recently_lamp,
+)
+
+# Override nama fungsi di namespace app.txt → run_optimization_cycle otomatis pakai modul ini
+calculate_ac_fitness      = _opt_eng.calculate_ac_fitness
+calculate_lamp_fitness_2d = _opt_eng.calculate_lamp_fitness_2d
+update_opt_sensor_data    = _opt_eng.update_opt_sensor_data
+run_ga_optimization       = _opt_eng.run_ga_optimization
+run_pso_optimization      = _opt_eng.run_pso_optimization
 
 if __name__ == '__main__':
     print("Smart Room Dashboard starting...")
