@@ -16,7 +16,6 @@ import math
 import os
 import tempfile
 import subprocess
-import optimization_engine as _opt_eng
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -2065,10 +2064,10 @@ def on_message(client, userdata, msg):
                         if total_delta_pwm > 0 and abs(delta_lux_actual) > 1.0:
                             actual_gain = abs(delta_lux_actual) / total_delta_pwm
                             if GAIN_MIN <= actual_gain <= GAIN_MAX:
-                                old_gain = _opt_eng.get_gain_per_pwm()
-                                new_gain = (1 - GAIN_EMA_ALPHA) * old_gain + GAIN_EMA_ALPHA * actual_gain
-                                _opt_eng.update_gain_per_pwm(new_gain)
-                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {new_gain:.3f} '
+                                global _gain_per_pwm
+                                old_gain = _gain_per_pwm
+                                _gain_per_pwm = (1 - GAIN_EMA_ALPHA) * _gain_per_pwm + GAIN_EMA_ALPHA * actual_gain
+                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {_gain_per_pwm:.3f} '
                                       f'(actual={actual_gain:.3f}, delta_pwm={total_delta_pwm:.1f}, '
                                       f'delta_lux={delta_lux_actual:.1f})')
                     _pending_calibration = None  # selesai, hapus pending
@@ -11004,38 +11003,6 @@ HTML_TEMPLATE = '''
 </body>
 </html>
 '''
-
-# ══════════════════════════════════════════════════════════════════════════════
-# OPTIMIZATION ENGINE — Wire modul terpisah ke shared state app.txt
-# Semua dict yang dipass adalah referensi Python, bukan copy.
-# Perubahan dari MQTT callback di app.txt akan langsung terlihat di optimization_engine.
-# ══════════════════════════════════════════════════════════════════════════════
-_opt_eng.bind_context(
-    opt_sensor_data   = opt_sensor_data,
-    last_opt_results  = last_opt_results,
-    ga_params         = ga_params,
-    pso_params        = pso_params,
-    bounds            = dict(
-        OPT_TEMP_MIN        = OPT_TEMP_MIN,
-        OPT_TEMP_MAX        = OPT_TEMP_MAX,
-        OPT_FAN_MIN         = OPT_FAN_MIN,
-        OPT_FAN_MAX         = OPT_FAN_MAX,
-        OPT_MODE_MIN        = OPT_MODE_MIN,
-        OPT_MODE_MAX        = OPT_MODE_MAX,
-        OPT_BRIGHTNESS_MIN  = OPT_BRIGHTNESS_MIN,
-        OPT_BRIGHTNESS_MAX  = OPT_BRIGHTNESS_MAX,
-        AC_MODE_NAMES       = AC_MODE_NAMES,
-    ),
-    person_fn         = _person_present_recently,
-    person_lamp_fn    = _person_present_recently_lamp,
-)
-
-# Override nama fungsi di namespace app.txt → run_optimization_cycle otomatis pakai modul ini
-calculate_ac_fitness      = _opt_eng.calculate_ac_fitness
-calculate_lamp_fitness_2d = _opt_eng.calculate_lamp_fitness_2d
-update_opt_sensor_data    = _opt_eng.update_opt_sensor_data
-run_ga_optimization       = _opt_eng.run_ga_optimization
-run_pso_optimization      = _opt_eng.run_pso_optimization
 
 if __name__ == '__main__':
     print("Smart Room Dashboard starting...")
