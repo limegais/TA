@@ -459,17 +459,25 @@ def _fetch_mysql_power():
                             headers={'User-Agent': 'SmartRoom-Optimizer/1.0'})
         with _ureq.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-        ac_data = data.get('ac') or {}
-        active_power = float(ac_data.get('active_power') or ac_data.get('daya_aktif') or 0)
+        ac_data        = data.get('ac') or {}
+        active_power   = float(ac_data.get('active_power')   or ac_data.get('daya_aktif') or 0)
         apparent_power = float(ac_data.get('apparent_power') or 0)
+        voltage        = float(ac_data.get('tegangan')  or 0)
+        current        = float(ac_data.get('arus')       or 0)
+        frequency      = float(ac_data.get('frekuensi')  or 0)
+        energy_wh      = float(ac_data.get('total_energy') or 0)   # Wh dari PHP
         pf = round(active_power / apparent_power, 3) if apparent_power > 0.001 else 1.0
-        opt_sensor_data['actual_watt'] = active_power
-        opt_sensor_data['power_factor'] = pf
-        print(f"[OPT] MySQL power: {active_power:.1f}W PF={pf:.2f}")
-        # Write to InfluxDB so AC Power chart on analytics page has historical data
+        opt_sensor_data['actual_watt']   = active_power
+        opt_sensor_data['power_factor']  = pf
+        print(f"[OPT] MySQL power: {active_power:.1f}W {voltage:.0f}V {current:.2f}A PF={pf:.2f}")
+        # Tulis semua field ke InfluxDB — agar export CSV energy lengkap
         try:
             write_to_influxdb('energy_monitor', {
-                'power':      active_power,
+                'voltage':      voltage,
+                'current':      current,
+                'power':        active_power,
+                'energy_kwh':   round(energy_wh / 1000.0, 4),  # Wh → kWh
+                'frequency':    frequency,
                 'power_factor': pf,
             }, tags={'device': 'esp32_ac', 'source': 'mysql'})
         except Exception as _ie:
@@ -2630,56 +2638,180 @@ def rec_data_api():
     return jsonify({'rows': _rec_data[dtype], 'count': len(_rec_data[dtype])})
 
 
-# ==================== EXPORT CSV DARI INFLUXDB ====================
+# ==================== EXPORT CSV ====================
+_PHP_ENERGY_HISTORY_URL = 'https://iotlab-uns.com/api_energy.php'
+_PHP_ENERGY_KEY         = 'iotlab_smartroom_2024'
+
+def _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt, limit=5000):
+    """Ambil data energi historis dari MySQL via PHP proxy.
+    Returns list of dicts atau raise Exception jika gagal.
+    id_kwh: 1=AC, 3=Lampu
+    """
+    import urllib.request as _ureq, urllib.parse as _uparse
+    params = _uparse.urlencode({
+        'key':    _PHP_ENERGY_KEY,
+        'action': 'history',
+        'id_kwh': id_kwh,
+        'from':   from_dt,
+        'to':     to_dt,
+        'limit':  limit,
+    })
+    url = f'{_PHP_ENERGY_HISTORY_URL}?{params}'
+    req = _ureq.Request(url, headers={'User-Agent': 'SmartRoom-Export/1.0'})
+    with _ureq.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    if 'error' in data:
+        raise ValueError(data['error'])
+    return data.get('rows', [])
+
+
 @app.route('/api/export/csv')
 @admin_required
 def export_csv_from_db():
-    """
-    Query InfluxDB by date range and stream a CSV file.
+    """Export CSV dari MySQL (energy) atau InfluxDB (temp/lux/occupancy).
     Params: type=energy_ac|energy_lamp|temp|lux|occupancy
-            from=YYYY-MM-DD  to=YYYY-MM-DD  (local WIB dates)
+            from=YYYY-MM-DD  to=YYYY-MM-DD  (tanggal WIB)
     """
+    import io, csv as _csv
+    from datetime import timezone, timedelta as _td
+
     dtype   = request.args.get('type', 'temp')
     from_dt = request.args.get('from', '')
     to_dt   = request.args.get('to', '')
 
     if not from_dt or not to_dt:
-        return jsonify({'error': 'from and to params required (YYYY-MM-DD)'}), 400
+        return jsonify({'error': 'from dan to wajib diisi (YYYY-MM-DD)'}), 400
 
-    # Convert local WIB date strings → UTC ISO for InfluxDB
-    # WIB = UTC+7, so YYYY-MM-DD 00:00 WIB = YYYY-MM-DD T17:00:00Z previous day
     try:
-        from datetime import timezone, timedelta as _td
-        wib = timezone(_td(hours=7))
-        start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
-        # end = to_dt 23:59:59 WIB
-        end_local = datetime.strptime(to_dt, '%Y-%m-%d').replace(hour=23, minute=59, second=59, tzinfo=wib)
-        end_utc   = end_local.astimezone(timezone.utc)
+        datetime.strptime(from_dt, '%Y-%m-%d')
+        datetime.strptime(to_dt,   '%Y-%m-%d')
     except ValueError:
-        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+        return jsonify({'error': 'Format tanggal salah. Gunakan YYYY-MM-DD'}), 400
 
+    valid_types = ('energy_ac', 'energy_lamp', 'temp', 'lux', 'occupancy')
+    if dtype not in valid_types:
+        return jsonify({'error': f'type tidak valid. Pilihan: {", ".join(valid_types)}'}), 400
+
+    # ── Energy: ambil dari MySQL via PHP (sumber data lengkap) ──────────────
+    if dtype in ('energy_ac', 'energy_lamp'):
+        id_kwh   = 1 if dtype == 'energy_ac' else 3
+        dev_name = 'AC' if dtype == 'energy_ac' else 'Lampu'
+        try:
+            mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
+        except Exception as ex:
+            # Fallback ke InfluxDB jika PHP tidak bisa dijangkau
+            mysql_rows = None
+            influx_err = str(ex)
+
+        if mysql_rows is not None:
+            if not mysql_rows:
+                return jsonify({'error': f'Tidak ada data {dev_name} di MySQL untuk rentang {from_dt} s.d. {to_dt}'}), 404
+            output = io.StringIO()
+            fields  = ['timestamp','tegangan','arus','active_power','reactive_power',
+                       'apparent_power','power_factor','frekuensi','energy_kwh']
+            headers = ['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
+                       'Daya Reaktif (VAR)','Daya Semu (VA)','Power Factor','Frekuensi (Hz)',
+                       'Konsumsi Energi (kWh)']
+            writer = _csv.writer(output)
+            writer.writerow(headers)
+            for r in mysql_rows:
+                writer.writerow([
+                    r.get('timestamp', ''),
+                    r.get('tegangan',       ''),
+                    r.get('arus',           ''),
+                    r.get('active_power',   ''),
+                    r.get('reactive_power', ''),
+                    r.get('apparent_power', ''),
+                    r.get('power_factor',   ''),
+                    r.get('frekuensi',      ''),
+                    r.get('energy_kwh',     ''),
+                ])
+            csv_bytes = output.getvalue().encode('utf-8-sig')  # BOM agar Excel baca benar
+            fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+            return Response(
+                csv_bytes,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename="{fname}"'}
+            )
+        else:
+            # Fallback InfluxDB — pakai kedua device tag (esp32_ac/mysql_ac)
+            print(f'[EXPORT] MySQL gagal ({influx_err}), fallback ke InfluxDB')
+            tag_vals = ('esp32_ac', 'mysql_ac') if dtype == 'energy_ac' else ('esp32_lamp', 'mysql_lamp')
+            influx_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
+            wib = timezone(_td(hours=7))
+            start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
+            end_utc   = datetime.strptime(to_dt, '%Y-%m-%d').replace(hour=23, minute=59, second=59, tzinfo=wib).astimezone(timezone.utc)
+            start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            try:
+                _, _, query_api = _get_influx_client()
+                rows_by_ts = {}
+                tag_filter = ' or '.join([f'r["device"] == "{v}"' for v in tag_vals])
+                for fld in influx_fields:
+                    q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_iso}, stop: {end_iso})
+  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+  |> filter(fn: (r) => r["_field"] == "{fld}")
+  |> filter(fn: (r) => {tag_filter})
+  |> yield(name: "raw")
+'''
+                    for table in query_api.query(query=q):
+                        for rec in table.records:
+                            t_wib  = rec.get_time().astimezone(wib)
+                            ts_str = t_wib.strftime('%Y-%m-%d %H:%M:%S')
+                            rows_by_ts.setdefault(ts_str, {})
+                            v = rec.get_value()
+                            if v is not None:
+                                rows_by_ts[ts_str][fld] = v
+                if not rows_by_ts:
+                    return jsonify({'error': f'Tidak ada data ditemukan. MySQL error: {influx_err}'}), 404
+                sorted_ts = sorted(rows_by_ts.keys())
+                # Buat energy_kwh relatif (kurangi nilai pertama)
+                first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
+                                  for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
+                output = io.StringIO()
+                writer = _csv.writer(output)
+                writer.writerow(['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
+                                 'Frekuensi (Hz)','Power Factor','Konsumsi Energi (kWh)'])
+                for ts in sorted_ts:
+                    r = rows_by_ts[ts]
+                    kwh_raw = r.get('energy_kwh')
+                    kwh = round(float(kwh_raw) - (first_kwh or 0), 4) if kwh_raw is not None else ''
+                    writer.writerow([ts,
+                        round(r.get('voltage',  0) or 0, 2),
+                        round(r.get('current',  0) or 0, 3),
+                        round(r.get('power',    0) or 0, 1),
+                        round(r.get('frequency',0) or 0, 2),
+                        round(r.get('power_factor', 0) or 0, 3),
+                        kwh,
+                    ])
+                csv_bytes = output.getvalue().encode('utf-8-sig')
+                fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+                return Response(csv_bytes, mimetype='text/csv',
+                                headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+            except Exception as e2:
+                return jsonify({'error': f'MySQL: {influx_err} | InfluxDB: {e2}'}), 500
+
+    # ── Temp / Lux / Occupancy: tetap dari InfluxDB ──────────────────────────
+    wib = timezone(_td(hours=7))
+    try:
+        start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
+        end_utc   = datetime.strptime(to_dt, '%Y-%m-%d').replace(hour=23, minute=59, second=59, tzinfo=wib).astimezone(timezone.utc)
+    except ValueError:
+        return jsonify({'error': 'Invalid date'}), 400
     start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # --- Build Flux query per type ---
     TYPE_MAP = {
-        'energy_ac':   ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_ac'),
-        'energy_lamp': ('energy_monitor', ['voltage','current','power','energy_kwh'], 'device', 'esp32_lamp'),
-        'temp':        ('ac_sensor',      ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3'], None, None),
-        'lux':         ('lamp_sensor',    ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'], None, None),
-        'occupancy':   ('camera_detection',['person_count','confidence'],             None, None),
+        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3'], None, None),
+        'lux':       ('lamp_sensor',     ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'],                        None, None),
+        'occupancy': ('camera_detection',['person_count','confidence'],                                                        None, None),
     }
-    if dtype not in TYPE_MAP:
-        return jsonify({'error': f'Invalid type. Use: {", ".join(TYPE_MAP.keys())}'}), 400
-
     measurement, fields, tag_key, tag_val = TYPE_MAP[dtype]
 
     try:
         _, _, query_api = _get_influx_client()
-        # Query each field separately then merge by timestamp.
-        # For occupancy: aggregate to 1-hour buckets (max person_count, mean confidence)
-        # to keep CSV compact and meaningful (one row per hour).
-        # For other types: export raw records as-is.
         rows_by_ts = {}
         for field in fields:
             tag_filter = f'|> filter(fn: (r) => r["{tag_key}"] == "{tag_val}")\n' if tag_key else ''
@@ -2701,52 +2833,30 @@ from(bucket: "{INFLUX_BUCKET}")
   |> filter(fn: (r) => r["_field"] == "{field}")
   {tag_filter}  |> yield(name: "raw")
 '''
-            result = query_api.query(query=q)
-            for table in result:
+            for table in query_api.query(query=q):
                 for record in table.records:
-                    # Use WIB time as string key
-                    t_wib = record.get_time().astimezone(timezone(_td(hours=7)))
+                    t_wib  = record.get_time().astimezone(wib)
                     ts_str = t_wib.strftime('%Y-%m-%d %H:%M:%S')
-                    if ts_str not in rows_by_ts:
-                        rows_by_ts[ts_str] = {'ts': ts_str}
+                    rows_by_ts.setdefault(ts_str, {'ts': ts_str})
                     rows_by_ts[ts_str][field] = record.get_value()
 
         if not rows_by_ts:
-            return jsonify({'error': 'No data found for the selected date range'}), 404
+            return jsonify({'error': 'Tidak ada data ditemukan untuk rentang tanggal tersebut'}), 404
 
         sorted_ts = sorted(rows_by_ts.keys())
-
-        # For energy types: energy_kwh is a raw PZEM cumulative counter (e.g. 370 kWh since
-        # the sensor was last physically reset). Convert it to relative consumption within
-        # the exported period by subtracting the first value, so row 1 starts at 0.0000 kWh.
-        if dtype in ('energy_ac', 'energy_lamp') and 'energy_kwh' in fields:
-            first_kwh = None
-            for ts in sorted_ts:
-                v = rows_by_ts[ts].get('energy_kwh')
-                if v is not None:
-                    first_kwh = float(v)
-                    break
-            if first_kwh is not None:
-                for ts in sorted_ts:
-                    v = rows_by_ts[ts].get('energy_kwh')
-                    if v is not None:
-                        rows_by_ts[ts]['energy_kwh'] = round(float(v) - first_kwh, 4)
-
-        # Build CSV — rename energy_kwh column to consumption_kwh for energy exports
-        import io, csv as _csv
-        output = io.StringIO()
-        csv_fields = ['consumption_kwh' if (f == 'energy_kwh' and dtype in ('energy_ac','energy_lamp')) else f for f in fields]
-        header = ['Timestamp'] + csv_fields
-        writer = _csv.writer(output)
-        writer.writerow(header)
+        output    = io.StringIO()
+        writer    = _csv.writer(output)
+        writer.writerow(['Timestamp'] + fields)
         for ts_str in sorted_ts:
             row_d = rows_by_ts[ts_str]
-            row = [ts_str] + [round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '') for f in fields]
+            row = [ts_str] + [
+                round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '')
+                for f in fields
+            ]
             writer.writerow(row)
 
-        csv_bytes = output.getvalue().encode('utf-8')
+        csv_bytes = output.getvalue().encode('utf-8-sig')
         fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
-        from flask import Response
         return Response(
             csv_bytes,
             mimetype='text/csv',
@@ -7073,7 +7183,7 @@ HTML_TEMPLATE = '''
             var unit = {power:'W', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
             var fmt = function(v) {
                 return field === 'energy_kwh'
-                    ? v.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+                    ? v.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1')
                     : v.toFixed(2);
             };
             var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
@@ -7107,7 +7217,7 @@ HTML_TEMPLATE = '''
                     var fmtKwh = function(v) {
                         var num = parseFloat(v || 0);
                         if (!Number.isFinite(num)) return '--';
-                        return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+                        return num.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1');
                     };
                     setText('daily-summary-date', d.date || '--');
                     setText('ds-ac-kwh',       d.ac ? fmtKwh(d.ac.kwh) : '--');
@@ -9427,7 +9537,7 @@ HTML_TEMPLATE = '''
             var fkwh = function(v) {
                 var num = parseFloat(v || 0);
                 if (!Number.isFinite(num)) return '0';
-                return num.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+                return num.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1');
             };
 
             // ── Overview page badge + mini cards ──
