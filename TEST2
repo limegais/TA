@@ -218,7 +218,7 @@ AC_MODE_NAMES = {0: 'COOL', 1: 'DRY', 2: 'FAN', 3: 'AUTO'}
 # Live sensor data for fitness calculation
 opt_sensor_data = {
     'temperature': 28.0, 'humidity': 55.0, 'person_detected': False,
-    'lux': 200, 'lux1': 200, 'lux2': 200, 'lux3': 200,
+    'lux': 0, 'lux1': 0, 'lux2': 0, 'lux3': 0,
     'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
     'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default',
     'actual_watt': 0.0, 'power_factor': 1.0,          # real power from MySQL energy meter (0 = not fetched yet)
@@ -392,16 +392,16 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
 
 def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
-    Sesuai spesifikasi:
-        Fitness = Error_lux = ((L1 - 350)^2 + (L2 - 350)^2 + (L3 - 350)^2) / 3
-    Parameter pwm1, pwm2 dalam range 0-255.
-    Lux diestimasi dengan delta model dari PWM saat ini ke kandidat.
+    Rumus: Fitness = (Lux_rata_rata - 350)^2
+    Lux_rata_rata = rata-rata estimasi L1, L2, L3 pada kandidat PWM.
+    Toleransi ±10%: jika 315 ≤ Lux_rata_rata ≤ 385, fitness = 0 (sudah cukup).
     """
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
     lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
     lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX = 350.0 if person_detected else 0.0
+    TOLERANCE = TARGET_LUX * 0.10  # ±10% = ±35 lux
 
     # Konversi brightness saat ini (0-100%) ke PWM (0-255)
     curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
@@ -416,13 +416,14 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
     est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
     est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
 
-    # Rumus: RMSE dinormalisasi ke % terhadap target (lower = better, satuan %)
-    mse = ((est_lux1 - TARGET_LUX) ** 2
-           + (est_lux2 - TARGET_LUX) ** 2
-           + (est_lux3 - TARGET_LUX) ** 2) / 3.0
-    rmse = math.sqrt(mse)
-    ref = TARGET_LUX if TARGET_LUX > 0 else 350.0
-    return round((rmse / ref) * 100.0, 4)   # % error (lower = better)
+    # Rumus: Fitness = (Lux_rata_rata - TARGET)^2
+    avg_est = (est_lux1 + est_lux2 + est_lux3) / 3.0
+
+    # Toleransi ±10%: jika sudah dalam range target, fitness = 0
+    if abs(avg_est - TARGET_LUX) <= TOLERANCE:
+        return 0.0
+
+    return round((avg_est - TARGET_LUX) ** 2, 4)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -498,7 +499,8 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     mqtt_lux1 = mqtt_data['lamp'].get('lux1', 0)
     mqtt_lux2 = mqtt_data['lamp'].get('lux2', 0)
     mqtt_lux3 = mqtt_data['lamp'].get('lux3', 0)
-    mqtt_has_lux = (mqtt_lux1 > 0 or mqtt_lux2 > 0 or mqtt_lux3 > 0)
+    # Gunakan timestamp MQTT, bukan cek lux > 0, agar lux=0 (ruangan gelap) tetap dipakai
+    mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh jika < 2 menit
     if mqtt_has_lux:
         # Data MQTT sudah fresh — update opt_sensor_data langsung, skip lamp InfluxDB query
         opt_sensor_data['lux1'] = round(float(mqtt_lux1), 1)
@@ -526,6 +528,9 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
 
         # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
         # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
+        # Batas stale: jika record InfluxDB lebih tua dari 10 menit, abaikan agar tidak
+        # menimpa opt_sensor_data dengan nilai lama (misal 350 dari sesi sebelumnya).
+        INFLUX_LAX_STALE_LIMIT_S = 600  # 10 menit
         if not mqtt_has_lux:
             lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                           f' |> range(start: -{time_range_minutes}m)'
@@ -534,20 +539,39 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                           f'            or r._field == "lux3" or r._field == "lux_avg"'
                           f'            or r._field == "brightness1" or r._field == "brightness2")'
                           f' |> last()')
+            influx_lux_used = False
             for table in query_api.query(lamp_query):
                 for rec in table.records:
                     field = rec.get_field()
                     val = rec.get_value()
-                    if val is not None:
-                        if field == 'lux_avg':
-                            opt_sensor_data['lux'] = round(float(val), 1)
-                        elif field in ('lux1', 'lux2', 'lux3'):
-                            opt_sensor_data[field] = round(float(val), 1)
-                        elif field == 'brightness1':
-                            opt_sensor_data['curr_brightness1'] = round(float(val), 1)
-                        elif field == 'brightness2':
-                            opt_sensor_data['curr_brightness2'] = round(float(val), 1)
-            print(f"[OPT] Lux dari InfluxDB (last): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                    if val is None:
+                        continue
+                    # Cek umur record — tolak jika terlalu lama (data stale)
+                    rec_time = rec.get_time()
+                    if rec_time is not None:
+                        try:
+                            from datetime import timezone
+                            now_utc = datetime.now(timezone.utc)
+                            age_s = (now_utc - rec_time).total_seconds()
+                            if age_s > INFLUX_LAX_STALE_LIMIT_S:
+                                print(f"[OPT] InfluxDB {field} diabaikan — usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
+                                continue
+                        except Exception:
+                            pass  # jika gagal parse waktu, tetap pakai data
+                    if field == 'lux_avg':
+                        opt_sensor_data['lux'] = round(float(val), 1)
+                        influx_lux_used = True
+                    elif field in ('lux1', 'lux2', 'lux3'):
+                        opt_sensor_data[field] = round(float(val), 1)
+                        influx_lux_used = True
+                    elif field == 'brightness1':
+                        opt_sensor_data['curr_brightness1'] = round(float(val), 1)
+                    elif field == 'brightness2':
+                        opt_sensor_data['curr_brightness2'] = round(float(val), 1)
+            if influx_lux_used:
+                print(f"[OPT] Lux dari InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+            else:
+                print(f"[OPT] InfluxDB lux stale/kosong — pakai opt_sensor_data saat ini: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
 
         opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
@@ -829,16 +853,8 @@ def run_optimization_cycle(algo='both'):
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            # Gunakan PWM delta (bukan %) agar konsisten dengan calculate_lamp_fitness_2d
-            gain_per_pwm = 4.0 / 2.55  # ~1.57 lux per 1 unit PWM
-            curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
-            curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
-            d1 = (pwm1_val - curr_pwm1) * gain_per_pwm
-            d2 = (pwm2_val - curr_pwm2) * gain_per_pwm
-            est1 = max(0.0, lux1 + d1 * 0.8 + d2 * 0.2)
-            est2 = max(0.0, lux2 + d1 * 0.5 + d2 * 0.5)
-            est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
-            lux_achieved = round((est1 + est2 + est3) / 3.0, 1)
+            # lux_achieved: rata-rata SENSOR NYATA L1+L2+L3 (bukan estimasi model)
+            lux_achieved = round((lux1 + lux2 + lux3) / 3.0, 1)
             last_opt_results['pso'] = {
                 'fitness': fit,
                 'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
@@ -1256,6 +1272,7 @@ lamp_runtime_history = deque(maxlen=5000)
 INFLUX_WRITE_INTERVAL = 360  # detik (6 menit)
 _last_sensor_influx_ts   = 0.0   # kapan terakhir ac_sensor ditulis ke InfluxDB
 _last_lamp_influx_ts     = 0.0   # kapan terakhir lamp_sensor ditulis ke InfluxDB
+_last_lamp_mqtt_ts       = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
 _last_ac_energy_influx_ts = 0.0  # kapan terakhir energy AC ditulis ke InfluxDB
 
 # ==================== INFLUXDB SINGLETON ====================
@@ -2077,6 +2094,8 @@ def on_message(client, userdata, msg):
             check_alert_rules()
             
         elif 'lamp/sensors' in topic:
+            global _last_lamp_mqtt_ts
+            _last_lamp_mqtt_ts = time.time()  # catat waktu pesan diterima (walau lux=0)
             l1 = payload.get('lux1', payload.get('lux', 0))
             l2 = payload.get('lux2', l1)
             l3 = payload.get('lux3', l1)
@@ -3476,7 +3495,7 @@ def pso_export_csv():
     wr.writerow(['PWM2 optimal (0-255)', f"{pwm2}"])
     wr.writerow(['Brightness1 (% untuk ESP32)', f"{b1}%"])
     wr.writerow(['Brightness2 (% untuk ESP32)', f"{b2}%"])
-    wr.writerow(['Lux tercapai (estimasi)', f"{lux_achieved} lux"])
+    wr.writerow(['Lux aktual sensor (rata-rata L1+L2+L3)', f"{lux_achieved} lux"])
     wr.writerow(['Target lux', f"{target_lux} lux"])
     wr.writerow([])
 
@@ -7723,8 +7742,8 @@ HTML_TEMPLATE = '''
                             humEl.textContent = Number.isFinite(h) ? h.toFixed(1) : '--';
                         }
                         if (luxEl) {
-                            const lux = d && d.lamp ? (d.lamp.lux_avg || d.lamp.lux1 || d.lamp.lux || '--') : '--';
-                            luxEl.textContent = lux;
+                            const luxRaw = d && d.lamp ? (d.lamp.lux_avg != null ? d.lamp.lux_avg : (d.lamp.lux1 != null ? d.lamp.lux1 : null)) : null;
+                            luxEl.textContent = (typeof luxRaw === 'number') ? luxRaw.toFixed(1) : '--';
                         }
                         if (personEl) personEl.textContent = (d && d.camera && d.camera.person_detected) ? 'Yes' : 'No';
                     }).catch(() => {});
