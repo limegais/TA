@@ -7210,7 +7210,12 @@ HTML_TEMPLATE = '''
             return delta;
         }
 
+        // Track current period per field so auto-refresh doesn't reset user selection
+        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
+
         function loadEnergyHistory(field, period, btnElement) {
+            // Save current period for this field
+            _activePeriod[field] = period;
             // Update button active state
             if (btnElement) {
                 const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
@@ -7297,10 +7302,10 @@ HTML_TEMPLATE = '''
         }
 
         function loadAllEnergyCharts() {
-            loadEnergyHistory('power', '1h', null);
-            loadEnergyHistory('voltage', '1h', null);
-            loadEnergyHistory('current', '1h', null);
-            loadEnergyHistory('energy_kwh', '24h', null);
+            loadEnergyHistory('power',      _activePeriod.power,      null);
+            loadEnergyHistory('voltage',    _activePeriod.voltage,    null);
+            loadEnergyHistory('current',    _activePeriod.current,    null);
+            loadEnergyHistory('energy_kwh', _activePeriod.energy_kwh, null);
             loadEnergyCompare('power');
             loadEnergyCompare('energy_kwh');
             loadLampEnergyCompare('power');
