@@ -3333,7 +3333,7 @@ def energy_history():
 
         if not power_points and not voltage_points and not kwh_points:
             now = datetime.now()
-lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
+            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
             cutoff = now - lookback
             buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
             runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
