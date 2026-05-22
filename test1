@@ -7966,34 +7966,12 @@ HTML_TEMPLATE = '''
                 try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
-                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ML ensureCharts error:', e); }
-                try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
-                // Canvas in hidden page has 0px dimensions — resize after page is visible
-                setTimeout(function() {
-                    // Always init ML charts here: canvas is now visible so offsetWidth > 0
-                    // This handles the case where there is no history data (optimization never run)
-                    if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
-                        try { initMLCharts(); } catch(e) { console.error('[CHART] initMLCharts in setTimeout failed:', e); }
-                    }
-                    ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
-                        try {
-                            if (charts[k] && typeof charts[k].resize === 'function') {
-                                charts[k].resize();
-                                charts[k].update('none');
-                            }
-                        } catch(e) {}
-                    });
-                    // Render data yang tertunda saat tab belum aktif
-                    if (window.__pendingMLData) {
-                        Object.keys(window.__pendingMLData).forEach(function(chartName) {
-                            var d = window.__pendingMLData[chartName];
-                            try { updateMLChart(chartName, d.history, d.algo); } catch(e) {}
-                        });
-                        window.__pendingMLData = {};
-                    }
-                    // Refresh data after resize so charts render with actual values
-                    try { refreshMLData(); } catch(e) {}
-                }, 200);
+                // Use requestAnimationFrame: fires AFTER browser paints the page with display:block
+                // so canvas has real dimensions when initMLCharts() creates the Chart.js instances
+                requestAnimationFrame(function() {
+                    try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
+                });
             }
             if (pageId === 'ac-analytics') {
                 ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
@@ -11348,7 +11326,7 @@ HTML_TEMPLATE = '''
                 });
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
-            // ML charts initialized lazily on first showPage('ml-optimization') — canvas must be visible first
+            // ML charts initialized on first tab open via requestAnimationFrame (canvas must be visible first)
             // Restore recording previews from sessionStorage
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
