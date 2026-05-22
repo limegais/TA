@@ -7181,8 +7181,8 @@ HTML_TEMPLATE = '''
                     responsive: true, maintainAspectRatio: false, animation: false,
                     plugins: { legend: { display: !!showLegend } },
                     scales: {
-                        y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
-                        x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } }
+                        y: { beginAtZero: true, suggestedMax: 1, grid: { color: 'rgba(255,255,255,0.15)' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { color: 'rgba(255,255,255,0.15)' }, ticks: { color: '#94a3b8' } }
                     }
                 };
                 if (showLegend) {
@@ -8059,6 +8059,10 @@ HTML_TEMPLATE = '''
 
             if (data.ga_history && data.ga_history.length > 0) {
                 updateMLChart('gaFitness', data.ga_history, 'GA');
+            } else if (data.ga_fitness != null && parseFloat(data.ga_fitness) > 0) {
+                // Fallback: tampilkan nilai ga_fitness terakhir jika history kosong
+                var gaFit = parseFloat(data.ga_fitness);
+                updateMLChart('gaFitness', [gaFit], 'GA');
             }
             if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
                 updatePSOIterChart(data.pso_iteration_log);
