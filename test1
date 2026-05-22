@@ -7970,6 +7970,11 @@ HTML_TEMPLATE = '''
                 try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
                 // Canvas in hidden page has 0px dimensions — resize after page is visible
                 setTimeout(function() {
+                    // Always init ML charts here: canvas is now visible so offsetWidth > 0
+                    // This handles the case where there is no history data (optimization never run)
+                    if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                        try { initMLCharts(); } catch(e) { console.error('[CHART] initMLCharts in setTimeout failed:', e); }
+                    }
                     ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
                         try {
                             if (charts[k] && typeof charts[k].resize === 'function') {
