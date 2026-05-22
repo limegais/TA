@@ -6585,7 +6585,7 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
-                <canvas id="gaFitnessChart" style="display:block;width:100%;height:200px;"></canvas>
+                <div style="position:relative;width:100%;height:200px;"><canvas id="gaFitnessChart"></canvas></div>
             </div>
 
             <!-- PSO Iteration Detail Chart -->
@@ -6619,7 +6619,7 @@ HTML_TEMPLATE = '''
                         <tbody id="pso-iter-tbody"></tbody>
                     </table>
                 </div>
-                <canvas id="psoFitnessChart" style="display:block;width:100%;height:220px;"></canvas>
+                <div style="position:relative;width:100%;height:220px;"><canvas id="psoFitnessChart"></canvas></div>
             </div>
 
             <!-- GA vs PSO Comparison Chart -->
@@ -6636,7 +6636,7 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
-                <canvas id="comparisonChart" style="display:block;width:100%;height:200px;"></canvas>
+                <div style="position:relative;width:100%;height:200px;"><canvas id="comparisonChart"></canvas></div>
             </div>
 
             <!-- Optimization History Table -->
