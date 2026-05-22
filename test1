@@ -6585,7 +6585,7 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
-                <canvas id="gaFitnessChart" height="80"></canvas>
+                <canvas id="gaFitnessChart" style="display:block;width:100%;height:200px;"></canvas>
             </div>
 
             <!-- PSO Iteration Detail Chart -->
@@ -6619,7 +6619,7 @@ HTML_TEMPLATE = '''
                         <tbody id="pso-iter-tbody"></tbody>
                     </table>
                 </div>
-                <canvas id="psoFitnessChart" height="100"></canvas>
+                <canvas id="psoFitnessChart" style="display:block;width:100%;height:220px;"></canvas>
             </div>
 
             <!-- GA vs PSO Comparison Chart -->
@@ -6636,7 +6636,7 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
-                <canvas id="comparisonChart" height="80"></canvas>
+                <canvas id="comparisonChart" style="display:block;width:100%;height:200px;"></canvas>
             </div>
 
             <!-- Optimization History Table -->
@@ -7178,7 +7178,7 @@ HTML_TEMPLATE = '''
         function initMLCharts() {
             function makeOpts(showLegend) {
                 var opts = {
-                    responsive: true, maintainAspectRatio: true, animation: false,
+                    responsive: true, maintainAspectRatio: false, animation: false,
                     plugins: { legend: { display: !!showLegend } },
                     scales: {
                         y: { beginAtZero: false, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
@@ -7210,7 +7210,7 @@ HTML_TEMPLATE = '''
                     ]
                 },
                 options: {
-                    responsive: true, maintainAspectRatio: true, animation: { duration: 300 },
+                    responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
                     interaction: { mode: 'index', intersect: false },
                     plugins: {
                         legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
@@ -7222,7 +7222,7 @@ HTML_TEMPLATE = '''
                     scales: {
                         x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
                         yPWM: { type: 'linear', position: 'left', min: 0, max: 255, ticks: { color: '#6366f1', font: { size: 10 } }, title: { display: true, text: 'PWM', color: '#6366f1', font: { size: 10 } }, grid: { color: 'rgba(99,102,241,0.08)' } },
-                        yLux: { type: 'linear', position: 'right', min: 0, ticks: { color: '#f59e0b', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+                        yLux: { type: 'linear', position: 'right', min: 0, max: 600, ticks: { color: '#f59e0b', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false } },
                     }
                 }
             });
@@ -7966,12 +7966,11 @@ HTML_TEMPLATE = '''
                 try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
-                // Use requestAnimationFrame: fires AFTER browser paints the page with display:block
-                // so canvas has real dimensions when initMLCharts() creates the Chart.js instances
-                requestAnimationFrame(function() {
-                    try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
-                    try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
+                // Charts initialized at window.onload — just resize and refresh data
+                ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                    if (charts[k] && typeof charts[k].resize === 'function') { charts[k].resize(); }
                 });
+                try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
             }
             if (pageId === 'ac-analytics') {
                 ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
@@ -11326,7 +11325,7 @@ HTML_TEMPLATE = '''
                 });
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
-            // ML charts initialized on first tab open via requestAnimationFrame (canvas must be visible first)
+            try { initMLCharts(); } catch(e) { console.error('[ERROR] initMLCharts:', e); }
             // Restore recording previews from sessionStorage
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
