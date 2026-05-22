@@ -38,7 +38,7 @@ device_last_seen = {
 alert_rules = {
     'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
     'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
-    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 20, 'enabled': True, 'last_person_seen': None}
+    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 5, 'enabled': True, 'last_person_seen': None}
 }
 active_alerts = deque(maxlen=50)
 
@@ -218,7 +218,7 @@ AC_MODE_NAMES = {0: 'COOL', 1: 'DRY', 2: 'FAN', 3: 'AUTO'}
 # Live sensor data for fitness calculation
 opt_sensor_data = {
     'temperature': 28.0, 'humidity': 55.0, 'person_detected': False,
-    'lux': 200, 'lux1': 200, 'lux2': 200, 'lux3': 200,
+    'lux': 0, 'lux1': 0, 'lux2': 0, 'lux3': 0,
     'temp1': 0.0, 'hum1': 0.0, 'temp2': 0.0, 'hum2': 0.0, 'temp3': 0.0, 'hum3': 0.0,
     'temp_trend': 0.0, 'temp_history': [], 'data_source': 'default',
     'actual_watt': 0.0, 'power_factor': 1.0,          # real power from MySQL energy meter (0 = not fetched yet)
@@ -237,7 +237,7 @@ last_opt_results = {
 }
 
 ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 15, 'iterations': 30, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # sesuai spesifikasi
+pso_params = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # w=0.5 konstan (sesuai spesifikasi)
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -392,35 +392,74 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
 
 def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
-    Sesuai spesifikasi:
-        Fitness = Error_lux = ((L1 - 350)^2 + (L2 - 350)^2 + (L3 - 350)^2) / 3
-    Parameter pwm1, pwm2 dalam range 0-255.
-    Lux diestimasi dengan delta model dari PWM saat ini ke kandidat.
+
+    Tujuan:
+    1. Lux_avg mendekati 350 lux (target utama)
+    2. Distribusi antar sensor seimbang — tidak boleh ada sensor yang jauh lebih
+       terang atau gelap dari yang lain
+    3. Setiap sensor minimal 200 lux (tidak ada sudut yang terlalu gelap)
+
+    Rumus fitness:
+        error_avg     = (Lux_avg - 350)^2              → kejar target rata-rata
+        error_balance = variance(L1, L2, L3)            → hukum jika tidak merata
+        error_min     = penalty jika ada sensor < 200   → hukum sudut gelap
+        Fitness = error_avg + w_bal * error_balance + w_min * error_min
+
+    Estimasi lux per sensor menggunakan model proporsional berbasis gain aktual.
     """
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
     lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
     lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
-    TARGET_LUX = 350.0 if person_detected else 0.0
+    TARGET_LUX  = 350.0 if person_detected else 0.0
+    MIN_LUX     = 200.0  # minimum lux yang diterima per sensor
+    W_BALANCE   = 0.5    # bobot penalty distribusi
+    W_MIN       = 1.5    # bobot penalty sensor di bawah minimum (lebih ketat)
 
-    # Konversi brightness saat ini (0-100%) ke PWM (0-255)
-    curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
-    curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+    # PWM rata-rata saat ini (0-255)
+    b1_pct  = float(opt_sensor_data.get('curr_brightness1', 0))
+    b2_pct  = float(opt_sensor_data.get('curr_brightness2', 0))
+    pwm_now = ((b1_pct + b2_pct) / 2.0) * 255.0 / 100.0
 
-    # Delta lux: gunakan gain yang sudah dikalibrasi (mulai ~1.57, update EMA setelah tiap apply)
-    delta1 = (pwm1 - curr_pwm1) * _gain_per_pwm
-    delta2 = (pwm2 - curr_pwm2) * _gain_per_pwm
+    # PWM kandidat rata-rata
+    pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
 
-    # Zone model: lamp1 -> sensor1/2, lamp2 -> sensor2/3
-    est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
-    est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
-    est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
+    # Estimasi lux tiap sensor pada kandidat PWM
+    lux_now = (lux1 + lux2 + lux3) / 3.0
+    if pwm_now > 5:
+        ratio    = pwm_cand / pwm_now
+        est_lux1 = max(0.0, lux1 * ratio)
+        est_lux2 = max(0.0, lux2 * ratio)
+        est_lux3 = max(0.0, lux3 * ratio)
+    else:
+        GAIN_DEFAULT = 1.57
+        est_lux1 = pwm_cand * GAIN_DEFAULT
+        est_lux2 = pwm_cand * GAIN_DEFAULT
+        est_lux3 = pwm_cand * GAIN_DEFAULT
 
-    # Rumus sesuai spesifikasi
-    error = ((est_lux1 - TARGET_LUX) ** 2
-             + (est_lux2 - TARGET_LUX) ** 2
-             + (est_lux3 - TARGET_LUX) ** 2) / 3.0
-    return round(error, 2)
+    lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
+
+    # 1. Error rata-rata terhadap target
+    error_avg = (lux_est_avg - TARGET_LUX) ** 2
+
+    # 2. Penalty distribusi: variance antar sensor (seimbang = variance kecil)
+    mean_e = lux_est_avg
+    variance = ((est_lux1 - mean_e)**2 + (est_lux2 - mean_e)**2 + (est_lux3 - mean_e)**2) / 3.0
+    error_balance = variance
+
+    # 3. Penalty sensor di bawah minimum 200 lux
+    error_min = 0.0
+    for est in [est_lux1, est_lux2, est_lux3]:
+        if est < MIN_LUX:
+            error_min += (MIN_LUX - est) ** 2
+
+    # Toleransi: fitness = 0 jika avg 315-385 DAN semua sensor >= 200
+    if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
+            and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
+        return 0.0
+
+    fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min
+    return round(fitness, 4)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -490,22 +529,25 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     _fetch_mysql_power()
 
     # --- Prioritas 1: gunakan data MQTT real-time jika tersedia (paling segar) ---
-    # lux dan brightness sudah di-sync ke opt_sensor_data setiap pesan ESP32 masuk
-    # via update_opt_sensor_data() di MQTT callback. Hanya fallback ke InfluxDB
-    # jika ESP32 belum terhubung sama sekali (semua nilai nol).
-    mqtt_lux1 = mqtt_data['lamp'].get('lux1', 0)
-    mqtt_lux2 = mqtt_data['lamp'].get('lux2', 0)
-    mqtt_lux3 = mqtt_data['lamp'].get('lux3', 0)
-    mqtt_has_lux = (mqtt_lux1 > 0 or mqtt_lux2 > 0 or mqtt_lux3 > 0)
+    # lux di mqtt_data['lamp'] sudah difilter _filter_lux di MQTT callback.
+    # Hanya fallback ke InfluxDB jika ESP32 belum terhubung (MQTT timeout > 2 menit).
+    mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh jika < 2 menit
     if mqtt_has_lux:
-        # Data MQTT sudah fresh — update opt_sensor_data langsung, skip lamp InfluxDB query
-        opt_sensor_data['lux1'] = round(float(mqtt_lux1), 1)
-        opt_sensor_data['lux2'] = round(float(mqtt_lux2), 1)
-        opt_sensor_data['lux3'] = round(float(mqtt_lux3), 1)
-        opt_sensor_data['lux']  = round((mqtt_lux1 + mqtt_lux2 + mqtt_lux3) / 3.0, 1)
+        # Data MQTT sudah fresh — nilai di mqtt_data['lamp'] sudah melewati _filter_lux
+        # di MQTT callback, jadi langsung sync ke opt_sensor_data tanpa filter ulang.
+        # opt_sensor_data lux sudah diupdate di MQTT callback via update_opt_sensor_data,
+        # tapi kita sync ulang di sini untuk memastikan konsistensi saat PSO membaca.
+        l1 = float(mqtt_data['lamp'].get('lux1', 0))
+        l2 = float(mqtt_data['lamp'].get('lux2', 0))
+        l3 = float(mqtt_data['lamp'].get('lux3', 0))
+        opt_sensor_data['lux1'] = round(l1, 1)
+        opt_sensor_data['lux2'] = round(l2, 1)
+        opt_sensor_data['lux3'] = round(l3, 1)
+        opt_sensor_data['lux']  = round((l1 + l2 + l3) / 3.0, 1)
         opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
         opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
-        print(f"[OPT] Lux dari MQTT: L1={opt_sensor_data['lux1']} L2={opt_sensor_data['lux2']} L3={opt_sensor_data['lux3']} B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
+        print(f"[OPT] Lux dari MQTT (filtered): L1={l1} L2={l2} L3={l3} "
+              f"B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
 
     try:
         _, _, query_api = _get_influx_client()
@@ -524,6 +566,9 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
 
         # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
         # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
+        # Batas stale: jika record InfluxDB lebih tua dari 10 menit, abaikan agar tidak
+        # menimpa opt_sensor_data dengan nilai lama (misal 350 dari sesi sebelumnya).
+        INFLUX_LAX_STALE_LIMIT_S = 600  # 10 menit
         if not mqtt_has_lux:
             lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                           f' |> range(start: -{time_range_minutes}m)'
@@ -532,20 +577,45 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                           f'            or r._field == "lux3" or r._field == "lux_avg"'
                           f'            or r._field == "brightness1" or r._field == "brightness2")'
                           f' |> last()')
+            influx_lux_used = False
             for table in query_api.query(lamp_query):
                 for rec in table.records:
                     field = rec.get_field()
                     val = rec.get_value()
-                    if val is not None:
-                        if field == 'lux_avg':
-                            opt_sensor_data['lux'] = round(float(val), 1)
-                        elif field in ('lux1', 'lux2', 'lux3'):
-                            opt_sensor_data[field] = round(float(val), 1)
-                        elif field == 'brightness1':
-                            opt_sensor_data['curr_brightness1'] = round(float(val), 1)
-                        elif field == 'brightness2':
-                            opt_sensor_data['curr_brightness2'] = round(float(val), 1)
-            print(f"[OPT] Lux dari InfluxDB (last): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                    if val is None:
+                        continue
+                    # Cek umur record — tolak jika terlalu lama (data stale)
+                    rec_time = rec.get_time()
+                    if rec_time is not None:
+                        try:
+                            from datetime import timezone
+                            now_utc = datetime.now(timezone.utc)
+                            age_s = (now_utc - rec_time).total_seconds()
+                            if age_s > INFLUX_LAX_STALE_LIMIT_S:
+                                print(f"[OPT] InfluxDB {field} diabaikan — usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
+                                continue
+                        except Exception:
+                            pass  # jika gagal parse waktu, tetap pakai data
+                    if field == 'lux_avg':
+                        opt_sensor_data['lux'] = round(float(val), 1)
+                        influx_lux_used = True
+                    elif field in ('lux1', 'lux2', 'lux3'):
+                        # Lewatkan _filter_lux agar nilai stale dari InfluxDB juga difilter
+                        # brightness=0 karena fallback ini hanya jalan saat MQTT tidak ada
+                        sensor_idx = {'lux1': 0, 'lux2': 1, 'lux3': 2}[field]
+                        filtered = _filter_lux(float(val), sensor_idx,
+                                               brightness1=opt_sensor_data.get('curr_brightness1', 0),
+                                               brightness2=opt_sensor_data.get('curr_brightness2', 0))
+                        opt_sensor_data[field] = filtered
+                        influx_lux_used = True
+                    elif field == 'brightness1':
+                        opt_sensor_data['curr_brightness1'] = round(float(val), 1)
+                    elif field == 'brightness2':
+                        opt_sensor_data['curr_brightness2'] = round(float(val), 1)
+            if influx_lux_used:
+                print(f"[OPT] Lux dari InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+            else:
+                print(f"[OPT] InfluxDB lux stale/kosong — pakai opt_sensor_data saat ini: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
 
         opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
@@ -662,102 +732,164 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: minimizes Error_lux = ((L1-350)^2 + (L2-350)^2 + (L3-350)^2) / 3
-    Sesuai spesifikasi. X = [PWM1, PWM2], range 0-255.
-    Persamaan update:
-        V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
-        X_i(t+1) = X_i(t) + V_i(t+1)
-    Output: list [pwm1, pwm2] dalam PWM 0-255 (konversi ke % dilakukan oleh caller).
+    """2D PSO dengan baca lux real per iterasi.
+
+    Alur per iterasi:
+        1. Update kecepatan & posisi semua partikel (di memori)
+        2. Tentukan Gbest terbaik dari seluruh swarm
+        3. Kirim Gbest ke lampu via MQTT
+        4. Tunggu sensor BH1750 stabil (~2.5 detik)
+        5. Baca lux nyata dari sensor
+        6. Hitung fitness berdasarkan lux nyata
+        7. Cek stop early: jika lux 315-385 → berhenti
+        8. Cek timeout: jika total > 60 detik → pakai Gbest terakhir
+
+    Lampu hanya berubah SEKALI per iterasi (bukan per partikel).
+
+    Return tambahan: iteration_log — list of dict per iterasi berisi
+        {iter, pwm1, pwm2, b1, b2, lux_avg, fitness}
+        untuk ditampilkan di grafik dashboard.
     """
     swarm_size = pso_params['swarm_size']
-    iterations = pso_params['iterations']
-    w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    DIM = 2  # [PWM1, PWM2]
-    max_vel = 60  # proporsional dengan range 0-255
+    iterations = min(pso_params['iterations'], 10)
+    w  = pso_params['w']
+    c1 = pso_params['c1']
+    c2 = pso_params['c2']
+    DIM = 2
+    max_vel = 60
+    SENSOR_SETTLE_S = 5.0   # 5 detik per iterasi: PWM berubah → lampu stabil → sensor baca
+    TIMEOUT_S = 60.0
 
-    # Inisialisasi posisi dan kecepatan secara acak
-    # X_i = random(0, 255)
-    positions = [
+    # ── Fase 3: Inisialisasi swarm ─────────────────────────────────────────
+    positions  = [
         [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
          for _ in range(DIM)]
         for _ in range(swarm_size)
     ]
-    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)]
+                  for _ in range(swarm_size)]
 
-    # Smart seeding dari hasil sebelumnya (brightness % -> PWM)
-    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
-    seed_b1 = last_opt_results['pso'].get('brightness1', 0)  # 0-100%
-    seed_b2 = last_opt_results['pso'].get('brightness2', 0)  # 0-100%
-    seed_pwm1 = int(seed_b1 * 255 / 100)
-    seed_pwm2 = int(seed_b2 * 255 / 100)
-    seed_is_dark = (seed_pwm1 <= 13 and seed_pwm2 <= 13)
-    if seed_pwm1 > 0 and not (person_now and seed_is_dark):
-        positions[0] = [seed_pwm1, seed_pwm2]
-        for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm1 + random.randint(-26, 26))),
-                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm2 + random.randint(-26, 26)))]
-
-    # Pbest = posisi terbaik tiap partikel (error terkecil)
+    # ── Fase 4: Fitness awal ───────────────────────────────────────────────
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]  # error (minimize)
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
+    g_idx  = pb_fit.index(min(pb_fit))
+    g_pos  = pb_pos[g_idx][:]
+    g_fit  = pb_fit[g_idx]
 
-    # Gbest = partikel dengan error terkecil di seluruh swarm
-    g_idx = pb_fit.index(min(pb_fit))
-    g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+    fitness_history = []   # error per iterasi (untuk grafik konvergensi)
+    iteration_log   = []   # {iter, pwm1, pwm2, b1, b2, lux_avg, fitness} untuk grafik detail
 
-    fitness_history = []
-    stagnation_counter = 0
-    stagnation_limit = max(8, iterations // 6)
-    prev_g_fit = float('inf')  # minimize: awal infinity
+    start_time = time.time()
 
+    # ── Fase 5-7: Loop iterasi dengan baca lux nyata ───────────────────────
     for it in range(iterations):
+        # Timeout check
+        elapsed = time.time() - start_time
+        if elapsed >= TIMEOUT_S:
+            print(f"[PSO] Timeout {TIMEOUT_S:.0f}s di iterasi {it} — pakai Gbest terakhir")
+            break
+
+        # Update kecepatan dan posisi semua partikel (di memori)
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
-                # Update kecepatan: V = w*V + c1*r1*(Pbest-X) + c2*r2*(Gbest-X)
-                velocities[i][d] = (w_start * velocities[i][d]
+                velocities[i][d] = (w * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
-                    + c2 * r2 * (g_pos[d] - positions[i][d]))
+                    + c2 * r2 * (g_pos[d]      - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
-                # Persamaan posisi (sesuai PDF)
-                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
-                                      int(round(positions[i][d] + velocities[i][d]))))
+                positions[i][d]  = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
+                                       int(round(positions[i][d] + velocities[i][d]))))
 
-            fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
+        # Tentukan kandidat Gbest dari posisi baru (estimasi)
+        cand_fits      = [calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
+                          for i in range(swarm_size)]
+        best_cand_idx  = cand_fits.index(min(cand_fits))
+        best_cand_pos  = positions[best_cand_idx][:]
 
-            # Update Pbest: Pbest_i = X_i jika Fitness(X_i) < Fitness(Pbest_i)
-            if fit < pb_fit[i]:
-                pb_fit[i], pb_pos[i] = fit, positions[i][:]
+        # Kirim hanya Gbest kandidat ke lampu — satu kali per iterasi
+        b1_send = round(best_cand_pos[0] * 100.0 / 255.0, 1)
+        b2_send = round(best_cand_pos[1] * 100.0 / 255.0, 1)
+        b1_send, b2_send = _safe_lamp_brightness(b1_send, b2_send)
+        mqtt_client.publish(
+            'smartroom/lamp/control',
+            json.dumps({'brightness1': b1_send, 'brightness2': b2_send, 'source': 'pso_iter'})
+        )
 
-            # Update Gbest: Gbest = min(Fitness(Pbest_i))
-            if fit < g_fit:
-                g_fit, g_pos = fit, positions[i][:]
+        # Emit progress iterasi ke dashboard secara real-time
+        socketio.emit('pso_iter_progress', {
+            'iter': it + 1,
+            'pwm1': best_cand_pos[0], 'pwm2': best_cand_pos[1],
+            'b1': b1_send, 'b2': b2_send,
+            'status': 'waiting'
+        })
 
-        fitness_history.append(g_fit)
+        print(f"[PSO] Iterasi {it+1}/{iterations} — B1={b1_send}% B2={b2_send}% "
+              f"(PWM1={best_cand_pos[0]} PWM2={best_cand_pos[1]}), tunggu sensor...")
 
-        # Stagnation: jika penurunan error < 0.1 selama beberapa iterasi
-        improvement = prev_g_fit - g_fit
-        stagnation_counter = stagnation_counter + 1 if improvement < 0.1 else 0
-        prev_g_fit = g_fit
+        # Tunggu sensor stabil
+        time.sleep(SENSOR_SETTLE_S)
 
-        if stagnation_counter >= stagnation_limit:
-            # Re-randomize partikel terburuk (error tertinggi)
-            re_count = max(2, swarm_size // 5)
-            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si], reverse=True)[:re_count]
-            for si in worst_idx:
-                positions[si] = [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
-                                 for _ in range(DIM)]
-                velocities[si] = [random.uniform(-max_vel, max_vel) for _ in range(DIM)]
-                new_fit = calculate_lamp_fitness_2d(positions[si][0], positions[si][1])
-                pb_pos[si] = positions[si][:]
-                pb_fit[si] = new_fit
-                if new_fit < g_fit:
-                    g_fit, g_pos = new_fit, positions[si][:]
-            stagnation_counter = 0
+        # Baca lux nyata
+        lux1_r = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+        lux2_r = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+        lux3_r = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
+        lux_real = round((lux1_r + lux2_r + lux3_r) / 3.0, 1)
 
-    # Kembalikan Gbest dalam PWM (0-255) langsung — konversi ke % dilakukan oleh caller
+        # Hitung fitness nyata
+        person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+        TARGET_LUX = 350.0 if person_now else 0.0
+        real_fit   = round((lux_real - TARGET_LUX) ** 2, 2)
+
+        print(f"[PSO] Lux nyata={lux_real} | fitness={real_fit} | target={TARGET_LUX:.0f}")
+
+        # Catat log iterasi untuk grafik dashboard
+        log_entry = {
+            'iter':    it + 1,
+            'pwm1':    best_cand_pos[0],
+            'pwm2':    best_cand_pos[1],
+            'b1':      b1_send,
+            'b2':      b2_send,
+            'lux1':    round(lux1_r, 1),
+            'lux2':    round(lux2_r, 1),
+            'lux3':    round(lux3_r, 1),
+            'lux_avg': lux_real,
+            'fitness': real_fit,
+        }
+        iteration_log.append(log_entry)
+        fitness_history.append(real_fit)
+
+        # Emit hasil iterasi ke dashboard (update grafik live)
+        socketio.emit('pso_iter_progress', {**log_entry, 'status': 'done'})
+
+        # Update Pbest
+        if real_fit < pb_fit[best_cand_idx]:
+            pb_fit[best_cand_idx] = real_fit
+            pb_pos[best_cand_idx] = best_cand_pos[:]
+
+        # Update Gbest
+        if real_fit < g_fit:
+            g_fit = real_fit
+            g_pos = best_cand_pos[:]
+        elif abs(real_fit - g_fit) < 1.0:
+            if (best_cand_pos[0] + best_cand_pos[1]) < (g_pos[0] + g_pos[1]):
+                g_pos = best_cand_pos[:]
+
+        # Stop early: lux avg dalam toleransi DAN semua sensor >= 200 lux
+        if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0:
+            if lux1_r >= 200.0 and lux2_r >= 200.0 and lux3_r >= 200.0:
+                print(f"[PSO] Stop early iterasi {it+1} — lux {lux_real} dalam 315-385, "
+                      f"L1={lux1_r} L2={lux2_r} L3={lux3_r} semua ≥200")
+                break
+            else:
+                print(f"[PSO] Lux avg={lux_real} dalam target tapi ada sensor < 200 "
+                      f"(L1={lux1_r} L2={lux2_r} L3={lux3_r}) — lanjut iterasi")
+
+    elapsed_total = time.time() - start_time
+    print(f"[PSO] Selesai {len(fitness_history)} iterasi dalam {elapsed_total:.1f}s | "
+          f"Gbest: PWM1={g_pos[0]} PWM2={g_pos[1]} | fitness={g_fit:.2f}")
+
     initial_error = fitness_history[0] if fitness_history else g_fit
-    return list(g_pos), g_fit, fitness_history, initial_error
+    return list(g_pos), g_fit, fitness_history, initial_error, iteration_log
 
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
@@ -808,16 +940,8 @@ def run_optimization_cycle(algo='both'):
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            # Gunakan PWM delta (bukan %) agar konsisten dengan calculate_lamp_fitness_2d
-            gain_per_pwm = 4.0 / 2.55  # ~1.57 lux per 1 unit PWM
-            curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
-            curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
-            d1 = (pwm1_val - curr_pwm1) * gain_per_pwm
-            d2 = (pwm2_val - curr_pwm2) * gain_per_pwm
-            est1 = max(0.0, lux1 + d1 * 0.8 + d2 * 0.2)
-            est2 = max(0.0, lux2 + d1 * 0.5 + d2 * 0.5)
-            est3 = max(0.0, lux3 + d1 * 0.2 + d2 * 0.8)
-            lux_achieved = round((est1 + est2 + est3) / 3.0, 1)
+            # lux_achieved: rata-rata SENSOR NYATA L1+L2+L3 (bukan estimasi model)
+            lux_achieved = round((lux1 + lux2 + lux3) / 3.0, 1)
             last_opt_results['pso'] = {
                 'fitness': fit,
                 'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
@@ -870,9 +994,9 @@ def run_optimization_cycle(algo='both'):
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
-            # combined_fitness: GA maximize, PSO minimize — normalize PSO error to 0-100 scale before combining
+            # combined_fitness: GA maximize, PSO minimize — PSO fitness sudah dalam % (0-100)
             'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
-                                + max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 100.0) * 0.5
+                                + max(0.0, 100.0 - float(last_opt_results['pso']['fitness'])) * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
         global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
@@ -890,30 +1014,9 @@ def run_optimization_cycle(algo='both'):
                     _last_sent_ac_fan  = int(opt_fan)
                     ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        # Auto-apply Lamp — only when PSO produced fresh results this cycle
-        # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
-        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            person_present = _person_present_recently_lamp()
-            raw_b1 = last_opt_results['pso'].get('brightness1', 0)
-            raw_b2 = last_opt_results['pso'].get('brightness2', 0)
-            if person_present:
-                # Person detected: apply with safety floor
-                opt_b1, opt_b2 = _safe_lamp_brightness(raw_b1, raw_b2)
-                if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                    mqtt_data['lamp']['brightness1'] = opt_b1
-                    mqtt_data['lamp']['brightness2'] = opt_b2
-                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                    _record_lamp_apply(opt_b1, opt_b2)
-            else:
-                # No person: PSO recommends brightness=0, allow sending 0 to turn off lamp
-                opt_b1, opt_b2 = int(raw_b1), int(raw_b2)
-                if _should_apply_lamp(opt_b1, opt_b2):
-                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                    mqtt_data['lamp']['brightness1'] = opt_b1
-                    mqtt_data['lamp']['brightness2'] = opt_b2
-                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                    _record_lamp_apply(opt_b1, opt_b2)
+        # Catatan: Auto-apply lamp PSO TIDAK dilakukan di sini.
+        # Apply PWM lampu dikendalikan sepenuhnya oleh _pso_lamp_cycle()
+        # agar urutan Baca→Hitung→Kirim→Tunggu→Baca tetap terjaga.
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
@@ -1105,31 +1208,213 @@ def sensor_fault_loop():
             print(f"[FAULT] sensor_fault_loop error: {e}")
         time.sleep(60)
 
+def _pso_lamp_cycle():
+    """Satu siklus penuh PSO lampu dengan urutan:
+        1. Baca lux sekarang
+        2. PSO hitung PWM baru
+        3. Kirim PWM ke lampu
+        4. Tunggu 5 menit (timer diatur oleh optimization_auto_loop)
+        5. Baca lux baru  → evaluasi → ulang dari langkah 2
+
+    Return: True jika siklus berjalan normal, False jika dilewati.
+    """
+    global _pso_locked, _pso_lock_pwm
+
+    # ── Langkah 1: Baca lux sekarang ─────────────────────────────────────────
+    # Paksa refresh opt_sensor_data dari MQTT/InfluxDB sebelum membaca nilai lux
+    fetch_sensor_data_from_db()
+    lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+    lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+    lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
+    lux_avg = (lux1 + lux2 + lux3) / 3.0
+    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+    mode_now = mqtt_data['lamp'].get('mode', 'MANUAL')
+
+    print(f"[PSO] Siklus baru — Lux avg={lux_avg:.1f} | Orang={'ya' if person_now else 'tidak'} | Mode={mode_now}")
+
+    # Hanya jalan di mode ADAPTIVE
+    if mode_now != 'ADAPTIVE':
+        print(f"[PSO] Mode {mode_now} — siklus dilewati")
+        return False
+
+    # PSO hanya berjalan jika ada orang di ruangan
+    # Jika tidak ada orang: matikan lampu dan berhenti
+    if not person_now:
+        b1_now = mqtt_data['lamp'].get('brightness1', 0)
+        b2_now = mqtt_data['lamp'].get('brightness2', 0)
+        if b1_now > 0 or b2_now > 0:
+            mqtt_client.publish('smartroom/lamp/control',
+                json.dumps({'brightness1': 0, 'brightness2': 0, 'source': 'adaptive_no_person'}))
+            mqtt_data['lamp']['brightness1'] = 0
+            mqtt_data['lamp']['brightness2'] = 0
+            mqtt_data['lamp']['brightness_avg'] = 0
+            socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+            _record_lamp_apply(0, 0)
+            print(f"[PSO] Tidak ada orang — lampu dimatikan, PSO tidak jalan")
+        else:
+            print(f"[PSO] Tidak ada orang — lampu sudah mati, PSO tidak jalan")
+        return False
+
+    # ── Evaluasi lux saat ini terhadap target ─────────────────────────────────
+    # Di sini person_now sudah pasti True (sudah dicek di atas)
+    # Konvergen jika: lux avg 315-385 DAN semua sensor >= 200 lux
+    lux_in_range = (315.0 <= lux_avg <= 385.0
+                    and lux1 >= 200.0 and lux2 >= 200.0 and lux3 >= 200.0)
+
+    if lux_in_range:
+        if not _pso_locked:
+            _pso_lock_pwm[0] = mqtt_data['lamp'].get('brightness1', 0)
+            _pso_lock_pwm[1] = mqtt_data['lamp'].get('brightness2', 0)
+            _pso_locked = True
+        print(f"[PSO] Lux {lux_avg:.1f} dalam toleransi — brightness dikunci "
+              f"(B1={_pso_lock_pwm[0]}% B2={_pso_lock_pwm[1]}%), tidak ada perubahan PWM")
+        return False  # tidak perlu lanjut ke langkah 2-3
+
+    # Lux di luar target — buka kunci
+    _pso_locked = False
+    _pso_lock_pwm[0] = None
+    _pso_lock_pwm[1] = None
+    print(f"[PSO] Lux {lux_avg:.1f} di luar 315-385 — lanjut ke hitung PWM")
+
+    # ── Langkah 2: PSO — hitung PWM, kirim per iterasi, stop jika konvergen ──
+    g_pos, g_fit, fitness_history, initial_err, iteration_log = run_pso_optimization()
+    pwm1_val = int(g_pos[0])
+    pwm2_val = int(g_pos[1])
+    b1 = round(pwm1_val * 100.0 / 255.0, 1)
+    b2 = round(pwm2_val * 100.0 / 255.0, 1)
+    b_avg = round((b1 + b2) / 2.0, 1)
+    target_lux = 350.0 if person_now else 0.0
+
+    # Simpan hasil PSO termasuk iteration_log untuk grafik dashboard
+    last_opt_results['pso'].update({
+        'brightness': b_avg, 'brightness1': b1, 'brightness2': b2,
+        'pwm1': pwm1_val, 'pwm2': pwm2_val,
+        'fitness': round(g_fit, 4),
+        'stats': fitness_history[-20:] if len(fitness_history) >= 20 else fitness_history,
+        'iteration_log': iteration_log,
+        'initial_error': round(initial_err, 2),
+        'final_error': round(g_fit, 2),
+        'lux_achieved': lux_avg,
+        'target_lux': target_lux,
+        'run_time': datetime.now().strftime('%d %b %Y %H:%M'),
+        'params': {
+            'swarm_size': pso_params['swarm_size'], 'iterations': pso_params['iterations'],
+            'w': pso_params['w'], 'c1': pso_params['c1'], 'c2': pso_params['c2'],
+        },
+    })
+
+    # ── Langkah 3: Kirim Gbest final ke lampu ────────────────────────────────
+    # PSO sudah mengirim Gbest di setiap iterasi. Langkah ini memastikan
+    # lampu berada di posisi Gbest terbaik setelah semua iterasi selesai.
+    opt_b1, opt_b2 = _safe_lamp_brightness(b1, b2)
+    mqtt_client.publish(
+        'smartroom/lamp/control',
+        json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive_final'})
+    )
+    # Sinkron mqtt_data['lamp'] langsung — jangan tunggu MQTT balik dari ESP32
+    # agar Lamp Dashboard brightness terupdate segera
+    mqtt_data['lamp']['brightness1']    = opt_b1
+    mqtt_data['lamp']['brightness2']    = opt_b2
+    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+    _record_lamp_apply(opt_b1, opt_b2)
+    # Emit ke semua client agar Lamp Dashboard dan ML Optimization sinkron seketika
+    socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+    print(f"[PSO] Gbest final dikirim — B1={opt_b1}% B2={opt_b2}% | fitness={g_fit:.2f}")
+
+    # Fitness dalam persen: 100% = lux tepat 350, turun seiring error membesar
+    # Skala: error=0 → 100%, error=350^2=122500 → 0%
+    fitness_pct = round(max(0.0, 100.0 - (g_fit / 122500.0) * 100.0), 1)
+
+    # Update dashboard & InfluxDB
+    persist_opt_results('pso')
+    mqtt_data['system'].update({
+        'pso_fitness': fitness_pct,
+        'pso_pwm1': pwm1_val, 'pso_pwm2': pwm2_val,
+        'pso_brightness': b_avg, 'pso_brightness1': b1, 'pso_brightness2': b2,
+        'pso_history': fitness_history,
+    })
+    socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+    socketio.emit('ml_status', {
+        'status': 'completed', 'algorithm': 'pso',
+        'pso_fitness': fitness_pct,
+        'pso_history': fitness_history,
+        'pso_iteration_log': iteration_log,
+        'pso_solution': {
+            'brightness': b_avg, 'brightness1': b1, 'brightness2': b2,
+            'pwm1': pwm1_val, 'pwm2': pwm2_val,
+        }
+    })
+    write_to_influxdb('optimization_result', {
+        'pso_fitness': float(g_fit),
+        'pso_pwm1': float(pwm1_val), 'pso_pwm2': float(pwm2_val),
+        'pso_brightness': float(b_avg),
+        'pso_brightness1': float(b1), 'pso_brightness2': float(b2),
+        'pso_error': float(g_fit),
+    })
+
+    # ── Langkah 4 & 5: Tunggu 5 menit lalu baca lux baru ────────────────────
+    # Penantian 5 menit dikendalikan oleh optimization_auto_loop via last_pso_time.
+    # Pembacaan lux baru otomatis terjadi saat siklus berikutnya dipanggil (Langkah 1).
+    print(f"[PSO] Selesai — tunggu 5 menit, lux baru akan dibaca di siklus berikutnya")
+
+    # Cek apakah PSO berhasil konvergen (lux akhir dalam toleransi)
+    lux1_f = float(opt_sensor_data.get('lux1', 0))
+    lux2_f = float(opt_sensor_data.get('lux2', 0))
+    lux3_f = float(opt_sensor_data.get('lux3', 0))
+    lux_final = (lux1_f + lux2_f + lux3_f) / 3.0
+    # Konvergen jika: ada orang + lux avg 315-385 + semua sensor >= 200
+    converged = (315.0 <= lux_final <= 385.0
+                 and lux1_f >= 200.0 and lux2_f >= 200.0 and lux3_f >= 200.0)
+    print(f"[PSO] Lux akhir={lux_final:.1f} (L1={lux1_f} L2={lux2_f} L3={lux3_f}) "
+          f"— {'KONVERGEN' if converged else 'BELUM konvergen, akan ulang'}")
+    return converged
+
+
 def optimization_auto_loop():
-    """Background thread: GA (AC) and PSO (Lamp) always run in separate cycles.
-    CRITICAL: 'both' is NEVER used — GA and PSO must never coincide so that
-    an AC signal never causes a lamp brightness change at the same time."""
-    time.sleep(10)  # wait for Flask + MQTT to start
+    """Background thread: GA (AC) dan PSO (Lamp) berjalan di siklus terpisah.
+    PSO lamp:
+      - Jika lux sudah dalam 315-385: tunggu 5 menit lalu cek lagi
+      - Jika lux belum di target: langsung ulang PSO tanpa tunggu 5 menit
+    GA dan PSO tidak pernah jalan bersamaan."""
+    time.sleep(10)
     print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
-    last_ga_time = 0
+    last_ga_time  = 0
     last_pso_time = 0
     while True:
         try:
-            now = time.time()
-            run_ga = (now - last_ga_time) >= AUTO_OPT_INTERVAL_AC
+            now     = time.time()
+            run_ga  = (now - last_ga_time)  >= AUTO_OPT_INTERVAL_AC
             run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
-            # GA and PSO are ALWAYS separate — one per check interval.
-            # If both timers are due simultaneously, GA (AC) runs first;
-            # PSO (Lamp) is deferred to the next check (~30s later).
+
             if run_ga:
                 run_optimization_cycle('ga')
                 last_ga_time = time.time()
             elif run_pso:
-                run_optimization_cycle('pso')
-                last_pso_time = time.time()
+                # Beri sinyal ke dashboard bahwa siklus PSO baru dimulai
+                socketio.emit('pso_iter_progress', {'status': 'new_cycle'})
+                converged = _pso_lamp_cycle()
+                now_after = time.time()
+                if converged:
+                    # Lux sudah dalam target — tunggu normal 5 menit
+                    last_pso_time = now_after
+                    print(f"[PSO] Konvergen — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                else:
+                    # Lux belum di target (atau mode bukan ADAPTIVE) —
+                    # cek apakah memang karena sudah di target (_pso_locked)
+                    # atau karena belum konvergen
+                    if _pso_locked:
+                        # Sudah di target, kunci aktif — tunggu normal
+                        last_pso_time = now_after
+                        print(f"[PSO] Lux dikunci dalam target — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                    else:
+                        # Belum konvergen — langsung ulang PSO tanpa tunggu 5 menit
+                        # Beri jeda singkat 10 detik agar sensor stabil
+                        print(f"[PSO] Belum konvergen — ulang PSO dalam 10 detik")
+                        last_pso_time = now_after - AUTO_OPT_INTERVAL_LAMP + 10
+
         except Exception as e:
             print(f"[OPT] Auto cycle error: {e}")
-        time.sleep(30)  # check every 30s
+        time.sleep(15)  # cek timer lebih sering (15 detik) agar re-run cepat
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -1157,7 +1442,7 @@ _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
 NO_PERSON_TIMEOUT_SECONDS = 300  # 5 menit no person -> AC auto OFF
-NO_PERSON_LAMP_TIMEOUT = 1200    # 20 menit no person -> Lamp auto OFF
+NO_PERSON_LAMP_TIMEOUT = 300     # 5 menit no person -> Lamp auto OFF
 AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
@@ -1170,34 +1455,87 @@ _latest_frame_bytes = None
 _latest_frame_lock = threading.Lock()
 _detection_thread_running = False
 
-# ── Lamp gain auto-calibration (EMA) ─────────────────────────────────────────
-# gain_per_pwm: estimasi kenaikan lux per 1 unit PWM.
-# Nilai awal dari asumsi teoritis; di-update EMA setiap apply+feedback.
-_gain_per_pwm = 4.0 / 2.55          # ~1.57 lux/PWM (nilai awal)
-GAIN_EMA_ALPHA   = 0.2               # bobot data baru dalam EMA (0=tidak berubah, 1=replace langsung)
-GAIN_MIN, GAIN_MAX = 0.3, 6.0       # clamp: cegah gain outlier dari noise sensor
-# Closed-loop feedback: catat state sebelum apply agar bisa kalkulasi delta aktual
-_pending_calibration = None          # None | {'pwm1': x, 'pwm2': x, 'lux1': x, 'lux2': x, 'lux3': x, 'ts': t}
+# Lamp apply: tidak ada kalibrasi gain EMA (sesuai dokumen spesifikasi)
+_pending_calibration = None  # tidak dipakai, dipertahankan untuk kompatibilitas referensi
+
+# ── Filter BH1750: validasi + EMA smoothing ───────────────────────────────────
+# BH1750 kadang menghasilkan spike tinggi (ratusan/ribuan lux) saat kondisi gelap
+# akibat I2C noise atau pembacaan sebelum konversi selesai. Filter ini mencegah
+# nilai anomali masuk ke PSO dan InfluxDB.
+LUX_MAX_PHYSICAL   = 65535.0  # batas hardware BH1750 (16-bit)
+LUX_SPIKE_RATIO    = 5.0      # bacaan > 5x EMA sebelumnya dianggap spike
+LUX_DARK_THRESHOLD = 10.0     # jika brightness1=brightness2=0, lux harusnya < ini
+LUX_EMA_ALPHA      = 0.3      # bobot data baru dalam smoothing (0=ignore, 1=raw)
+# EMA state per sensor (None = belum diinisialisasi, pakai raw pertama kali)
+_lux_ema = [None, None, None]  # [L1_ema, L2_ema, L3_ema]
+
+# ── PWM lock: jangan ubah brightness jika lux sudah di target ────────────────
+_pso_locked = False   # True = lux in range, PWM dikunci, PSO tidak apply
+_pso_lock_pwm = [None, None]  # [b1%, b2%] yang dikunci
+
+def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
+    """Validasi pembacaan BH1750 yang diterima dari ESP32.
+
+    ESP32 sudah menjalankan: raw -> kalibrasi -> median filter (5 sampel).
+    Raspi TIDAK menerapkan EMA lagi agar tidak terjadi double-smoothing yang
+    menyebabkan nilai dashboard berbeda jauh dari Serial Monitor ESP32.
+
+    Raspi hanya melakukan:
+    1. Batas fisik: nilai negatif atau > 65535 -> pakai nilai terakhir valid.
+    2. Ghost lux: lampu OFF tapi sensor baca tinggi -> kembalikan 0.
+       - Grace period 8 detik setelah PSO kirim brightness=0.
+    3. Spike detection: nilai > LUX_SPIKE_RATIO x referensi -> buang.
+       Referensi = nilai valid terakhir (bukan EMA).
+    """
+    global _lux_ema  # dipakai sebagai "nilai valid terakhir", bukan EMA
+    raw = float(raw_val)
+
+    # 1. Batas fisik BH1750 (16-bit)
+    if raw < 0 or raw > LUX_MAX_PHYSICAL:
+        return round(_lux_ema[sensor_idx], 1) if _lux_ema[sensor_idx] is not None else 0.0
+
+    lamp_is_off = (brightness1 <= 0 and brightness2 <= 0)
+
+    # 2. Ghost lux saat lampu mati
+    # PENTING: lamp_is_off TIDAK berarti ruangan gelap — bisa ada cahaya alami (sinar matahari, dll).
+    # Kita hanya curiga ghost lux jika:
+    # - Nilai JAUH lebih tinggi dari referensi sebelumnya (spike besar saat lampu baru mati)
+    # - DAN masih dalam grace period (lampu baru saja dimatikan)
+    if lamp_is_off:
+        time_since_apply = time.time() - _last_adaptive_lamp_apply
+        in_grace = time_since_apply < 8.0
+
+        if in_grace and raw > LUX_DARK_THRESHOLD:
+            # Dalam grace period: sensor mungkin masih membaca sisa cahaya lampu
+            # Pertahankan referensi lama sampai lampu benar-benar padam
+            if _lux_ema[sensor_idx] is not None:
+                return round(_lux_ema[sensor_idx], 1)
+            return round(raw, 1)
+        # Setelah grace period: terima nilai apa adanya — bisa saja ada cahaya alami
+        # Tidak reset ke 0 secara otomatis, biarkan spike detection yang menentukan
+
+    # 3. Spike detection: buang jika jauh melebihi referensi terakhir
+    if _lux_ema[sensor_idx] is not None and _lux_ema[sensor_idx] > 5.0:
+        if raw > _lux_ema[sensor_idx] * LUX_SPIKE_RATIO:
+            print(f"[LUX_FILTER] L{sensor_idx+1}: spike {raw:.1f} lx "
+                  f"(ref={_lux_ema[sensor_idx]:.1f}) -> dibuang")
+            return round(_lux_ema[sensor_idx], 1)
+
+    # Lolos semua cek — simpan sebagai referensi terakhir dan kembalikan langsung
+    _lux_ema[sensor_idx] = raw
+    return round(raw, 1)
 
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
-_last_sent_ac_temp = 0          # last GA-recommended temp that was actually sent to AC
-_last_sent_ac_fan  = 0          # last GA-recommended fan speed that was actually sent to AC
-# Lamp adaptive: track last sent brightness AND lux snapshot to prevent PSO stochastic noise
+_last_sent_ac_temp = 0
+_last_sent_ac_fan  = 0
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
-_last_apply_lux1 = -1.0   # lux readings captured at last lamp apply (lux stability gate)
-_last_apply_lux2 = -1.0
-_last_apply_lux3 = -1.0
 AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
-AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1°C vs last sent
+AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1 deg vs last sent
 AC_CHANGE_THRESHOLD_FAN = 1     # skip AC SET if fan speed unchanged vs last sent
-LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — PSO is stochastic, no need to apply every 3-min run
-LAMP_CHANGE_THRESHOLD = 8       # minimum 8% brightness change (PSO natural noise is ~5-7%)
-LUX_CHANGE_THRESHOLD = 30.0     # lux must change >30 before a new brightness is warranted
-LUX_FORCE_APPLY_TIMEOUT = 1800  # 30 min — bypass lux gate if PSO hasn't applied in this long (stable room)
-LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
+LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — sesuai interval PSO dokumen
 
 # Global data storage
 mqtt_data = {
@@ -1234,6 +1572,7 @@ lamp_runtime_history = deque(maxlen=5000)
 INFLUX_WRITE_INTERVAL = 360  # detik (6 menit)
 _last_sensor_influx_ts   = 0.0   # kapan terakhir ac_sensor ditulis ke InfluxDB
 _last_lamp_influx_ts     = 0.0   # kapan terakhir lamp_sensor ditulis ke InfluxDB
+_last_lamp_mqtt_ts       = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
 _last_ac_energy_influx_ts = 0.0  # kapan terakhir energy AC ditulis ke InfluxDB
 
 # ==================== INFLUXDB SINGLETON ====================
@@ -1476,63 +1815,34 @@ def _person_present_recently_lamp():
     return time_confirmed or currently_detected
 
 def _safe_lamp_brightness(b1, b2):
-    """If person is present, clamp brightness to at least LAMP_MIN_BRIGHTNESS_PERSON.
-    This prevents PSO from dimming lamp to near-zero due to brief false 'no person' detections."""
-    if _person_present_recently_lamp():
-        b1 = max(b1, LAMP_MIN_BRIGHTNESS_PERSON)
-        b2 = max(b2, LAMP_MIN_BRIGHTNESS_PERSON)
-    return int(b1), int(b2)
+    """Pastikan nilai brightness tidak negatif."""
+    return max(0, int(b1)), max(0, int(b2))
 
 def _should_apply_lamp(b1, b2):
-    """Return True only if brightness changed enough AND debounce elapsed AND lux changed."""
-    global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+    """Return True jika debounce 5 menit sudah lewat (sesuai interval dokumen)."""
+    global _last_adaptive_lamp_apply
     now = time.time()
-    b1i, b2i = int(b1), int(b2)
-    debounce_ok = (now - _last_adaptive_lamp_apply) >= LAMP_ADAPTIVE_DEBOUNCE
-    change_ok = (abs(b1i - _last_sent_lamp_b1) >= LAMP_CHANGE_THRESHOLD or
-                 abs(b2i - _last_sent_lamp_b2) >= LAMP_CHANGE_THRESHOLD)
-    if not debounce_ok or not change_ok:
+    if (now - _last_adaptive_lamp_apply) < LAMP_ADAPTIVE_DEBOUNCE:
         return False
-    # Lux stability gate: if the light environment hasn't changed meaningfully since the
-    # last apply, PSO randomness alone must not cause lamp flicker. Only allow if lux
-    # changed >LUX_CHANGE_THRESHOLD on at least one sensor, or if this is the first apply
-    # after a reset (_last_apply_lux1 == -1.0).
-    if _last_apply_lux1 >= 0.0:
-        # Bypass lux gate jika sudah terlalu lama tidak apply (ruangan stabil, tetap perlu koreksi)
-        force_apply = (now - _last_adaptive_lamp_apply) >= LUX_FORCE_APPLY_TIMEOUT
-        if not force_apply:
-            cur_lux1 = opt_sensor_data.get('lux1', -1.0)
-            cur_lux2 = opt_sensor_data.get('lux2', -1.0)
-            cur_lux3 = opt_sensor_data.get('lux3', -1.0)
-            if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
-                lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
-                               abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
-                               abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
-                if not lux_changed:
-                    return False  # environment stable — PSO noise must not cause flicker
     return True
 
 def _record_lamp_apply(b1, b2):
-    """Update brightness tracking and capture lux snapshot for the stability gate.
-    Also records pre-apply lux state for closed-loop gain calibration."""
+    """Catat waktu terakhir apply brightness ke lampu.
+    Jika brightness=0 (lampu dimatikan), schedule EMA reset setelah grace period
+    agar filter langsung siap menerima lux=0 tanpa drift lambat.
+    """
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3, _pending_calibration
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
-    _last_apply_lux1 = float(opt_sensor_data.get('lux1', _last_apply_lux1))
-    _last_apply_lux2 = float(opt_sensor_data.get('lux2', _last_apply_lux2))
-    _last_apply_lux3 = float(opt_sensor_data.get('lux3', _last_apply_lux3))
-    # Simpan state sebelum apply untuk kalkulasi gain setelah feedback tiba
-    pwm1 = b1 * 255.0 / 100.0
-    pwm2 = b2 * 255.0 / 100.0
-    _pending_calibration = {
-        'pwm1': pwm1, 'pwm2': pwm2,
-        'lux1': _last_apply_lux1, 'lux2': _last_apply_lux2, 'lux3': _last_apply_lux3,
-        'prev_pwm1': float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0,
-        'prev_pwm2': float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0,
-        'ts': time.time()
-    }
+    # Jika lampu dimatikan, reset EMA sekarang ke nilai rendah agar
+    # setelah grace period 8 detik, ghost lux langsung terdeteksi dengan threshold tepat.
+    if int(b1) == 0 and int(b2) == 0:
+        for i in range(3):
+            if _lux_ema[i] is not None and _lux_ema[i] > LUX_DARK_THRESHOLD:
+                # Set ke nilai batas, bukan 0, agar spike detection masih bekerja
+                # kalau ada cahaya alami yang sebenarnya masuk ke ruangan
+                _lux_ema[i] = LUX_DARK_THRESHOLD
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
@@ -1572,14 +1882,9 @@ def handle_person_based_control(person_count):
             if _lamp_auto_off_triggered:
                 _lamp_auto_off_triggered = False
                 global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-                global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
                 _last_sent_lamp_b1 = -1
                 _last_sent_lamp_b2 = -1
                 _last_adaptive_lamp_apply = 0
-                # Reset lux cache so the first PSO result after person returns always passes the gate
-                _last_apply_lux1 = -1.0
-                _last_apply_lux2 = -1.0
-                _last_apply_lux3 = -1.0
             _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
@@ -2034,11 +2339,14 @@ def on_message(client, userdata, msg):
             check_alert_rules()
             
         elif 'lamp/sensors' in topic:
-            l1 = payload.get('lux1', payload.get('lux', 0))
-            l2 = payload.get('lux2', l1)
-            l3 = payload.get('lux3', l1)
+            global _last_lamp_mqtt_ts
+            _last_lamp_mqtt_ts = time.time()
             b1 = payload.get('brightness1', payload.get('brightness', 0))
             b2 = payload.get('brightness2', b1)
+            # Filter BH1750: validasi + ghost lux + spike detection
+            l1 = _filter_lux(payload.get('lux1', payload.get('lux', 0)), 0, b1, b2)
+            l2 = _filter_lux(payload.get('lux2', payload.get('lux', 0)), 1, b1, b2)
+            l3 = _filter_lux(payload.get('lux3', payload.get('lux', 0)), 2, b1, b2)
             mqtt_data['lamp'].update({
                 'lux1': l1, 'lux2': l2, 'lux3': l3,
                 'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
@@ -2053,32 +2361,6 @@ def on_message(client, userdata, msg):
             save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3,
                                     curr_brightness1=b1, curr_brightness2=b2)
-            # ── Closed-loop gain calibration ──────────────────────────────────
-            # Jika ada pending calibration (baru apply PSO), hitung gain aktual
-            # dari perubahan lux yang terjadi, lalu update EMA.
-            # Tunggu minimal 4 detik agar ESP32 sempat baca ulang sensor.
-            global _pending_calibration
-            if _pending_calibration is not None:
-                elapsed = time.time() - _pending_calibration['ts']
-                if elapsed >= 4.0:  # cukup waktu untuk sensor merespons
-                    delta_pwm1 = _pending_calibration['pwm1'] - _pending_calibration['prev_pwm1']
-                    delta_pwm2 = _pending_calibration['pwm2'] - _pending_calibration['prev_pwm2']
-                    total_delta_pwm = abs(delta_pwm1) + abs(delta_pwm2)
-                    if total_delta_pwm >= 10:  # hanya kalkulasi jika perubahan cukup besar
-                        # Rata-rata delta lux aktual dari ketiga sensor
-                        delta_lux_actual = ((l1 - _pending_calibration['lux1'])
-                                           + (l2 - _pending_calibration['lux2'])
-                                           + (l3 - _pending_calibration['lux3'])) / 3.0
-                        if total_delta_pwm > 0 and abs(delta_lux_actual) > 1.0:
-                            actual_gain = abs(delta_lux_actual) / total_delta_pwm
-                            if GAIN_MIN <= actual_gain <= GAIN_MAX:
-                                global _gain_per_pwm
-                                old_gain = _gain_per_pwm
-                                _gain_per_pwm = (1 - GAIN_EMA_ALPHA) * _gain_per_pwm + GAIN_EMA_ALPHA * actual_gain
-                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {_gain_per_pwm:.3f} '
-                                      f'(actual={actual_gain:.3f}, delta_pwm={total_delta_pwm:.1f}, '
-                                      f'delta_lux={delta_lux_actual:.1f})')
-                    _pending_calibration = None  # selesai, hapus pending
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -2153,7 +2435,7 @@ def on_message(client, userdata, msg):
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
                 # PSO is minimize (error), GA is maximize — normalize before combining
                 'combined_fitness': float(mqtt_data['system']['ga_fitness']) * 0.5
-                                    + max(0.0, 100.0 - float(mqtt_data['system']['pso_fitness']) / 100.0) * 0.5
+                                    + max(0.0, 100.0 - float(mqtt_data['system']['pso_fitness'])) * 0.5
             })
             # AUTO-APPLY AC — only if ga_solution was present in this payload
             if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
@@ -3195,15 +3477,17 @@ def energy_history():
     device = request.args.get('device', 'ac')  # 'ac' or 'lamp'
 
     period_map = {
-        '1h':  {'range': '-1h',  'window': '1m'},
-        '6h':  {'range': '-6h',  'window': '5m'},
-        '24h': {'range': '-24h', 'window': '15m'},
-        '7d':  {'range': '-7d',  'window': '1h'},
-        '30d': {'range': '-30d', 'window': '6h'}
+        '1h':   {'range': '-1h',   'window': '1m'},
+        '6h':   {'range': '-6h',   'window': '5m'},
+        '24h':  {'range': '-24h',  'window': '5m'},
+        '7d':   {'range': '-7d',   'window': '1h'},
+        '30d':  {'range': '-30d',  'window': '6h'},
+        '12mo': {'range': '-12mo', 'window': '1mo'},  # bulanan: 12 bulan terakhir
+        '5y':   {'range': '-5y',   'window': '1y'},   # tahunan: 5 tahun terakhir
     }
 
     if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y'}), 400
 
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
@@ -3216,17 +3500,27 @@ def energy_history():
     try:
         _, _, query_api = _get_influx_client()
 
-        time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
+        if period in ('1h', '6h', '24h'):
+            time_format = '%H:%M'
+        elif period in ('7d', '30d'):
+            time_format = '%m/%d %H:%M'
+        elif period == '12mo':
+            time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
+        else:  # 5y
+            time_format = '%Y'      # 2024, 2025, 2026, ...
 
         def query_field_points(field_name):
+            # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
+            # setiap interval diambil (bukan rata-rata), sehingga JS bisa diff antar titik
+            agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field_name}")
               |> filter(fn: (r) => r["device"] == "{device_tag}")
-              |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
-              |> yield(name: "mean")
+              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false)
+              |> yield(name: "{agg_fn}")
             '''
             result = query_api.query(query=query)
             points = []
@@ -3243,7 +3537,7 @@ def energy_history():
             # Fallback to runtime buffer when InfluxDB has no data yet
             if not data_points:
                 now = datetime.now()
-                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
+                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
                 cutoff = now - lookback
                 buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
                 runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
@@ -3258,7 +3552,7 @@ def energy_history():
 
         if not power_points and not voltage_points and not kwh_points:
             now = datetime.now()
-            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
+            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
             cutoff = now - lookback
             buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
             runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
@@ -3281,19 +3575,21 @@ def energy_history():
 def ml_status():
     """Return current ML optimization state for the ML page"""
     return jsonify({
-        'ga_fitness': mqtt_data['system'].get('ga_fitness', 0),
-        'pso_fitness': mqtt_data['system'].get('pso_fitness', 0),
-        'ga_temp': mqtt_data['system'].get('ga_temp', 0),
-        'ga_fan': mqtt_data['system'].get('ga_fan', 0),
-        'ga_mode': mqtt_data['system'].get('ga_mode', 'COOL'),
-        'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
-        'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
-        'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
-        'pso_pwm1': mqtt_data['system'].get('pso_pwm1', 0),
-        'pso_pwm2': mqtt_data['system'].get('pso_pwm2', 0),
+        'ga_fitness':       mqtt_data['system'].get('ga_fitness', 0),
+        'pso_fitness':      mqtt_data['system'].get('pso_fitness', 0),
+        'ga_temp':          mqtt_data['system'].get('ga_temp', 0),
+        'ga_fan':           mqtt_data['system'].get('ga_fan', 0),
+        'ga_mode':          mqtt_data['system'].get('ga_mode', 'COOL'),
+        'pso_brightness':   mqtt_data['system'].get('pso_brightness', 0),
+        'pso_brightness1':  mqtt_data['system'].get('pso_brightness1', 0),
+        'pso_brightness2':  mqtt_data['system'].get('pso_brightness2', 0),
+        'pso_pwm1':         mqtt_data['system'].get('pso_pwm1', 0),
+        'pso_pwm2':         mqtt_data['system'].get('pso_pwm2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
-        'ga_history': mqtt_data['system'].get('ga_history', []),
-        'pso_history': mqtt_data['system'].get('pso_history', [])
+        'ga_history':       mqtt_data['system'].get('ga_history', []),
+        'pso_history':      mqtt_data['system'].get('pso_history', []),
+        # iteration_log untuk grafik PSO detail (PWM1, PWM2, Lux per iterasi)
+        'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
     })
 
 @app.route('/api/ga/export-csv')
@@ -3395,61 +3691,39 @@ def ga_export_csv():
 @app.route('/api/pso/export-csv')
 @admin_required
 def pso_export_csv():
-    """Export laporan hasil PSO dalam format CSV informatif."""
+    """Export hasil PSO per iterasi dalam format tabel CSV."""
     import io, csv as csv_mod
     pso = last_opt_results.get('pso', {})
-    if not pso or pso.get('brightness1', 0) == 0:
-        return jsonify({'error': 'Belum ada hasil PSO. Jalankan PSO terlebih dahulu.'}), 404
+    iteration_log = pso.get('iteration_log', [])
 
-    params = pso.get('params', pso_params)
-    run_time = pso.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
-    b1 = pso.get('brightness1', 0)
-    b2 = pso.get('brightness2', 0)
-    initial_err = pso.get('initial_error', '-')
-    final_err = pso.get('final_error', pso.get('fitness', '-'))
-    lux_achieved = pso.get('lux_achieved', '-')
-    target_lux = pso.get('target_lux', 350.0)
-    history = pso.get('stats', [])
+    if not pso or not iteration_log:
+        return jsonify({'error': 'Belum ada data iterasi PSO. Jalankan PSO terlebih dahulu.'}), 404
 
     buf = io.StringIO()
-    wr = csv_mod.writer(buf)
+    wr  = csv_mod.writer(buf)
 
-    pwm1 = pso.get('pwm1', int(round(b1 * 255 / 100)))
-    pwm2 = pso.get('pwm2', int(round(b2 * 255 / 100)))
+    # Header
+    wr.writerow(['Iterasi', 'PWM 1', 'PWM 2', 'Lux 1', 'Lux 2', 'Lux 3',
+                 'Rata-rata Lux', 'Fitness'])
 
-    # --- Laporan header ---
-    wr.writerow(['=== LAPORAN HASIL PSO - SMART ROOM ==='])
-    wr.writerow([])
-    wr.writerow(['Tanggal run', run_time])
-    wr.writerow(['Parameter PSO',
-                f"swarm={params.get('swarm_size', '-')}, "
-                f"iterasi={params.get('iterations', '-')}, "
-                f"w={params.get('w', '-')}, "
-                f"c1={params.get('c1', '-')}, "
-                f"c2={params.get('c2', '-')}"])
-    wr.writerow(['Error awal', f"{initial_err} lux^2"])
-    wr.writerow(['Error akhir', f"{final_err} lux^2"])
-    wr.writerow(['PWM1 optimal (0-255)', f"{pwm1}"])
-    wr.writerow(['PWM2 optimal (0-255)', f"{pwm2}"])
-    wr.writerow(['Brightness1 (% untuk ESP32)', f"{b1}%"])
-    wr.writerow(['Brightness2 (% untuk ESP32)', f"{b2}%"])
-    wr.writerow(['Lux tercapai (estimasi)', f"{lux_achieved} lux"])
-    wr.writerow(['Target lux', f"{target_lux} lux"])
-    wr.writerow([])
-
-    # --- Riwayat konvergensi ---
-    if history:
-        wr.writerow(['=== RIWAYAT KONVERGENSI ==='])
-        wr.writerow(['Iterasi', 'Lux Error (lux^2)'])
-        for idx, val in enumerate(history, 1):
-            wr.writerow([idx, round(val, 2)])
+    # Baris per iterasi
+    for entry in iteration_log:
+        it       = entry.get('iter',    '--')
+        pwm1     = entry.get('pwm1',    '--')
+        pwm2     = entry.get('pwm2',    '--')
+        lux1     = entry.get('lux1',    '--')
+        lux2     = entry.get('lux2',    '--')
+        lux3     = entry.get('lux3',    '--')
+        lux_avg  = entry.get('lux_avg', '--')
+        fitness  = entry.get('fitness', '--')
+        wr.writerow([it, pwm1, pwm2, lux1, lux2, lux3, lux_avg, fitness])
 
     output = buf.getvalue().encode('utf-8-sig')
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     return Response(
         output,
         mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename=pso_report_{ts}.csv'}
+        headers={'Content-Disposition': f'attachment; filename=pso_iterasi_{ts}.csv'}
     )
 
 @app.route('/api/ml/run', methods=['POST'])
@@ -3470,7 +3744,14 @@ def ml_run():
             if 'ga' in params: ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
             if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
         
-        t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
+        # PSO: gunakan _pso_lamp_cycle() agar urutan Baca→Hitung→Kirim konsisten
+        # dengan siklus otomatis. GA tetap pakai run_optimization_cycle().
+        if algo == 'pso':
+            t = threading.Thread(target=_pso_lamp_cycle, daemon=True)
+        elif algo == 'ga':
+            t = threading.Thread(target=run_optimization_cycle, args=('ga',), daemon=True)
+        else:
+            t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
         t.start()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'ML Run triggered: {algo}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'{algo} optimization triggered'})
@@ -5574,7 +5855,7 @@ HTML_TEMPLATE = '''
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
                                 <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 3000 W max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 3.0 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
@@ -5633,7 +5914,7 @@ HTML_TEMPLATE = '''
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
                                 <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 500 W max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 0.5 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
@@ -5684,7 +5965,7 @@ HTML_TEMPLATE = '''
                 <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(99,102,241,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(99,102,241,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Daya</div>
-                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> W</span></div>
+                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
                     </div>
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Arus</div>
@@ -5730,13 +6011,15 @@ HTML_TEMPLATE = '''
                 <!-- Power -->
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title">Active Power &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lamp <span style="color:#10b981;">&#9632;</span> (W)</div>
+                        <div class="chart-title">Active Power &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lamp <span style="color:#10b981;">&#9632;</span> (kW)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">12 Bln</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '5y', this)">5 Thn</button>
                         </div>
                     </div>
                     <canvas id="energyPowerChart" height="80"></canvas>
@@ -5797,21 +6080,23 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Cumulative Energy &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energi per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">12 Bln</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '5y', this)">5 Thn</button>
                         </div>
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
                         <span style="color:#10b981;font-weight:600;">AC</span>
-                        <span style="color:var(--text-secondary);">Latest: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
-                        <span style="color:var(--text-secondary);">Avg: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
                         <span style="color:#a855f7;font-weight:600;margin-left:10px;">Lamp</span>
-                        <span style="color:var(--text-secondary);">Latest: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
-                        <span style="color:var(--text-secondary);">Avg: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
                     </div>
                 </div>
 
@@ -6246,20 +6531,24 @@ HTML_TEMPLATE = '''
                         <span class="stat-title">PSO -> Lamp</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
-                    <div class="stat-change"><span>Lux Error (lower = better)</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
+                    <div class="stat-change"><span>Akurasi Lux (100% = tepat 350 lux)</span></div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Optimized Brightness</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
+                        <span class="stat-title">PWM Optimal</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">PWM</div>
                     </div>
                     <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
                         PWM1: <span id="ml-pso-pwm1" style="color: #6366f1; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
                         PWM2: <span id="ml-pso-pwm2" style="color: #a855f7; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
                     </div>
-                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>B1:<span id="ml-pso-brightness1" style="color:#6366f1;font-weight:600;">--</span>% B2:<span id="ml-pso-brightness2" style="color:#a855f7;font-weight:600;">--</span>% &nbsp;|&nbsp; Avg:<span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>/255</div>
+                    <div class="stat-change">
+                        Lux1: <span id="ml-pso-lux1" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux2: <span id="ml-pso-lux2" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux3: <span id="ml-pso-lux3" style="color:#22d3ee;font-weight:600;">--</span> lx
+                    </div>
                 </div>
 
                 <div class="stat-card">
@@ -6299,10 +6588,10 @@ HTML_TEMPLATE = '''
                 <canvas id="gaFitnessChart" height="80"></canvas>
             </div>
 
-            <!-- PSO Fitness Convergence Chart -->
+            <!-- PSO Iteration Detail Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO Error Convergence — Lamp (lower = better, target 350 lux)</div>
+                    <div class="chart-title">PSO — Detail Iterasi (PWM1, PWM2, Lux Avg per Iterasi)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
@@ -6311,7 +6600,26 @@ HTML_TEMPLATE = '''
                         </button>
                     </div>
                 </div>
-                <canvas id="psoFitnessChart" height="80"></canvas>
+                <!-- Tabel iterasi detail -->
+                <div id="pso-iter-table-wrap" style="overflow-x:auto;margin-bottom:8px;display:none;">
+                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                        <thead>
+                            <tr style="background:rgba(245,158,11,0.15);">
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Iterasi</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 3</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux Avg</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Fitness (%)</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pso-iter-tbody"></tbody>
+                    </table>
+                </div>
+                <canvas id="psoFitnessChart" height="100"></canvas>
             </div>
 
             <!-- GA vs PSO Comparison Chart -->
@@ -6892,8 +7200,31 @@ HTML_TEMPLATE = '''
             });
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
-                type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'PSO Error (\u2193 better)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'PWM 1 (0-255)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'PWM 2 (0-255)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'Lux Avg (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.3, fill: true, pointRadius: 4, yAxisID: 'yLux', borderDash: [4,2] },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: { duration: 300 },
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
+                        tooltip: { callbacks: {
+                            title: items => `Iterasi ${items[0].label}`,
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y}`
+                        }}
+                    },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        yPWM: { type: 'linear', position: 'left', min: 0, max: 255, ticks: { color: '#6366f1', font: { size: 10 } }, title: { display: true, text: 'PWM', color: '#6366f1', font: { size: 10 } }, grid: { color: 'rgba(99,102,241,0.08)' } },
+                        yLux: { type: 'linear', position: 'right', min: 0, ticks: { color: '#f59e0b', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+                    }
+                }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
@@ -7028,11 +7359,15 @@ HTML_TEMPLATE = '''
             const maxV = Math.max(...values);
             const avgV = values.reduce((a, b) => a + b, 0) / values.length;
             const lastV = values[values.length - 1];
+            const totalV = values.reduce((a, b) => a + b, 0);
+            const isKwh = field === 'energy_kwh';
+            const dp = isKwh ? 4 : 2;
             const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-            set(prefix + '-latest', lastV.toFixed(2));
-            set(prefix + '-min', minV.toFixed(2));
-            set(prefix + '-max', maxV.toFixed(2));
-            set(prefix + '-avg', avgV.toFixed(2));
+            set(prefix + '-latest', lastV.toFixed(dp));
+            set(prefix + '-min', minV.toFixed(dp));
+            set(prefix + '-max', maxV.toFixed(dp));
+            // kWh: tampilkan total (sum delta) bukan rata-rata
+            set(prefix + '-avg', isKwh ? totalV.toFixed(4) : avgV.toFixed(2));
         }
 
         function drawEnergyFallback(field, points) {
@@ -7117,7 +7452,21 @@ HTML_TEMPLATE = '''
             updateEnergyStats(field, values);
         }
 
+        // Track current period per field so auto-refresh doesn't reset user selection
+        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
+
+        function toDelta(values) {
+            // Convert cumulative kWh array -> per-interval delta array
+            var out = [];
+            for (var i = 1; i < values.length; i++) {
+                out.push(Math.max(0, parseFloat((values[i] - values[i-1]).toFixed(4))));
+            }
+            return out;
+        }
+
         function loadEnergyHistory(field, period, btnElement) {
+            // Save current period for this field
+            _activePeriod[field] = period;
             // Update button active state
             if (btnElement) {
                 const buttons = btnElement.parentElement.querySelectorAll('.chart-option-btn');
@@ -7141,12 +7490,19 @@ HTML_TEMPLATE = '''
                 var chart = charts[chartName];
 
                 if (chart && chart.data && chart.data.datasets) {
-                    chart.data.labels = acData.map(function(d){ return d.time; });
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
+                    var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
+                    // energy_kwh: konversi kumulatif -> delta per interval
+                    if (field === 'energy_kwh') {
+                        chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
+                        acValues = toDelta(acValues);
+                        lampValues = toDelta(lampValues);
+                    } else {
+                        chart.data.labels = acData.map(function(d){ return d.time; });
+                    }
                     chart.data.datasets[0].data = acValues;
                     // Only update lamp dataset if chart has 2nd dataset (power, current, kwh; not voltage)
                     if (chart.data.datasets[1]) {
-                        var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
                         chart.data.datasets[1].data = lampValues;
                         updateLampEnergyStats(field, lampValues.filter(function(v){ return Number.isFinite(v); }));
                     }
@@ -7180,7 +7536,7 @@ HTML_TEMPLATE = '''
             if (!values || values.length === 0) return;
             var avg = values.reduce(function(a,b){ return a+b; }, 0) / values.length;
             var latest = values[values.length - 1];
-            var unit = {power:'W', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
+            var unit = {power:'kW', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
             var fmt = function(v) {
                 return field === 'energy_kwh'
                     ? v.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1')
@@ -7189,14 +7545,18 @@ HTML_TEMPLATE = '''
             var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
             if (field === 'power') { setEl('lamp-power-latest', latest); setEl('lamp-power-avg', avg); }
             else if (field === 'current') { setEl('lamp-current-latest', latest); setEl('lamp-current-avg', avg); }
-            else if (field === 'energy_kwh') { setEl('lamp-kwh-latest', latest); setEl('lamp-kwh-avg', avg); }
+            else if (field === 'energy_kwh') {
+                var total = values.reduce(function(a,b){ return a+b; }, 0);
+                setEl('lamp-kwh-latest', latest);
+                setEl('lamp-kwh-avg', total);
+            }
         }
 
         function loadAllEnergyCharts() {
-            loadEnergyHistory('power', '1h', null);
-            loadEnergyHistory('voltage', '1h', null);
-            loadEnergyHistory('current', '1h', null);
-            loadEnergyHistory('energy_kwh', '24h', null);
+            loadEnergyHistory('power',      _activePeriod.power,      null);
+            loadEnergyHistory('voltage',    _activePeriod.voltage,    null);
+            loadEnergyHistory('current',    _activePeriod.current,    null);
+            loadEnergyHistory('energy_kwh', _activePeriod.energy_kwh, null);
             loadEnergyCompare('power');
             loadEnergyCompare('energy_kwh');
             loadLampEnergyCompare('power');
@@ -7618,6 +7978,14 @@ HTML_TEMPLATE = '''
                             }
                         } catch(e) {}
                     });
+                    // Render data yang tertunda saat tab belum aktif
+                    if (window.__pendingMLData) {
+                        Object.keys(window.__pendingMLData).forEach(function(chartName) {
+                            var d = window.__pendingMLData[chartName];
+                            try { updateMLChart(chartName, d.history, d.algo); } catch(e) {}
+                        });
+                        window.__pendingMLData = {};
+                    }
                     // Refresh data after resize so charts render with actual values
                     try { refreshMLData(); } catch(e) {}
                 }, 200);
@@ -7680,8 +8048,8 @@ HTML_TEMPLATE = '''
                             humEl.textContent = Number.isFinite(h) ? h.toFixed(1) : '--';
                         }
                         if (luxEl) {
-                            const lux = d && d.lamp ? (d.lamp.lux_avg || d.lamp.lux1 || d.lamp.lux || '--') : '--';
-                            luxEl.textContent = lux;
+                            const luxRaw = d && d.lamp ? (d.lamp.lux_avg != null ? d.lamp.lux_avg : (d.lamp.lux1 != null ? d.lamp.lux1 : null)) : null;
+                            luxEl.textContent = (typeof luxRaw === 'number') ? luxRaw.toFixed(1) : '--';
                         }
                         if (personEl) personEl.textContent = (d && d.camera && d.camera.person_detected) ? 'Yes' : 'No';
                     }).catch(() => {});
@@ -7693,51 +8061,187 @@ HTML_TEMPLATE = '''
             const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
 
             setEl('ml-ga-fitness', (data.ga_fitness || 0).toFixed(2));
-            setEl('ml-pso-fitness', (data.pso_fitness || 0).toFixed(2));
+            // PSO fitness sudah dalam persen dari server
+            setEl('ml-pso-fitness', (data.pso_fitness != null ? parseFloat(data.pso_fitness) : 0).toFixed(1));
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
-            setEl('ml-pso-brightness', data.pso_brightness || '--');
-            var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
-            var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
-            // PWM values 0-255: use pso_pwm1/2 if available, else derive from brightness %
-            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : (b1 !== '--' ? Math.round(parseFloat(b1) * 255 / 100) : '--');
-            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : (b2 !== '--' ? Math.round(parseFloat(b2) * 255 / 100) : '--');
-            var pAvg = (p1 !== '--' && p2 !== '--') ? Math.round((parseFloat(p1) + parseFloat(p2)) / 2) : '--';
+            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
+            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
             setEl('ml-pso-pwm2', p2);
-            setEl('ml-pso-brightness1', b1 !== '--' ? b1 : '--');
-            setEl('ml-pso-brightness2', b2 !== '--' ? b2 : '--');
-            setEl('ml-pso-brightness-avg', pAvg);
+            // Sinkron Lamp Dashboard brightness dari PSO result
+            if (data.pso_brightness1 != null) setText('dash-bright1', Math.round(parseFloat(data.pso_brightness1)));
+            if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
-            // Update convergence charts if history available
             if (data.ga_history && data.ga_history.length > 0) {
                 updateMLChart('gaFitness', data.ga_history, 'GA');
             }
-            if (data.pso_history && data.pso_history.length > 0) {
-                updateMLChart('psoFitness', data.pso_history, 'PSO');
+            if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
+                updatePSOIterChart(data.pso_iteration_log);
+            } else if (data.pso_history && data.pso_history.length > 0) {
+                // Fallback: jika belum ada iteration_log, tampilkan pso_history sebagai fitness line
+                const chart = charts.psoFitness;
+                if (chart) {
+                    chart.data.labels = data.pso_history.map((_, i) => i + 1);
+                    chart.data.datasets[0].data = [];
+                    chart.data.datasets[1].data = [];
+                    chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
+                    chart.update('none');
+                }
             }
         }
 
         function updateMLChart(chartName, history, algo) {
-            // Re-init ML charts if not yet created - call initMLCharts directly, NOT ensureChartsReady
-            // (ensureChartsReady calls initCharts which crashes on already-existing canvases)
+            // Init chart jika belum ada (misal ML tab belum pernah dibuka)
             if (!charts[chartName]) {
                 var mlCanvas = document.getElementById('gaFitnessChart');
                 if (mlCanvas && mlCanvas.offsetWidth > 0) {
-                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); }
+                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); return; }
                 } else {
-                    return; // ML page not visible yet, skip
+                    // Tab ML belum aktif — simpan data untuk di-render saat tab dibuka
+                    window.__pendingMLData = window.__pendingMLData || {};
+                    window.__pendingMLData[chartName] = { history, algo };
+                    return;
                 }
             }
             const chart = charts[chartName];
             if (!chart || !history || history.length === 0) return;
 
-            chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
-            chart.data.datasets[0].data = history;
-            chart.update('none');
+            if (algo === 'GA') {
+                chart.data.labels           = history.map((_, i) => 'Gen ' + (i + 1));
+                chart.data.datasets[0].data = history;
+                chart.update('none');
+            } else if (algo === 'PSO') {
+                // PSO fitness history sebagai fallback jika belum ada iteration_log
+                // Tampilkan sebagai Lux Avg estimasi (dataset index 2)
+                chart.data.labels               = history.map((_, i) => i + 1);
+                chart.data.datasets[0].data     = [];
+                chart.data.datasets[1].data     = [];
+                chart.data.datasets[2].data     = history.map(f => Math.max(0, 350 - Math.sqrt(Math.max(0, f))));
+                chart.update('none');
+            }
         }
+
+        function updatePSOIterChart(iterLog) {
+            if (!iterLog || iterLog.length === 0) return;
+            const chart = charts.psoFitness;
+            if (!chart) return;
+            chart.data.labels           = iterLog.map(d => d.iter);
+            chart.data.datasets[0].data = iterLog.map(d => d.pwm1);
+            chart.data.datasets[1].data = iterLog.map(d => d.pwm2);
+            chart.data.datasets[2].data = iterLog.map(d => d.lux_avg);
+            chart.update('none');
+            // Update tabel
+            const tbody = document.getElementById('pso-iter-tbody');
+            const wrap  = document.getElementById('pso-iter-table-wrap');
+            if (!tbody) return;
+            wrap.style.display = 'block';
+            tbody.innerHTML = iterLog.map(d => {
+                const inRange     = d.lux_avg >= 315 && d.lux_avg <= 385;
+                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusText  = inRange ? '✓ Target' : '✗ Belum';
+                const fitPct      = Math.max(0, 100.0 - (d.fitness / 122500.0) * 100.0).toFixed(1);
+                return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        socket.on('pso_iter_progress', function(d) {
+            // Helper lokal — tidak bergantung scope luar
+            const _s = function(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; };
+
+            if (d.status === 'done') {
+                // Sinkron Lamp Dashboard brightness
+                _s('dash-bright1', Math.round(parseFloat(d.b1 || 0)));
+                _s('dash-bright2', Math.round(parseFloat(d.b2 || 0)));
+                // Update stat card ML Optimization
+                _s('ml-pso-pwm1',  d.pwm1 != null ? d.pwm1 : '--');
+                _s('ml-pso-pwm2',  d.pwm2 != null ? d.pwm2 : '--');
+                _s('ml-pso-lux1',  d.lux1 != null ? d.lux1 : '--');
+                _s('ml-pso-lux2',  d.lux2 != null ? d.lux2 : '--');
+                _s('ml-pso-lux3',  d.lux3 != null ? d.lux3 : '--');
+                // Fitness %
+                const fitPct = Math.max(0, 100.0 - ((d.fitness || 0) / 122500.0) * 100.0).toFixed(1);
+                _s('ml-pso-fitness', fitPct);
+
+                // Tabel iterasi — ganti baris waiting dengan data lengkap
+                const tbody = document.getElementById('pso-iter-tbody');
+                const wrap  = document.getElementById('pso-iter-table-wrap');
+                if (!tbody) return;
+                wrap.style.display = 'block';
+                const inRange     = (d.lux_avg || 0) >= 315 && (d.lux_avg || 0) <= 385;
+                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusText  = inRange ? '✓ Target' : '✗ Belum';
+                const newRow = `<tr data-iter="${d.iter}" style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2 != null ? d.pwm2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg != null ? d.lux_avg : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
+                </tr>`;
+                const existingRow = tbody.querySelector('tr[data-iter="' + d.iter + '"]');
+                if (existingRow) existingRow.outerHTML = newRow;
+                else tbody.insertAdjacentHTML('beforeend', newRow);
+
+                // Update chart live
+                const chart = charts.psoFitness;
+                if (chart) {
+                    const idx = chart.data.labels.indexOf(d.iter);
+                    if (idx === -1) {
+                        chart.data.labels.push(d.iter);
+                        chart.data.datasets[0].data.push(d.pwm1);
+                        chart.data.datasets[1].data.push(d.pwm2);
+                        chart.data.datasets[2].data.push(d.lux_avg);
+                    } else {
+                        chart.data.datasets[0].data[idx] = d.pwm1;
+                        chart.data.datasets[1].data[idx] = d.pwm2;
+                        chart.data.datasets[2].data[idx] = d.lux_avg;
+                    }
+                    chart.update('none');
+                }
+
+            } else if (d.status === 'waiting') {
+                const tbody = document.getElementById('pso-iter-tbody');
+                const wrap  = document.getElementById('pso-iter-table-wrap');
+                if (!tbody) return;
+                wrap.style.display = 'block';
+                // Hapus baris lama jika ada, insert baru
+                const old = tbody.querySelector('tr[data-iter="' + d.iter + '"]');
+                if (old) old.remove();
+                tbody.insertAdjacentHTML('beforeend',
+                    '<tr data-iter="' + d.iter + '" style="border-bottom:1px solid rgba(255,255,255,0.05);opacity:0.6;">' +
+                        '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + d.iter + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#6366f1;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#a855f7;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
+                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Membaca sensor...</td>' +
+                    '</tr>');
+
+            } else if (d.status === 'new_cycle') {
+                const tbody = document.getElementById('pso-iter-tbody');
+                if (tbody) tbody.innerHTML = '';
+                const chart = charts.psoFitness;
+                if (chart) {
+                    chart.data.labels = [];
+                    chart.data.datasets.forEach(function(ds) { ds.data = []; });
+                    chart.update('none');
+                }
+            }
+        });
 
         function addToComparisonChart(gaFit, psoFit) {
             const chart = charts.comparison;
@@ -8964,7 +9468,7 @@ HTML_TEMPLATE = '''
             const bubble = document.getElementById('energy-bubble');
             const text = document.getElementById('energy-bubble-text');
             if (!bubble || !text) return;
-            text.textContent = power.toFixed(1) + ' W | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
+            text.textContent = power.toFixed(3) + ' kW | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
             bubble.classList.add('show');
             if (energyBubbleTimer) clearTimeout(energyBubbleTimer);
             energyBubbleTimer = setTimeout(() => { bubble.classList.remove('show'); }, 4000);
@@ -9590,8 +10094,8 @@ HTML_TEMPLATE = '''
             _applyBadge('eu-lamp-pf-quality', lamp.pf);
             var acBar = document.getElementById('eu-ac-pbar');
             var lpBar = document.getElementById('eu-lamp-pbar');
-            if (acBar)  acBar.style.width  = Math.min(100, (parseFloat(ac.power||0)   / 3000 * 100)).toFixed(1) + '%';
-            if (lpBar)  lpBar.style.width  = Math.min(100, (parseFloat(lamp.power||0) / 500  * 100)).toFixed(1) + '%';
+            if (acBar)  acBar.style.width  = Math.min(100, (parseFloat(ac.power||0)   / 3.0 * 100)).toFixed(1) + '%';
+            if (lpBar)  lpBar.style.width  = Math.min(100, (parseFloat(lamp.power||0) / 0.5 * 100)).toFixed(1) + '%';
 
             // ── Update power-grid summary cards ──
             var acPow  = parseFloat(ac.power||0);
@@ -10422,16 +10926,37 @@ HTML_TEMPLATE = '''
             if (data.type === 'lamp') {
                 const now = new Date();
                 const timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                
-                const luxAvg = data.data.lux_avg || 0;
-                const brightAvg = data.data.brightness_avg || 0;
-                
-                if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
+                const lamp = data.data;
+                const luxAvg    = parseFloat(lamp.lux_avg)    || 0;
+                const brightAvg = parseFloat(lamp.brightness_avg) || 0;
+                // setText lokal — tidak bergantung pada scope luar
+                const _set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+
+                // Update Lamp Dashboard lux dan brightness secara real-time
+                _set('dash-lux1',    (lamp.lux1    != null ? parseFloat(lamp.lux1)    : 0).toFixed(0));
+                _set('dash-lux2',    (lamp.lux2    != null ? parseFloat(lamp.lux2)    : 0).toFixed(0));
+                _set('dash-lux3',    (lamp.lux3    != null ? parseFloat(lamp.lux3)    : 0).toFixed(0));
+                _set('dash-lux-avg', luxAvg.toFixed(1));
+                _set('ctrl-lux1',    (lamp.lux1    != null ? parseFloat(lamp.lux1)    : 0).toFixed(0));
+                _set('ctrl-lux2',    (lamp.lux2    != null ? parseFloat(lamp.lux2)    : 0).toFixed(0));
+                _set('ctrl-lux3',    (lamp.lux3    != null ? parseFloat(lamp.lux3)    : 0).toFixed(0));
+                _set('dash-bright1', Math.round(parseFloat(lamp.brightness1) || 0));
+                _set('dash-bright2', Math.round(parseFloat(lamp.brightness2) || 0));
+
+                if (charts.lampLux) {
+                    if (charts.lampLux.data.labels.length >= 50) {
+                        charts.lampLux.data.labels.shift();
+                        charts.lampLux.data.datasets[0].data.shift();
+                    }
                     charts.lampLux.data.labels.push(timeStr);
                     charts.lampLux.data.datasets[0].data.push(luxAvg);
                     charts.lampLux.update('none');
                 }
-                if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
+                if (charts.lampBright) {
+                    if (charts.lampBright.data.labels.length >= 50) {
+                        charts.lampBright.data.labels.shift();
+                        charts.lampBright.data.datasets[0].data.shift();
+                    }
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg));
                     charts.lampBright.update('none');
@@ -10670,11 +11195,21 @@ HTML_TEMPLATE = '''
             
             if (status === 'running') {
                 showToast(algo + ' optimization running...', 'success');
-                // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
+                // Reset tabel iterasi PSO saat run baru dimulai
+                if (algo === 'PSO') {
+                    const tbody = document.getElementById('pso-iter-tbody');
+                    if (tbody) tbody.innerHTML = '';
+                    const chart = charts.psoFitness;
+                    if (chart) {
+                        chart.data.labels = [];
+                        chart.data.datasets.forEach(ds => ds.data = []);
+                        chart.update('none');
+                    }
+                }
             } else if (status === 'completed') {
                 var modeLabel = '';
                 if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
