@@ -3257,15 +3257,17 @@ def energy_history():
     device = request.args.get('device', 'ac')  # 'ac' or 'lamp'
 
     period_map = {
-        '1h':  {'range': '-1h',  'window': '1m'},
-        '6h':  {'range': '-6h',  'window': '5m'},
-        '24h': {'range': '-24h', 'window': '15m'},
-        '7d':  {'range': '-7d',  'window': '1h'},
-        '30d': {'range': '-30d', 'window': '6h'}
+        '1h':   {'range': '-1h',   'window': '1m'},
+        '6h':   {'range': '-6h',   'window': '5m'},
+        '24h':  {'range': '-24h',  'window': '5m'},
+        '7d':   {'range': '-7d',   'window': '1h'},
+        '30d':  {'range': '-30d',  'window': '6h'},
+        '12mo': {'range': '-12mo', 'window': '1mo'},  # bulanan: 12 bulan terakhir
+        '5y':   {'range': '-5y',   'window': '1y'},   # tahunan: 5 tahun terakhir
     }
 
     if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d'}), 400
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y'}), 400
 
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
@@ -3278,7 +3280,14 @@ def energy_history():
     try:
         _, _, query_api = _get_influx_client()
 
-        time_format = '%H:%M' if period in ('1h', '6h', '24h') else '%m/%d %H:%M'
+        if period in ('1h', '6h', '24h'):
+            time_format = '%H:%M'
+        elif period in ('7d', '30d'):
+            time_format = '%m/%d %H:%M'
+        elif period == '12mo':
+            time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
+        else:  # 5y
+            time_format = '%Y'      # 2024, 2025, 2026, ...
 
         def query_field_points(field_name):
             # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
@@ -3309,7 +3318,7 @@ def energy_history():
             # Fallback to runtime buffer when InfluxDB has no data yet
             if not data_points:
                 now = datetime.now()
-                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
+                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
                 cutoff = now - lookback
                 buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
                 runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
@@ -3324,7 +3333,7 @@ def energy_history():
 
         if not power_points and not voltage_points and not kwh_points:
             now = datetime.now()
-            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}[period]
+lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
             cutoff = now - lookback
             buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
             runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
@@ -5803,6 +5812,8 @@ HTML_TEMPLATE = '''
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">12 Bln</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '5y', this)">5 Thn</button>
                         </div>
                     </div>
                     <canvas id="energyPowerChart" height="80"></canvas>
@@ -5868,6 +5879,8 @@ HTML_TEMPLATE = '''
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">12 Bln</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '5y', this)">5 Thn</button>
                         </div>
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
@@ -9055,7 +9068,7 @@ HTML_TEMPLATE = '''
             const bubble = document.getElementById('energy-bubble');
             const text = document.getElementById('energy-bubble-text');
             if (!bubble || !text) return;
-            text.textContent = power.toFixed(1) + ' W | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
+            text.textContent = power.toFixed(3) + ' kW | ' + voltage.toFixed(1) + ' V | ' + current.toFixed(2) + ' A';
             bubble.classList.add('show');
             if (energyBubbleTimer) clearTimeout(energyBubbleTimer);
             energyBubbleTimer = setTimeout(() => { bubble.classList.remove('show'); }, 4000);
