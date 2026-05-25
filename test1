@@ -902,9 +902,20 @@ def run_optimization_cycle(algo='both'):
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
             mode_idx = sol[2] if len(sol) > 2 else 0
+            # Compute recommended RH setpoint based on selected mode and current humidity
+            _cur_rh = opt_sensor_data.get('humidity', 55.0)
+            if mode_idx == 1:    # DRY mode — actively dehumidifying
+                ga_rh_set = 55.0
+            elif _cur_rh > 65:   # High humidity: target dehumidification to 55%
+                ga_rh_set = 55.0
+            elif _cur_rh < 40:   # Too dry: target 50%
+                ga_rh_set = 50.0
+            else:
+                ga_rh_set = 50.0  # Normal comfort target
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
+                'rh_set': ga_rh_set,
                 'stats': hist, 'brute_force': bf,
                 'initial_fitness': round(hist[0], 2) if hist else 0,
                 'final_fitness': round(fit, 2),
@@ -924,7 +935,7 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={ga_rh_set}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
@@ -972,6 +983,7 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'ga_rh_set': last_opt_results['ga'].get('rh_set', 50.0),
             'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
             'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
@@ -1031,8 +1043,10 @@ def run_optimization_cycle(algo='both'):
                 'temperature': last_opt_results['ga']['temp'],
                 'fan_speed': last_opt_results['ga']['fan'],
                 'mode': last_opt_results['ga'].get('mode', 'COOL'),
-                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0),
+                'rh_set': last_opt_results['ga'].get('rh_set', 50.0)
             }
+            status_payload['ga_rh_set'] = last_opt_results['ga'].get('rh_set', 50.0)
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
         socketio.emit('ml_status', status_payload)
@@ -1060,6 +1074,7 @@ def persist_opt_results(algo):
                 'temp':             float(ga.get('temp', 0)),
                 'fan':              float(ga.get('fan', 0)),
                 'mode_idx':         float(ga.get('mode_idx', 0)),
+                'rh_set':           float(ga.get('rh_set', 50.0)),
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
@@ -1110,6 +1125,7 @@ def restore_opt_results():
                     'fan':              int(rec_map.get('fan', 0)),
                     'mode_idx':         int(rec_map.get('mode_idx', 0)),
                     'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'rh_set':           float(rec_map.get('rh_set', 50.0)),
                     'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
@@ -1187,7 +1203,7 @@ def sensor_fault_loop():
                 # Only emit alert once per transition to avoid spam
                 prev = _fault_last_emit.get(dev_id, 'ok')
                 if lvl != 'ok' and prev == 'ok':
-                    msg = f'[SENSOR FAULT] {dev_label} tidak ada data ({age_str})'
+                    msg = f'[SENSOR FAULT] {dev_label} no data ({age_str})'
                     level = 'danger' if lvl == 'fault' else 'warning'
                     socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': lvl, 'age': age_str})
                     socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
@@ -2663,7 +2679,7 @@ def login():
             session['username'] = username
             session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Username atau password salah')
+        return render_template_string(LOGIN_TEMPLATE, error='Incorrect username or password')
     return render_template_string(LOGIN_TEMPLATE, error=None)
 
 @app.route('/logout')
@@ -2781,7 +2797,7 @@ def mqtt_config():
     new_broker = data.get('broker', '').strip()
     new_port = int(data.get('port', 1883))
     if not new_broker:
-        return jsonify({'status': 'error', 'message': 'Broker IP tidak boleh kosong'}), 400
+        return jsonify({'status': 'error', 'message': 'Broker IP cannot be empty'}), 400
     old_broker = MQTT_BROKER
     MQTT_BROKER = new_broker
     MQTT_PORT = new_port
@@ -2962,22 +2978,22 @@ def export_csv_from_db():
     to_dt   = request.args.get('to', '')
 
     if not from_dt or not to_dt:
-        return jsonify({'error': 'from dan to wajib diisi (YYYY-MM-DD)'}), 400
+        return jsonify({'error': 'from and to are required (YYYY-MM-DD)'}), 400
 
     try:
         datetime.strptime(from_dt, '%Y-%m-%d')
         datetime.strptime(to_dt,   '%Y-%m-%d')
     except ValueError:
-        return jsonify({'error': 'Format tanggal salah. Gunakan YYYY-MM-DD'}), 400
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
 
     valid_types = ('energy_ac', 'energy_lamp', 'temp', 'lux', 'occupancy')
     if dtype not in valid_types:
-        return jsonify({'error': f'type tidak valid. Pilihan: {", ".join(valid_types)}'}), 400
+        return jsonify({'error': 'Invalid type. Options: energy_ac, energy_lamp, temp, lux, occupancy'}), 400
 
     # ── Energy: ambil dari MySQL via PHP (sumber data lengkap) ──────────────
     if dtype in ('energy_ac', 'energy_lamp'):
         id_kwh   = 1 if dtype == 'energy_ac' else 3
-        dev_name = 'AC' if dtype == 'energy_ac' else 'Lampu'
+        dev_name = 'AC' if dtype == 'energy_ac' else 'Lamp'
         try:
             mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
         except Exception as ex:
@@ -2987,13 +3003,13 @@ def export_csv_from_db():
 
         if mysql_rows is not None:
             if not mysql_rows:
-                return jsonify({'error': f'Tidak ada data {dev_name} di MySQL untuk rentang {from_dt} s.d. {to_dt}'}), 404
+                return jsonify({'error': f'No {dev_name} data in MySQL for range {from_dt} to {to_dt}'}), 404
             output = io.StringIO()
             fields  = ['timestamp','tegangan','arus','active_power','reactive_power',
                        'apparent_power','power_factor','frekuensi','energy_kwh']
-            headers = ['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
-                       'Daya Reaktif (VAR)','Daya Semu (VA)','Power Factor','Frekuensi (Hz)',
-                       'Konsumsi Energi (kWh)']
+            headers = ['Timestamp','Voltage (V)','Current (A)','Active Power (W)',
+                       'Reactive Power (VAR)','Apparent Power (VA)','Power Factor','Frequency (Hz)',
+                       'Energy (kWh)']
             writer = _csv.writer(output)
             writer.writerow(headers)
             for r in mysql_rows:
@@ -3009,7 +3025,7 @@ def export_csv_from_db():
                     r.get('energy_kwh',     ''),
                 ])
             csv_bytes = output.getvalue().encode('utf-8-sig')  # BOM agar Excel baca benar
-            fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+            fname = f"{dtype}_{from_dt}_to_{to_dt}.csv"
             return Response(
                 csv_bytes,
                 mimetype='text/csv',
@@ -3047,15 +3063,15 @@ from(bucket: "{INFLUX_BUCKET}")
                             if v is not None:
                                 rows_by_ts[ts_str][fld] = v
                 if not rows_by_ts:
-                    return jsonify({'error': f'Tidak ada data ditemukan. MySQL error: {influx_err}'}), 404
+                    return jsonify({'error': f'No data found. MySQL error: {influx_err}'}), 404
                 sorted_ts = sorted(rows_by_ts.keys())
                 # Buat energy_kwh relatif (kurangi nilai pertama)
                 first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
                                   for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
                 output = io.StringIO()
                 writer = _csv.writer(output)
-                writer.writerow(['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
-                                 'Frekuensi (Hz)','Power Factor','Konsumsi Energi (kWh)'])
+                writer.writerow(['Timestamp','Voltage (V)','Current (A)','Active Power (W)',
+                                 'Frequency (Hz)','Power Factor','Energy (kWh)'])
                 for ts in sorted_ts:
                     r = rows_by_ts[ts]
                     kwh_raw = r.get('energy_kwh')
@@ -3069,7 +3085,7 @@ from(bucket: "{INFLUX_BUCKET}")
                         kwh,
                     ])
                 csv_bytes = output.getvalue().encode('utf-8-sig')
-                fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+                fname = f"{dtype}_{from_dt}_to_{to_dt}.csv"
                 return Response(csv_bytes, mimetype='text/csv',
                                 headers={'Content-Disposition': f'attachment; filename="{fname}"'})
             except Exception as e2:
@@ -3123,7 +3139,7 @@ from(bucket: "{INFLUX_BUCKET}")
                     rows_by_ts[ts_str][field] = record.get_value()
 
         if not rows_by_ts:
-            return jsonify({'error': 'Tidak ada data ditemukan untuk rentang tanggal tersebut'}), 404
+            return jsonify({'error': 'No data found for the selected date range'}), 404
 
         sorted_ts = sorted(rows_by_ts.keys())
         output    = io.StringIO()
@@ -3404,14 +3420,14 @@ def energy_export_csv():
             rows.append({
                 'timestamp': rec.get('ts', '').strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec.get('ts',''), 'strftime') else str(rec.get('ts','')),
                 'device':    'AC',
-                'tegangan':  rec.get('voltage', 0),
-                'arus':      rec.get('current', 0),
-                'daya_aktif':rec.get('power', 0),
-                'energi_kwh':rec.get('energy_kwh', 0),
-                'frekuensi': rec.get('frequency', 0),
+                'voltage':   rec.get('voltage', 0),
+                'current':   rec.get('current', 0),
+                'active_power': rec.get('power', 0),
+                'energy_kwh':rec.get('energy_kwh', 0),
+                'frequency': rec.get('frequency', 0),
                 'pf':        rec.get('power_factor', 0),
-                'reaktif':   '',
-                'semu':      '',
+                'reactive_power': '',
+                'apparent_power': '',
             })
     else:
         # Ambil langsung dari PHP proxy (fresh data)
@@ -3422,7 +3438,7 @@ def energy_export_csv():
             with _ureq.urlopen(req, timeout=8) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
         except Exception as ex:
-            return jsonify({'error': f'Gagal ambil data PHP: {ex}'}), 502
+            return jsonify({'error': f'Failed to fetch PHP data: {ex}'}), 502
 
         if 'error' in data:
             return jsonify({'error': data['error']}), 500
@@ -3432,26 +3448,26 @@ def energy_export_csv():
             p  = float(d.get('active_power') or 0)
             pf = round(p / ap, 3) if ap > 0.001 else 0.0
             return {
-                'timestamp':  str(d.get('created_at', '')),
-                'device':     label,
-                'tegangan':   float(d.get('tegangan')   or 0),
-                'arus':       float(d.get('arus')       or 0),
-                'daya_aktif': p,
-                'energi_kwh': float(d.get('total_energy') or 0),
-                'frekuensi':  float(d.get('frekuensi')  or 0),
-                'pf':         pf,
-                'reaktif':    float(d.get('reactive_power') or 0),
-                'semu':       ap,
+                'timestamp':    str(d.get('created_at', '')),
+                'device':       label,
+                'voltage':      float(d.get('tegangan')   or 0),
+                'current':      float(d.get('arus')       or 0),
+                'active_power': p,
+                'energy_kwh':   float(d.get('total_energy') or 0),
+                'frequency':    float(d.get('frekuensi')  or 0),
+                'pf':           pf,
+                'reactive_power': float(d.get('reactive_power') or 0),
+                'apparent_power': ap,
             }
 
         if device in ('ac', 'all') and data.get('ac'):
             rows.append(_row(data['ac'], 'AC'))
         if device in ('lamp', 'all') and data.get('lamp'):
-            rows.append(_row(data['lamp'], 'Lampu'))
+            rows.append(_row(data['lamp'], 'Lamp'))
 
-    # Buat CSV
+    # Build CSV
     output = io.StringIO()
-    fields = ['timestamp','device','tegangan','arus','daya_aktif','energi_kwh','frekuensi','pf','reaktif','semu']
+    fields = ['timestamp','device','voltage','current','active_power','energy_kwh','frequency','pf','reactive_power','apparent_power']
     writer = csv_mod.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
@@ -3484,10 +3500,16 @@ def energy_history():
         '30d':  {'range': '-30d',  'window': '6h'},
         '12mo': {'range': '-12mo', 'window': '1mo'},  # bulanan: 12 bulan terakhir
         '5y':   {'range': '-5y',   'window': '1y'},   # tahunan: 5 tahun terakhir
+        # Per-period energy view — backend returns delta (consumption per interval)
+        '5min':  {'range': '-1h',   'window': '5m',  'delta': True},
+        'day':   {'range': '-24h',  'window': '1h',  'delta': True},
+        'week':  {'range': '-7d',   'window': '1d',  'delta': True},
+        'month': {'range': '-30d',  'window': '1d',  'delta': True},
+        'year':  {'range': '-12mo', 'window': '1mo', 'delta': True},
     }
 
     if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y'}), 400
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y, 5min, day, week, month, year'}), 400
 
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
@@ -3500,26 +3522,29 @@ def energy_history():
     try:
         _, _, query_api = _get_influx_client()
 
-        if period in ('1h', '6h', '24h'):
+        if period in ('1h', '6h', '24h', '5min'):
             time_format = '%H:%M'
-        elif period in ('7d', '30d'):
+        elif period in ('7d', 'day'):
             time_format = '%m/%d %H:%M'
-        elif period == '12mo':
-            time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
+        elif period in ('30d', 'week', 'month'):
+            time_format = '%m/%d'
+        elif period in ('12mo', 'year'):
+            time_format = '%b %Y'
         else:  # 5y
-            time_format = '%Y'      # 2024, 2025, 2026, ...
+            time_format = '%Y'
 
         def query_field_points(field_name):
-            # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
-            # setiap interval diambil (bukan rata-rata), sehingga JS bisa diff antar titik
+            # For cumulative energy_kwh: use last() per window then difference() to get per-interval delta
+            use_delta = p.get('delta', False) and field_name == 'energy_kwh'
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
+            diff_line = '\n              |> difference(nonNegative: true)' if use_delta else ''
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field_name}")
               |> filter(fn: (r) => r["device"] == "{device_tag}")
-              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false)
+              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false){diff_line}
               |> yield(name: "{agg_fn}")
             '''
             result = query_api.query(query=query)
@@ -3580,6 +3605,7 @@ def ml_status():
         'ga_temp':          mqtt_data['system'].get('ga_temp', 0),
         'ga_fan':           mqtt_data['system'].get('ga_fan', 0),
         'ga_mode':          mqtt_data['system'].get('ga_mode', 'COOL'),
+        'ga_rh_set':        mqtt_data['system'].get('ga_rh_set', 50.0),
         'pso_brightness':   mqtt_data['system'].get('pso_brightness', 0),
         'pso_brightness1':  mqtt_data['system'].get('pso_brightness1', 0),
         'pso_brightness2':  mqtt_data['system'].get('pso_brightness2', 0),
@@ -3599,7 +3625,7 @@ def ga_export_csv():
     import io, csv as csv_mod
     ga = last_opt_results.get('ga', {})
     if not ga or ga.get('fitness', 0) == 0:
-        return jsonify({'error': 'Belum ada hasil GA. Jalankan GA terlebih dahulu.'}), 404
+        return jsonify({'error': 'No GA results yet. Run GA first.'}), 404
 
     params    = ga.get('params', ga_params)
     run_time  = ga.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
@@ -3644,8 +3670,8 @@ def ga_export_csv():
     wr.writerow(['--- KONDISI RUANGAN SAAT OPTIMASI ---'])
     wr.writerow(['Suhu Ruangan',   f"{snap.get('temp_room', '-')} °C"])
     wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
-    wr.writerow(['Orang Terdeteksi', 'Ya' if snap.get('person_detected') else 'Tidak'])
-    wr.writerow(['Jumlah Orang',  snap.get('person_count', 0)])
+    wr.writerow(['People Detected', 'Yes' if snap.get('person_detected') else 'No'])
+    wr.writerow(['People Count',  snap.get('person_count', 0)])
     wr.writerow(['Daya AC (real)', f"{snap.get('actual_watt', '-')} W"])
     wr.writerow([])
 
@@ -3697,7 +3723,7 @@ def pso_export_csv():
     iteration_log = pso.get('iteration_log', [])
 
     if not pso or not iteration_log:
-        return jsonify({'error': 'Belum ada data iterasi PSO. Jalankan PSO terlebih dahulu.'}), 404
+        return jsonify({'error': 'No PSO iteration data yet. Run PSO first.'}), 404
 
     buf = io.StringIO()
     wr  = csv_mod.writer(buf)
@@ -5181,7 +5207,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-ac" class="page active">
             <div class="header">
                 <h1>AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostik</button></p>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostics</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -5208,7 +5234,7 @@ HTML_TEMPLATE = '''
                     <strong style="color: #f59e0b;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
-                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
+                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Click buttons below to run diagnostics...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
                         Test Frontend (Inject Data Dummy)
@@ -5335,7 +5361,7 @@ HTML_TEMPLATE = '''
                         <!-- Operating Mode (ADAPTIVE/MANUAL) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Kontrol
+                                Control
                             </div>
                             <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon">A</div>
                             <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
@@ -5358,12 +5384,12 @@ HTML_TEMPLATE = '''
 
                 <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
 
-                <!-- ===== PANEL EXPORT SUHU & HUMIDITY DARI DATABASE ===== -->
+                <!-- ===== EXPORT TEMPERATURE & HUMIDITY FROM DATABASE PANEL ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Suhu &amp; Kelembaban</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data suhu &amp; humidity dari database — pilih rentang tanggal, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Temperature &amp; Humidity</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch temperature &amp; humidity data from database — select date range, export to CSV</p>
                         </div>
                         <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.12);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">
                             <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
@@ -5371,11 +5397,11 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                             <input type="date" id="db-temp-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                             <input type="date" id="db-temp-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <button onclick="dbExportCSV('temp')"
@@ -5384,20 +5410,20 @@ HTML_TEMPLATE = '''
                         </button>
                         <button onclick="dbExportSetToday('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            Hari Ini
+                            Today
                         </button>
                         <button onclick="dbExportSet7d('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            7 Hari
+                            7 Days
                         </button>
                         <button onclick="dbExportSet30d('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            30 Hari
+                            30 Days
                         </button>
                     </div>
                     <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
                         <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
-                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Temperature (°C), Humidity (%), Heat Index (°C)</strong>
+                        Data fetched directly from InfluxDB — columns: <strong>Time, Temperature (°C), Humidity (%), Heat Index (°C)</strong>
                     </div>
                 </div>
 
@@ -5531,12 +5557,12 @@ HTML_TEMPLATE = '''
                         <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
-                <!-- ===== PANEL EXPORT LUX & BRIGHTNESS DARI DATABASE ===== -->
+                <!-- ===== EXPORT LUX & BRIGHTNESS FROM DATABASE PANEL ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(234,179,8,0.25);background:linear-gradient(160deg,rgba(234,179,8,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#eab308;margin-right:8px;"></i>Export Lux &amp; Kecerahan Lampu</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data lux &amp; brightness dari database — pilih rentang tanggal, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#eab308;margin-right:8px;"></i>Export Lux &amp; Lamp Brightness</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch lux &amp; brightness data from database — select date range, export to CSV</p>
                         </div>
                         <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(234,179,8,0.12);color:#ca8a04;border:1px solid rgba(234,179,8,0.3);">
                             <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
@@ -5544,11 +5570,11 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                             <input type="date" id="db-lux-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                             <input type="date" id="db-lux-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <button onclick="dbExportCSV('lux')"
@@ -5557,20 +5583,20 @@ HTML_TEMPLATE = '''
                         </button>
                         <button onclick="dbExportSetToday('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            Hari Ini
+                            Today
                         </button>
                         <button onclick="dbExportSet7d('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            7 Hari
+                            7 Days
                         </button>
                         <button onclick="dbExportSet30d('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            30 Hari
+                            30 Days
                         </button>
                     </div>
                     <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(234,179,8,0.05);border-radius:8px;border:1px solid rgba(234,179,8,0.12);">
                         <i class="fas fa-info-circle" style="color:#eab308;margin-right:6px;"></i>
-                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Lux1 (lx), Lux2 (lx), Lux3 (lx), Avg Lux (lx), Brightness1 (%), Brightness2 (%)</strong>
+                        Data fetched directly from InfluxDB — columns: <strong>Time, Lux1 (lx), Lux2 (lx), Lux3 (lx), Avg Lux (lx), Brightness1 (%), Brightness2 (%)</strong>
                     </div>
                 </div>
 
@@ -5589,7 +5615,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Room Temperature Trend</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Temperature (C)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Temperature (C)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
@@ -5603,7 +5629,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Humidity Trend</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Humidity (%)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Humidity (%)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
@@ -5617,7 +5643,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">AC Target Temperature</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'AC Target Temp (C)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'AC Target Temp (C)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -5637,6 +5663,25 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="acPowerChart" height="80"></canvas>
             </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">AC Energy Consumption per Period (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac', '5min', this)">5min</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'day', this)">Day</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'week', this)">Week</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'month', this)">Month</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'year', this)">Year</button>
+                    </div>
+                </div>
+                <canvas id="acAnalyticsKwhChart" height="80"></canvas>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:12px;">
+                    <span style="color:#10b981;font-weight:600;">AC kWh per interval</span>
+                    <span style="color:var(--text-secondary);">Last: <strong id="ac-analytics-kwh-latest" style="color:var(--text);">--</strong> kWh</span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="ac-analytics-kwh-total" style="color:var(--text);">--</strong> kWh</span>
+                </div>
+            </div>
         </div>
 
         <!-- Lamp Analytics Page -->
@@ -5651,7 +5696,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Light Intensity (Lux) — 3 Sensors</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('lampLux', 'Lux')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampLux', 'Lux')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 24)">24h</button>
@@ -5665,7 +5710,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Brightness Level — 2 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('lampBright', 'Brightness (%)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampBright', 'Brightness (%)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 24)">24h</button>
@@ -5684,6 +5729,25 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="lampPowerChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Lamp Energy Consumption per Period (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('lamp', '5min', this)">5min</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'day', this)">Day</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'week', this)">Week</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'month', this)">Month</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'year', this)">Year</button>
+                    </div>
+                </div>
+                <canvas id="lampAnalyticsKwhChart" height="80"></canvas>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:12px;">
+                    <span style="color:#a855f7;font-weight:600;">Lamp kWh per interval</span>
+                    <span style="color:var(--text-secondary);">Last: <strong id="lamp-analytics-kwh-latest" style="color:var(--text);">--</strong> kWh</span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="lamp-analytics-kwh-total" style="color:var(--text);">--</strong> kWh</span>
+                </div>
             </div>
         </div>
         <div id="camera" class="page">
@@ -5756,42 +5820,42 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- ===== PANEL OCCUPANCY HARIAN ===== -->
+            <!-- ===== DAILY OCCUPANCY PANEL ===== -->
             <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Grafik Occupancy Harian</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Jumlah orang terdeteksi per jam (otomatis direkam setiap jam) &mdash; max 24 data/hari</p>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Daily Occupancy Chart</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Number of people detected per hour (auto-recorded every hour) &mdash; max 24 data/day</p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
                         <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
-                        <button onclick="dbExportCSV('occupancy')" title="Export dari InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
-                        <button onclick="occExportRange()" title="Export rentang tanggal" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
+                        <button onclick="dbExportCSV('occupancy')" title="Export from InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
+                        <button onclick="occExportRange()" title="Export date range" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Range</button>
                         <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
                     </div>
                 </div>
                 <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
-                    <span style="color:var(--text-secondary);">Data tampil: <strong id="occ-count" style="color:#a855f7;">0</strong> jam</span>
-                    <span style="color:var(--text-secondary);">Berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang</span>
+                    <span style="color:var(--text-secondary);">Displayed: <strong id="occ-count" style="color:#a855f7;">0</strong> hr</span>
+                    <span style="color:var(--text-secondary);">Next: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> people</span>
                 </div>
                 <!-- Range filter occupancy -->
                 <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Hari Ini</button>
-                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Hari</button>
-                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Hari</button>
-                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">Semua</button>
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Today</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Days</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Days</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">All</button>
                 </div>
                 <!-- DB Export date range for occupancy -->
                 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);">
                     <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#6366f1;margin-right:4px;"></i>DB Export:</span>
                     <input type="date" id="db-occupancy-from" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
-                    <span style="font-size:11px;color:var(--text-secondary);">s/d</span>
+                    <span style="font-size:11px;color:var(--text-secondary);">to</span>
                     <input type="date" id="db-occupancy-to" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
-                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Hari Ini</button>
-                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Hari</button>
-                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Hari</button>
+                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Today</button>
+                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Days</button>
+                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Days</button>
                 </div>
                 <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
                     <canvas id="occChart"></canvas>
@@ -5800,14 +5864,14 @@ HTML_TEMPLATE = '''
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
                             <tr style="background:rgba(168,85,247,0.08);">
-                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Waktu</th>
+                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>
                                 <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Jam</th>
-                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Jumlah Orang</th>
+                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">People Count</th>
                                 <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
                             </tr>
                         </thead>
                         <tbody id="occ-preview-body">
-                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>
+                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Waiting for first hourly record&hellip;</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -5829,7 +5893,7 @@ HTML_TEMPLATE = '''
                         <div style="width:38px;height:38px;border-radius:10px;background:rgba(99,102,241,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
                         <div>
                             <div style="font-size:15px;font-weight:700;color:var(--text);">Live Energy Monitor</div>
-                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; update tiap 5 detik</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; updates every 5 seconds</div>
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:12px;">
@@ -5851,41 +5915,41 @@ HTML_TEMPLATE = '''
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#ef4444;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Active Power</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
                                 <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 3.0 kW max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 3.0 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-voltage">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">V</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
                                 <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Reactive</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-reactive">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Apparent</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-apparent">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VA</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-freq">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
                             </div>
@@ -5904,47 +5968,47 @@ HTML_TEMPLATE = '''
                     <!-- ── Lamp ── -->
                     <div style="padding:18px 20px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lampu (id_kwh=2)</div>
+                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lamp (id_kwh=2)</div>
                             <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(234,179,8,0.1);color:#eab308;border:1px solid rgba(234,179,8,0.2);">Live</div>
                         </div>
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#eab308;line-height:1;transition:color 0.3s;"><span id="lamp-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Active Power</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
                                 <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 0.5 kW max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 0.5 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-voltage">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">V</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
                                 <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Reactive</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-reactive">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Apparent</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-apparent">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VA</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-freq">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
                             </div>
@@ -5964,23 +6028,23 @@ HTML_TEMPLATE = '''
                 <!-- Total footer row -->
                 <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(99,102,241,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(99,102,241,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Daya</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Power</div>
                         <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Arus</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Current</div>
                         <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energi</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energy</div>
                         <div style="font-size:20px;font-weight:800;color:#10b981;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frekuensi</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frequency</div>
                         <div style="font-size:20px;font-weight:800;color:var(--text);"><span id="total-freq-card">--</span><span style="font-size:11px;"> Hz</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Biaya</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Cost</div>
                         <div style="font-size:17px;font-weight:800;color:#f59e0b;">Rp <span id="daily-cost">--</span></div>
                         <div style="font-size:9px;color:var(--text-secondary);">@ Rp 1.500/kWh</div>
                     </div>
@@ -6004,7 +6068,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- ===== GRAFIK HISTORIS (InfluxDB) ===== -->
+            <!-- ===== HISTORICAL CHART (InfluxDB) ===== -->
             <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
                 <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-history" style="margin-right:8px;color:#10b981;"></i>Historical Data (InfluxDB)</h2>
 
@@ -6018,8 +6082,8 @@ HTML_TEMPLATE = '''
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">12 Bln</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '5y', this)">5 Thn</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">12 Mo</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '5y', this)">5 Yr</button>
                         </div>
                     </div>
                     <canvas id="energyPowerChart" height="80"></canvas>
@@ -6080,22 +6144,22 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Energi per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Period &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">12 Bln</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '5y', this)">5 Thn</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '5min', this)">5min</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'day', this)">Day</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'week', this)">Week</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'month', this)">Month</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'year', this)">Year</button>
                         </div>
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
                         <span style="color:#10b981;font-weight:600;">AC</span>
-                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
                         <span style="color:#a855f7;font-weight:600;margin-left:10px;">Lamp</span>
-                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
                     </div>
                 </div>
@@ -6164,26 +6228,26 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- ===== PANEL EXPORT ENERGI DARI DATABASE ===== -->
+            <!-- ===== EXPORT ENERGY FROM DATABASE PANEL ===== -->
             <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Data Energi dari Database</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data energi langsung dari InfluxDB — pilih rentang tanggal &amp; perangkat, export ke CSV</p>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Energy Data from Database</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch energy data directly from InfluxDB — select date range &amp; device, export to CSV</p>
                     </div>
                     <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
                         <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                     </div>
                 </div>
 
-                <!-- Baris 1: Tanggal + AC -->
+                <!-- Row 1: Date + AC -->
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
                     <div>
-                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                         <input type="date" id="db-energy-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
                     <div>
-                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                         <input type="date" id="db-energy-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
                     <button onclick="dbExportCSV('energy_ac')"
@@ -6192,24 +6256,24 @@ HTML_TEMPLATE = '''
                     </button>
                     <button onclick="dbExportCSV('energy_lamp')"
                         style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
-                        <i class="fas fa-download"></i> Export Lampu
+                        <i class="fas fa-download"></i> Export Lamp
                     </button>
                     <button onclick="dbExportSetToday('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        Hari Ini
+                        Today
                     </button>
                     <button onclick="dbExportSet7d('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        7 Hari
+                        7 Days
                     </button>
                     <button onclick="dbExportSet30d('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        30 Hari
+                        30 Days
                     </button>
                 </div>
                 <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(16,185,129,0.05);border-radius:8px;border:1px solid rgba(16,185,129,0.12);">
                     <i class="fas fa-info-circle" style="color:#10b981;margin-right:6px;"></i>
-                    Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
+                    Data fetched directly from InfluxDB — columns: <strong>Time, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
                 </div>
             </div>
         </div>
@@ -6523,7 +6587,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#06b6d4;">--</span>%</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -6532,7 +6596,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
-                    <div class="stat-change"><span>Akurasi Lux (100% = tepat 350 lux)</span></div>
+                    <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -6578,8 +6642,8 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export GA Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
                             Run GA
                         </button>
@@ -6591,10 +6655,10 @@ HTML_TEMPLATE = '''
             <!-- PSO Iteration Detail Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO — Detail Iterasi (PWM1, PWM2, Lux Avg per Iterasi)</div>
+                    <div class="chart-title">PSO — Iteration Detail (PWM1, PWM2, Lux Avg per Iteration)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export PSO Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
                             Run PSO
                         </button>
@@ -6605,7 +6669,7 @@ HTML_TEMPLATE = '''
                     <table style="width:100%;border-collapse:collapse;font-size:12px;">
                         <thead>
                             <tr style="background:rgba(245,158,11,0.15);">
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Iterasi</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Iteration</th>
                                 <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 1</th>
                                 <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 2</th>
                                 <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 1</th>
@@ -6759,7 +6823,7 @@ HTML_TEMPLATE = '''
                         <div class="chart-title">Occupancy Trend</div>
                         <div class="chart-options">
                             <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export rentang tanggal">&#128197;</button>
+                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export date range">&#128197;</button>
                             <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
@@ -7453,7 +7517,7 @@ HTML_TEMPLATE = '''
         }
 
         // Track current period per field so auto-refresh doesn't reset user selection
-        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
+        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: 'day' };
 
         function toDelta(values) {
             // Convert cumulative kWh array -> per-interval delta array
@@ -7492,11 +7556,18 @@ HTML_TEMPLATE = '''
                 if (chart && chart.data && chart.data.datasets) {
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
-                    // energy_kwh: konversi kumulatif -> delta per interval
+                    // energy_kwh: backend already returns per-period delta for new period names
+                    var DELTA_PERIODS = ['5min','day','week','month','year'];
                     if (field === 'energy_kwh') {
-                        chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
-                        acValues = toDelta(acValues);
-                        lampValues = toDelta(lampValues);
+                        if (DELTA_PERIODS.indexOf(period) >= 0) {
+                            // Backend used difference(nonNegative:true) — values are already per-period
+                            chart.data.labels = acData.map(function(d){ return d.time; });
+                        } else {
+                            // Legacy cumulative data — compute delta client-side
+                            chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
+                            acValues = toDelta(acValues);
+                            lampValues = toDelta(lampValues);
+                        }
                     } else {
                         chart.data.labels = acData.map(function(d){ return d.time; });
                     }
@@ -7564,6 +7635,72 @@ HTML_TEMPLATE = '''
             loadRecordingState();
             loadLampRecordingState();
             loadDailySummary();
+        }
+
+        // ==================== ANALYTICS ENERGY CHART ====================
+        function loadAnalyticsEnergy(device, period, btnElement) {
+            var chartKey = device === 'ac' ? 'acAnalyticsEnergy' : 'lampAnalyticsEnergy';
+            var canvasId = device === 'ac' ? 'acAnalyticsKwhChart' : 'lampAnalyticsKwhChart';
+            var latestId = device + '-analytics-kwh-latest';
+            var totalId  = device + '-analytics-kwh-total';
+            var color    = device === 'ac' ? '#10b981' : '#a855f7';
+
+            if (btnElement) {
+                var btns = btnElement.parentElement.querySelectorAll('.chart-option-btn');
+                btns.forEach(function(b){ b.classList.remove('active'); });
+                btnElement.classList.add('active');
+            }
+
+            var influxDevice = device === 'ac' ? 'mysql_ac' : 'mysql_lamp';
+            fetch('/api/energy/history?field=energy_kwh&period=' + period + '&device=' + influxDevice)
+                .then(function(r){ return r.json(); })
+                .then(function(result) {
+                    var data = result.data || [];
+                    var labels = data.map(function(d){ return d.time; });
+                    var values = data.map(function(d){ return parseFloat(d.value || 0); });
+
+                    var chart = charts[chartKey];
+                    if (!chart) {
+                        var ctx = document.getElementById(canvasId);
+                        if (!ctx) return;
+                        chart = new Chart(ctx, {
+                            type: 'bar',
+                            data: {
+                                labels: labels,
+                                datasets: [{
+                                    label: (device === 'ac' ? 'AC' : 'Lamp') + ' kWh',
+                                    data: values,
+                                    backgroundColor: color + '55',
+                                    borderColor: color,
+                                    borderWidth: 1,
+                                    borderRadius: 3,
+                                }]
+                            },
+                            options: {
+                                responsive: true, maintainAspectRatio: true,
+                                plugins: { legend: { display: false } },
+                                scales: {
+                                    x: { ticks: { maxTicksLimit: 12, color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+                                    y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true }
+                                }
+                            }
+                        });
+                        charts[chartKey] = chart;
+                    } else {
+                        chart.data.labels = labels;
+                        chart.data.datasets[0].data = values;
+                        chart.update('none');
+                    }
+
+                    var finite = values.filter(function(v){ return Number.isFinite(v) && v > 0; });
+                    var latest = finite.length ? finite[finite.length-1].toFixed(4) : '--';
+                    var total  = finite.length ? finite.reduce(function(a,b){ return a+b; }, 0).toFixed(4) : '--';
+                    var latestEl = document.getElementById(latestId);
+                    var totalEl  = document.getElementById(totalId);
+                    if (latestEl) latestEl.textContent = latest;
+                    if (totalEl)  totalEl.textContent  = total;
+                })
+                .catch(function(e){ console.warn('loadAnalyticsEnergy error:', e); });
         }
 
         // ==================== DAILY SUMMARY ====================
@@ -7976,11 +8113,13 @@ HTML_TEMPLATE = '''
                 ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                setTimeout(function(){ loadAnalyticsEnergy('ac', '5min', null); }, 100);
             }
             if (pageId === 'lamp-analytics') {
                 ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                setTimeout(function(){ loadAnalyticsEnergy('lamp', '5min', null); }, 100);
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -8048,6 +8187,7 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
+            setEl('ml-ga-rh', data.ga_rh_set != null ? parseFloat(data.ga_rh_set).toFixed(1) : '--');
             var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
             var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
@@ -8127,7 +8267,7 @@ HTML_TEMPLATE = '''
             tbody.innerHTML = iterLog.map(d => {
                 const inRange     = d.lux_avg >= 315 && d.lux_avg <= 385;
                 const statusColor = inRange ? '#10b981' : '#f59e0b';
-                const statusText  = inRange ? '✓ Target' : '✗ Belum';
+                const statusText  = inRange ? '✓ Target' : '✗ Not Yet';
                 const fitPct      = Math.max(0, 100.0 - (d.fitness / 122500.0) * 100.0).toFixed(1);
                 return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
@@ -8168,7 +8308,7 @@ HTML_TEMPLATE = '''
                 wrap.style.display = 'block';
                 const inRange     = (d.lux_avg || 0) >= 315 && (d.lux_avg || 0) <= 385;
                 const statusColor = inRange ? '#10b981' : '#f59e0b';
-                const statusText  = inRange ? '✓ Target' : '✗ Belum';
+                const statusText  = inRange ? '✓ Target' : '✗ Not Yet';
                 const newRow = `<tr data-iter="${d.iter}" style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
                     <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
@@ -8343,7 +8483,7 @@ HTML_TEMPLATE = '''
             fetch('/api/ga/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
                     }
                     return r.blob();
                 })
@@ -8354,16 +8494,16 @@ HTML_TEMPLATE = '''
                     link.download = 'ga_report_' + ts + '.csv';
                     link.click();
                     URL.revokeObjectURL(link.href);
-                    showToast('Laporan GA berhasil diexport!', 'success');
+                    showToast('GA report exported successfully!', 'success');
                 })
-                .catch(function(e) { showToast('Export GA gagal: ' + e.message, 'error'); });
+                .catch(function(e) { showToast('GA export failed: ' + e.message, 'error'); });
         }
 
         function exportPSOReport() {
             fetch('/api/pso/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
                     }
                     return r.blob();
                 })
@@ -8374,9 +8514,9 @@ HTML_TEMPLATE = '''
                     link.download = 'pso_report_' + ts + '.csv';
                     link.click();
                     URL.revokeObjectURL(link.href);
-                    showToast('Laporan PSO berhasil diexport!', 'success');
+                    showToast('PSO report exported successfully!', 'success');
                 })
-                .catch(function(e) { showToast('Export PSO gagal: ' + e.message, 'error'); });
+                .catch(function(e) { showToast('PSO export failed: ' + e.message, 'error'); });
         }
 
         function exportFeedback() {
@@ -9861,7 +10001,7 @@ HTML_TEMPLATE = '''
                         diagLog('Subscriptions: ' + (data.subscriptions || []).join(', '));
                         if (!data.connected) {
                             diagLog('');
-                            diagLog('SOLUSI: Pastikan MQTT broker (Mosquitto) berjalan!');
+                            diagLog('FIX: Make sure MQTT broker (Mosquitto) is running!');
                             diagLog('Windows: net start mosquitto');
                             diagLog('Linux/Pi: sudo systemctl start mosquitto');
                         }
@@ -9872,23 +10012,23 @@ HTML_TEMPLATE = '''
                     var txt = document.getElementById('mqtt-status-text');
                     if (dot) dot.className = 'device-dot offline';
                     if (txt) txt.textContent = 'API Error';
-                    if (showDetail) diagLog('ERROR: Tidak bisa fetch /api/mqtt/status');
+                    if (showDetail) diagLog('ERROR: Cannot fetch /api/mqtt/status');
                 });
         }
 
         function runSimulate() {
             diagClear('=== TEST FRONTEND (INJECT DATA DUMMY) ===');
-            diagLog('Mengirim data dummy ke server...');
+            diagLog('Sending dummy data to server...');
             fetch('/api/simulate', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        diagLog('BERHASIL! Data dummy sudah diinjek:');
+                        diagLog('SUCCESS! Dummy data injected:');
                         diagLog('  AC Temperature: ' + data.ac_temp + ' C');
                         diagLog('  Lamp Lux1: ' + data.lamp_lux + ' lux');
                         diagLog('');
-                        diagLog('Jika nilai di dashboard berubah dari 0 -> FRONTEND OK');
-                        diagLog('Jika tetap 0 -> Ada masalah di JavaScript/DOM');
+                        diagLog('If dashboard values change from 0 -> FRONTEND OK');
+                        diagLog('If still 0 -> There is a JavaScript/DOM issue');
                         updateDashboard();
                     } else {
                         diagLog('ERROR: ' + data.message);
@@ -9899,23 +10039,23 @@ HTML_TEMPLATE = '''
 
         function runMqttSelftest() {
             diagClear('=== TEST MQTT BROKER (SELF-TEST) ===');
-            diagLog('Server akan publish ke smartroom/ac/sensors...');
+            diagLog('Server will publish to smartroom/ac/sensors...');
             fetch('/api/mqtt/selftest', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        diagLog('BERHASIL! Pesan test berhasil dipublish ke broker.');
+                        diagLog('SUCCESS! Test message published to broker.');
                         diagLog(data.message);
                         diagLog('');
-                        diagLog('Tunggu 2 detik... lalu cek apakah data muncul di dashboard.');
-                        diagLog('Jika muncul -> MQTT Broker OK, masalah ada di ESP32');
-                        diagLog('Jika tidak muncul -> Ada masalah subscribe/routing topic');
+                        diagLog('Wait 2 seconds... then check if data appears in dashboard.');
+                        diagLog('If appears -> MQTT Broker OK, issue is in ESP32');
+                        diagLog('If not appearing -> Subscribe/routing topic issue');
                         setTimeout(function() { updateDashboard(); diagLog('Dashboard refreshed.'); }, 2000);
                     } else {
-                        diagLog('GAGAL: ' + data.message);
+                        diagLog('FAILED: ' + data.message);
                         diagLog('');
-                        diagLog('Artinya: MQTT Broker tidak berjalan atau tidak bisa terkoneksi!');
-                        diagLog('Jalankan Mosquitto terlebih dahulu.');
+                        diagLog('Meaning: MQTT Broker is not running or cannot connect!');
+                        diagLog('Start Mosquitto first.');
                     }
                 })
                 .catch(function(e) { diagLog('FETCH ERROR: ' + e); });
@@ -9923,7 +10063,7 @@ HTML_TEMPLATE = '''
 
         function runMqttReconnect() {
             diagClear('=== RECONNECT MQTT ===');
-            diagLog('Mencoba reconnect ke MQTT broker...');
+            diagLog('Attempting MQTT broker reconnect...');
             fetch('/api/mqtt/reconnect', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
@@ -10067,9 +10207,9 @@ HTML_TEMPLATE = '''
             s('eu-lamp-apparent', f(lamp.apparent_power, 1));
             var _pfBadge = function(pf) {
                 var v = parseFloat(pf||0);
-                if (v >= 0.95) return {t:'Baik',  bg:'rgba(16,185,129,0.15)', c:'#10b981'};
-                if (v >= 0.85) return {t:'Cukup', bg:'rgba(245,158,11,0.15)', c:'#f59e0b'};
-                if (v >  0)    return {t:'Buruk', bg:'rgba(239,68,68,0.15)',  c:'#ef4444'};
+                if (v >= 0.95) return {t:'Good',  bg:'rgba(16,185,129,0.15)', c:'#10b981'};
+                if (v >= 0.85) return {t:'Fair', bg:'rgba(245,158,11,0.15)', c:'#f59e0b'};
+                if (v >  0)    return {t:'Poor', bg:'rgba(239,68,68,0.15)',  c:'#ef4444'};
                 return {t:'--', bg:'rgba(107,114,128,0.15)', c:'#6b7280'};
             };
             var _applyBadge = function(id, pf) {
@@ -10201,7 +10341,7 @@ HTML_TEMPLATE = '''
                     var badge = document.getElementById('rec-status-badge');
                     if (badge) {
                         if (st.energy) {
-                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                             badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                         } else { _recUpdateBadge(); }
                     }
@@ -10209,14 +10349,14 @@ HTML_TEMPLATE = '''
                 if (!_tempActive) {
                     var tb = document.getElementById('temp-rec-badge');
                     if (tb && st.temp) {
-                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (tb && !st.temp) { _tempUpdateBadge(); }
                 }
                 if (!_luxActive) {
                     var lb = document.getElementById('lux-rec-badge');
                     if (lb && st.lux) {
-                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (lb && !st.lux) { _luxUpdateBadge(); }
                 }
@@ -10229,7 +10369,7 @@ HTML_TEMPLATE = '''
         var _recActive  = false;  // never auto-resume active state; user must press start
         var _recStartTs = null;
         var _recTimer   = null;
-        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lampu'
+        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lamp'
 
         function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
 
@@ -10240,7 +10380,7 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify({rows: _recRows})
             }).then(function(r){ return r.json(); }).then(function(d){
                 var b = document.getElementById('rec-sync-badge');
-                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#10b981'; b.style.borderColor='rgba(16,185,129,0.3)'; }
+                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' rows'; b.style.color='#10b981'; b.style.borderColor='rgba(16,185,129,0.3)'; }
             }).catch(function(){});
         }
         function _recServerFetch() {
@@ -10253,7 +10393,7 @@ HTML_TEMPLATE = '''
                     _recRows = d.rows; _ssSave('_recRows', _recRows); _recUpdatePreview();
                 }
                 var b = document.getElementById('rec-sync-badge');
-                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
+                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' rows'; b.style.color='#6366f1'; }
             }).catch(function(){});
         }
         function _recServerDelete() { fetch('/api/rec/data?type=energy', {method:'DELETE'}).catch(function(){}); }
@@ -10262,10 +10402,10 @@ HTML_TEMPLATE = '''
 
         function recSetFilter(f) {
             _recFilter = f;
-            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lampu:'rec-tab-lamp'};
+            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lamp:'rec-tab-lamp'};
             Object.keys(map).forEach(function(k) {
                 var el = document.getElementById(map[k]); if (!el) return;
-                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lampu'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
+                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lamp'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
                 else { el.style.background='transparent'; el.style.fontWeight='600'; el.style.color='var(--text-secondary)'; el.style.boxShadow='none'; }
             });
             _recUpdatePreview();
@@ -10275,7 +10415,7 @@ HTML_TEMPLATE = '''
             var badge = document.getElementById('rec-status-badge');
             if (!badge) return;
             if (_recActive) {
-                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam';
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording';
                 badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
             } else {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10290,7 +10430,7 @@ HTML_TEMPLATE = '''
             if (!tbody) return;
             var filtered = _recFilter === 'all' ? _recRows : _recRows.filter(function(r){ return r.device === _recFilter; });
             if (filtered.length === 0) {
-                var msg = _recRows.length > 0 ? 'Tidak ada data untuk filter <strong>' + _recFilter + '</strong>.' : 'Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.';
+                var msg = _recRows.length > 0 ? 'No data for filter <strong>' + _recFilter + '</strong>.' : 'No data yet. Click <strong>Start Recording</strong> to begin.';
                 tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
                 var rngHide = document.getElementById('rec-date-range'); if (rngHide) rngHide.style.display = 'none';
                 return;
@@ -10343,7 +10483,7 @@ HTML_TEMPLATE = '''
             });
             // Lamp row
             _recRows.push({
-                ts: ts, device: 'Lampu',
+                ts: ts, device: 'Lamp',
                 tegangan: _recFmt(lamp.voltage || lamp.tegangan),
                 arus:     _recFmt(lamp.current || lamp.arus, 3),
                 daya:     _recFmt(lamp.power   || lamp.active_power, 2),
@@ -10362,7 +10502,7 @@ HTML_TEMPLATE = '''
             _recActive  = true;
             _recStartTs = Date.now();
             var startEl = document.getElementById('rec-start-time');
-            if (startEl) startEl.textContent = new Date().toLocaleTimeString('id-ID');
+            if (startEl) startEl.textContent = new Date().toLocaleTimeString('en-US');
             var btnS = document.getElementById('btn-rec-start');
             var btnE = document.getElementById('btn-rec-stop');
             if (btnS) { btnS.disabled = true; btnS.style.opacity = '0.5'; }
@@ -10370,7 +10510,7 @@ HTML_TEMPLATE = '''
             _recTimer = setInterval(_recTick, 1000);
             _recUpdateBadge();
             _recStatePush({energy: true});
-            showToast('Rekam data dimulai', 'success');
+            showToast('Recording started', 'success');
         }
 
         function energyRecStop() {
@@ -10383,7 +10523,7 @@ HTML_TEMPLATE = '''
             _recUpdateBadge();
             _recStatePush({energy: false});
             _recServerPush();
-            showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _recRows.length + ' rows saved', 'info');
         }
 
         function energyRecClear() {
@@ -10405,14 +10545,14 @@ HTML_TEMPLATE = '''
             _recUpdateBadge();
             _recUpdatePreview();
             var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
-            showToast('Data rekaman dihapus', 'info');
+            showToast('Recording data cleared', 'info');
         }
 
         function energyExportCSV(device) {
-            if (_recRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            if (_recRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
             var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
-            if (rows.length === 0) { showToast('Tidak ada data untuk ' + device, 'error'); return; }
-            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+            if (rows.length === 0) { showToast('No data for ' + device, 'error'); return; }
+            var header = 'Time,Device,Voltage (V),Current (A),Active Power (W),Energy (kWh),Reactive Power (VAR),Apparent Power (VA),Frequency (Hz),Power Factor\n';
             var body = rows.map(function(r) {
                 return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
@@ -10423,7 +10563,7 @@ HTML_TEMPLATE = '''
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(rows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(rows.length + ' rows exported: ' + fname, 'success');
         }
 
         // Hook ke _applyEnergyData — rekam setiap 6 menit (360 detik)
@@ -10438,7 +10578,7 @@ HTML_TEMPLATE = '''
             }
         };
 
-        // ==================== REKAM SUHU & HUMIDITY ====================
+        // ==================== RECORD TEMPERATURE & HUMIDITY ====================
         function _tempServerPush() {
             fetch('/api/rec/data?type=temp', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -10465,7 +10605,7 @@ HTML_TEMPLATE = '''
         function _tempFmt(v, d) { var n = parseFloat(v); return Number.isFinite(n) ? n.toFixed(d != null ? d : 1) : '--'; }
 
         function _tempAddRow() {
-            var ts = new Date().toLocaleString('id-ID');
+            var ts = new Date().toLocaleString('en-US');
             var temp = document.getElementById('dash-ac-room-temp') ? document.getElementById('dash-ac-room-temp').textContent : '--';
             var hum  = document.getElementById('dash-ac-room-hum')  ? document.getElementById('dash-ac-room-hum').textContent  : '--';
             var t1   = document.getElementById('dash-ac-temp1')      ? document.getElementById('dash-ac-temp1').textContent      : '--';
@@ -10495,7 +10635,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('temp-rec-badge');
             if (!b) return;
             if (_tempActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10507,7 +10647,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('temp-rec-preview');
             if (!tbody) return;
             if (_tempRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Recording</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -10526,14 +10666,14 @@ HTML_TEMPLATE = '''
 
         function tempRecStart() {
             _tempActive = true; _tempStartTs = Date.now(); _lastTempRecTime = 0;
-            var s = document.getElementById('temp-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            var s = document.getElementById('temp-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('en-US');
             var tS = document.getElementById('btn-temp-start'), tE = document.getElementById('btn-temp-stop');
             if (tS) { tS.disabled = true; tS.style.opacity = '0.5'; }
             if (tE) { tE.disabled = false; tE.style.opacity = '1'; }
             _tempTimer = setInterval(_tempTick, 1000);
             _tempUpdateBadge();
             _recStatePush({temp: true});
-            showToast('Rekam suhu & humidity dimulai', 'success');
+            showToast('Temperature & humidity recording started', 'success');
         }
 
         function tempRecStop() {
@@ -10544,7 +10684,7 @@ HTML_TEMPLATE = '''
             _tempUpdateBadge();
             _recStatePush({temp: false});
             _tempServerPush();
-            showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _tempRows.length + ' rows saved', 'info');
         }
 
         function tempRecClear() {
@@ -10556,24 +10696,24 @@ HTML_TEMPLATE = '''
             if (tS2) { tS2.disabled = false; tS2.style.opacity = '1'; }
             if (tE2) { tE2.disabled = true; tE2.style.opacity = '0.5'; }
             _tempUpdateBadge(); _tempUpdatePreview();
-            showToast('Data suhu dihapus', 'info');
+            showToast('Temperature data cleared', 'info');
         }
 
         function tempExportCSV() {
-            if (_tempRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+            if (_tempRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
+            var header = 'Time,Avg Temp (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\n';
             var body = _tempRows.map(function(r) {
                 return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
             }).join('\\n');
             var now = new Date();
-            var fname = 'suhu_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+            var fname = 'temp_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_tempRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(_tempRows.length + ' rows exported: ' + fname, 'success');
         }
 
-        // ==================== REKAM LUX & BRIGHTNESS ====================
+        // ==================== RECORD LUX & BRIGHTNESS ====================
         function _luxServerPush() {
             fetch('/api/rec/data?type=lux', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -10598,7 +10738,7 @@ HTML_TEMPLATE = '''
         var _LUX_REC_MS = 60000; // 1 menit
 
         function _luxAddRow() {
-            var ts = new Date().toLocaleString('id-ID');
+            var ts = new Date().toLocaleString('en-US');
             var get = function(id) { var e = document.getElementById(id); return e ? e.textContent : '--'; };
             _luxRows.push({
                 ts: ts,
@@ -10628,7 +10768,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('lux-rec-badge');
             if (!b) return;
             if (_luxActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10640,7 +10780,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('lux-rec-preview');
             if (!tbody) return;
             if (_luxRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Recording</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -10660,14 +10800,14 @@ HTML_TEMPLATE = '''
 
         function luxRecStart() {
             _luxActive = true; _luxStartTs = Date.now(); _lastLuxRecTime = 0;
-            var s = document.getElementById('lux-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('id-ID');
+            var s = document.getElementById('lux-rec-start'); if (s) s.textContent = new Date().toLocaleTimeString('en-US');
             var lS = document.getElementById('btn-lux-start'), lE = document.getElementById('btn-lux-stop');
             if (lS) { lS.disabled = true; lS.style.opacity = '0.5'; }
             if (lE) { lE.disabled = false; lE.style.opacity = '1'; }
             _luxTimer = setInterval(_luxTick, 1000);
             _luxUpdateBadge();
             _recStatePush({lux: true});
-            showToast('Rekam lux & brightness dimulai', 'success');
+            showToast('Lux & brightness recording started', 'success');
         }
 
         function luxRecStop() {
@@ -10678,7 +10818,7 @@ HTML_TEMPLATE = '''
             _luxUpdateBadge();
             _recStatePush({lux: false});
             _luxServerPush();
-            showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _luxRows.length + ' rows saved', 'info');
         }
 
         function luxRecClear() {
@@ -10690,12 +10830,12 @@ HTML_TEMPLATE = '''
             if (lS2) { lS2.disabled = false; lS2.style.opacity = '1'; }
             if (lE2) { lE2.disabled = true; lE2.style.opacity = '0.5'; }
             _luxUpdateBadge(); _luxUpdatePreview();
-            showToast('Data lux dihapus', 'info');
+            showToast('Lux data cleared', 'info');
         }
 
         function luxExportCSV() {
-            if (_luxRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+            if (_luxRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
+            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
             var body = _luxRows.map(function(r) {
                 return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
             }).join('\\n');
@@ -10704,7 +10844,7 @@ HTML_TEMPLATE = '''
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_luxRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(_luxRows.length + ' rows exported: ' + fname, 'success');
         }
 
         // ==================== OCCUPANCY DAILY RECORDING ====================
@@ -10727,7 +10867,7 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: _OCC_REC_LABEL,
                     datasets: [{
-                        label: 'Jumlah Orang',
+                        label: 'People Count',
                         data: new Array(24).fill(null),
                         backgroundColor: 'rgba(168,85,247,0.5)',
                         borderColor: '#a855f7',
@@ -10739,12 +10879,12 @@ HTML_TEMPLATE = '''
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: {
-                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' orang' : 'Belum direkam'; } }
+                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' people' : 'Not recorded'; } }
                     }},
                     scales: {
                         x: { ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', maxRotation: 0 } },
                         y: { beginAtZero: true, ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', stepSize: 1 },
-                             title: { display: true, text: 'Jumlah Orang', font: {size:10}, color: '#a855f7' } }
+                             title: { display: true, text: 'People Count', font: {size:10}, color: '#a855f7' } }
                     }
                 }
             });
@@ -10793,14 +10933,14 @@ HTML_TEMPLATE = '''
                 filtered.forEach(function(r){ if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
                 _occChart.data.labels = _OCC_REC_LABEL;
                 _occChart.data.datasets[0].data = data;
-                _occChart.data.datasets[0].label = 'Jumlah Orang (per jam)';
+                _occChart.data.datasets[0].label = 'People Count (per hour)';
             } else {
                 var dayMap = {};
                 filtered.forEach(function(r){ var d = r.ts.substring(0,10); dayMap[d] = (dayMap[d]||0) + (r.count||0); });
                 var days = Object.keys(dayMap).sort();
                 _occChart.data.labels = days;
                 _occChart.data.datasets[0].data = days.map(function(d){ return dayMap[d]; });
-                _occChart.data.datasets[0].label = 'Total Orang per Hari';
+                _occChart.data.datasets[0].label = 'Total People per Day';
             }
             _occChart.update('none');
             _occUpdatePreview();
@@ -10811,7 +10951,7 @@ HTML_TEMPLATE = '''
             if (!tbody) return;
             var filtered = _occGetFilteredRows();
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Belum ada data untuk rentang ini&hellip;</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">No data for this range&hellip;</td></tr>';
                 return;
             }
             tbody.innerHTML = filtered.slice().reverse().map(function(r) {
@@ -10844,7 +10984,7 @@ HTML_TEMPLATE = '''
             _occLastHour = h;
             _ssSave('_occRows', _occRows);
             _occRefreshChart();
-            showToast('Occupancy jam ' + String(h).padStart(2,'0') + ':00 direkam — ' + count + ' orang', 'info');
+            showToast('Occupancy at ' + String(h).padStart(2,'0') + ':00 recorded — ' + count + ' people', 'info');
         }
 
         function occClear() {
@@ -10854,12 +10994,12 @@ HTML_TEMPLATE = '''
             _occUpdatePreview();
             var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = '0';
             var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = '0';
-            showToast('Data occupancy dihapus', 'info');
+            showToast('Occupancy data cleared', 'info');
         }
 
         function occExportCSV() {
-            if (_occRows.length === 0) { showToast('Belum ada data occupancy', 'error'); return; }
-            var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+            if (_occRows.length === 0) { showToast('No occupancy data yet', 'error'); return; }
+            var header = 'Time,Hour,People Count,Confidence\\n';
             var body = _occRows.map(function(r) {
                 return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
             }).join('\\n');
@@ -10867,7 +11007,7 @@ HTML_TEMPLATE = '''
             var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_occRows.length + ' data berhasil diekspor: ' + fname, 'success');
+            showToast(_occRows.length + ' records exported: ' + fname, 'success');
         }
 
         // Run occupancy check every 60 seconds; reset and record new hour
@@ -11149,7 +11289,7 @@ HTML_TEMPLATE = '''
                 const autoOffTriggered = data.data.auto_off_triggered;
                 if (autoOffEl) {
                     if (autoOffTriggered) {
-                        autoOffEl.textContent = 'MATI';
+                        autoOffEl.textContent = 'OFF';
                         autoOffEl.style.color = '#ef4444';
                         if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
@@ -11353,7 +11493,7 @@ HTML_TEMPLATE = '''
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Tidak diketahui') + '\\n\\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSIS] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Unknown') + '\\n\\nClick "Test Frontend" or "Test MQTT Broker" button below.';
                         }
                     }
                 }).catch(function() {});
@@ -11410,7 +11550,7 @@ HTML_TEMPLATE = '''
                 _drpCallback = callback;
                 _drpAllRows  = rowsRef;
                 var sub = document.getElementById('drp-subtitle');
-                if (sub) sub.textContent = subtitle || 'Export data dalam rentang yang dipilih';
+                if (sub) sub.textContent = subtitle || 'Export data in selected range';
                 var today = new Date().toISOString().substring(0,10);
                 var from30 = new Date(Date.now() - 29*24*60*60*1000).toISOString().substring(0,10);
                 var fromVal = from30;
@@ -11445,8 +11585,8 @@ HTML_TEMPLATE = '''
             window.drpConfirm = function() {
                 var from = document.getElementById('drp-from').value;
                 var to   = document.getElementById('drp-to').value;
-                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
-                if (from > to)    { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
+                if (!from || !to) { showToast('Please select a date range first', 'error'); return; }
+                if (from > to)    { showToast('Start date must be before end date', 'error'); return; }
                 var modal = document.getElementById('drp-modal');
                 modal.style.display = 'none';
                 modal.style.pointerEvents = 'none';
@@ -11465,13 +11605,13 @@ HTML_TEMPLATE = '''
 
             window.energyExportRange = function(device) {
                 showDateRangePicker(
-                    'Export rekaman energi' + (device && device !== 'all' ? ' (' + device + ')' : ' (Semua)'),
+                    'Export energy recording' + (device && device !== 'all' ? ' (' + device + ')' : ' (All)'),
                     _recRows,
                     function(from, to) {
                         var base = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
                         var rows = drpFilter(base, from, to);
-                        if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                        var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+                        if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                        var header = 'Time,Device,Voltage (V),Current (A),Active Power (W),Energy (kWh),Reactive Power (VAR),Apparent Power (VA),Frequency (Hz),Power Factor\n';
                         var body = rows.map(function(r) {
                             return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
                                    r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
@@ -11479,51 +11619,51 @@ HTML_TEMPLATE = '''
                         var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
                         var fname = 'energy' + suffix + '_' + from + '_sd_' + to + '.csv';
                         downloadCSV(fname, header + body);
-                        showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                        showToast(rows.length + ' rows exported: ' + fname, 'success');
                     }
                 );
             };
 
             window.tempExportRange = function() {
-                showDateRangePicker('Export rekaman suhu & humidity', _tempRows, function(from, to) {
+                showDateRangePicker('Export temperature & humidity recording', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Avg Temp (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\n';
                     var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3; }).join('\\n');
-                    var fname = 'suhu_' + from + '_sd_' + to + '.csv';
+                    var fname = 'temp_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' rows exported: ' + fname, 'success');
                 });
             };
 
             window.luxExportRange = function() {
-                showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
+                showDateRangePicker('Export lux & brightness recording', _luxRows, function(from, to) {
                     var rows = drpFilter(_luxRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
                     var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\\n');
                     var fname = 'lux_' + from + '_sd_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' rows exported: ' + fname, 'success');
                 });
             };
 
             window.occExportRange = function() {
-                showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
+                showDateRangePicker('Export occupancy recording', _occRows, function(from, to) {
                     var rows = drpFilter(_occRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Hour,People Count,Confidence\\n';
                     var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\\n');
                     var fname = 'occupancy_' + from + '_sd_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' data diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' records exported: ' + fname, 'success');
                 });
             };
 
             window.exportChartRange = function(chartName, valueLabel) {
                 var chart = charts[chartName];
                 if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
-                    showToast('Tidak ada data untuk ' + chartName, 'error'); return;
+                    showToast('No data for ' + chartName, 'error'); return;
                 }
                 var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
                 showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
@@ -11535,9 +11675,9 @@ HTML_TEMPLATE = '''
                         var val = chart.data.datasets[0].data[i];
                         lines.push('"' + label + '",' + (val !== null && val !== undefined ? val : ''));
                     });
-                    if (lines.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
+                    if (lines.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
                     downloadCSV(chartName + '_' + from + '_sd_' + to + '.csv', header + lines.join('\\n') + '\\n');
-                    showToast(lines.length + ' poin diekspor', 'success');
+                    showToast(lines.length + ' points exported', 'success');
                 });
             };
 
@@ -11573,9 +11713,9 @@ HTML_TEMPLATE = '''
                 var toEl   = document.getElementById('db-' + prefix + '-to');
                 var from = fromEl ? fromEl.value : '';
                 var to   = toEl   ? toEl.value   : '';
-                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
-                if (from > to) { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
-                showToast('Mengambil data dari database...', 'success');
+                if (!from || !to) { showToast('Please select a date range first', 'error'); return; }
+                if (from > to) { showToast('Start date must be before end date', 'error'); return; }
+                showToast('Fetching data from database...', 'success');
                 var url = '/api/export/csv?type=' + type + '&from=' + from + '&to=' + to;
                 fetch(url).then(function(r) {
                     if (r.ok && r.headers.get('Content-Type') && r.headers.get('Content-Type').indexOf('text/csv') >= 0) {
@@ -11591,7 +11731,7 @@ HTML_TEMPLATE = '''
                         });
                     } else {
                         return r.json().then(function(j) {
-                            showToast((j && j.error) ? j.error : 'Gagal export data', 'error');
+                            showToast((j && j.error) ? j.error : 'Export failed', 'error');
                         });
                     }
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
@@ -11605,29 +11745,29 @@ HTML_TEMPLATE = '''
     <div id="drp-modal" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
         <div style="background:var(--bg-card);border-radius:20px;padding:30px 28px 24px;min-width:310px;max-width:380px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,0.25);border:1px solid var(--border);position:relative;">
             <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px;display:flex;align-items:center;gap:8px;">
-                <span style="font-size:20px;">&#128197;</span> Pilih Rentang Tanggal
+                <span style="font-size:20px;">&#128197;</span> Select Date Range
             </div>
-            <div id="drp-subtitle" style="font-size:12px;color:var(--text-secondary);margin-bottom:20px;">Export data dalam rentang yang dipilih</div>
+            <div id="drp-subtitle" style="font-size:12px;color:var(--text-secondary);margin-bottom:20px;">Export data in selected range</div>
             <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:22px;">
                 <div>
-                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Dari Tanggal</label>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">From Date</label>
                     <input type="date" id="drp-from" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
                 </div>
                 <div>
-                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Sampai Tanggal</label>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">To Date</label>
                     <input type="date" id="drp-to" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
                 </div>
             </div>
             <!-- Shortcut buttons -->
             <div style="display:flex;gap:5px;margin-bottom:20px;flex-wrap:wrap;">
-                <button onclick="drpShortcut(1)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Hari ini</button>
-                <button onclick="drpShortcut(7)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">7 Hari</button>
-                <button onclick="drpShortcut(30)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">30 Hari</button>
-                <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Semua</button>
+                <button onclick="drpShortcut(1)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Today</button>
+                <button onclick="drpShortcut(7)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">7 Days</button>
+                <button onclick="drpShortcut(30)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">30 Days</button>
+                <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">All</button>
             </div>
             <div style="display:flex;gap:10px;">
                 <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Ekspor CSV</button>
-                <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Batal</button>
+                <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Cancel</button>
             </div>
         </div>
     </div>
