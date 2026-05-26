@@ -7458,7 +7458,20 @@ HTML_TEMPLATE = '''
         function toDelta(values) {
             var out = [0]; // First interval has no previous point to diff against
             for (var i = 1; i < values.length; i++) {
-                out.push(Math.max(0, parseFloat((values[i] - values[i-1]).toFixed(4))));
+                var prev = values[i-1];
+                var curr = values[i];
+                
+                // If sensor failed to read, it might return 0. Ignore delta from/to 0.
+                if (prev === 0 || curr === 0) {
+                    out.push(0);
+                    continue;
+                }
+                
+                var diff = curr - prev;
+                if (diff < 0) diff = 0; // Sensor reset or glitch
+                if (diff > 500) diff = 0; // Massive gap artifact (impossible for single room)
+                
+                out.push(parseFloat(diff.toFixed(4)));
             }
             return out;
         }
