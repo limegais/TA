@@ -7455,25 +7455,11 @@ HTML_TEMPLATE = '''
         // Track current period per field so auto-refresh doesn't reset user selection
         var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
 
-        function toDelta(values) {
-            var out = [0]; // First interval has no previous point to diff against
-            for (var i = 1; i < values.length; i++) {
-                var prev = values[i-1];
-                var curr = values[i];
-                
-                // If sensor failed to read, it might return 0. Ignore delta from/to 0.
-                if (prev === 0 || curr === 0) {
-                    out.push(0);
-                    continue;
-                }
-                
-                var diff = curr - prev;
-                if (diff < 0) diff = 0; // Sensor reset or glitch
-                
-                out.push(parseFloat(diff.toFixed(4)));
-            }
-            return out;
-        }
+        // Energy is computed by integrating high-resolution Power data 
+        // to avoid the 1kWh low-resolution stepping from the raw cumulative sensor.
+        var _periodMins = {
+            '1h': 1, '6h': 5, '24h': 10, '7d': 60, '30d': 360, '12mo': 10080, '5y': 43200
+        };
 
         function loadEnergyHistory(field, period, btnElement) {
             // Save current period for this field
@@ -7488,10 +7474,11 @@ HTML_TEMPLATE = '''
             const chartName = energyChartMap[field];
             if (!chartName) return;
 
+            var fetchField = field === 'energy_kwh' ? 'power' : field;
             // Fetch AC and Lamp in parallel
             Promise.all([
-                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=ac').then(r => r.json()),
-                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=lamp').then(r => r.json())
+                fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=ac').then(r => r.json()),
+                fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=lamp').then(r => r.json())
             ])
             .then(function(results) {
                 var acResult = results[0];
@@ -7505,8 +7492,11 @@ HTML_TEMPLATE = '''
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
                     
                     if (field === 'energy_kwh') {
-                        acValues = toDelta(acValues);
-                        lampValues = toDelta(lampValues);
+                        // Calculate Energy (kWh) = Power (W) / 1000 * (interval_minutes / 60)
+                        var intervalHours = (_periodMins[period] || 10) / 60.0;
+                        var factor = intervalHours / 1000.0;
+                        acValues = acValues.map(function(w) { return parseFloat((w * factor).toFixed(5)); });
+                        lampValues = lampValues.map(function(w) { return parseFloat((w * factor).toFixed(5)); });
                     }
                     
                     chart.data.labels = acData.map(function(d){ return d.time; });
