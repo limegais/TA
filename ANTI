@@ -6080,7 +6080,7 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Cumulative Energy &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
@@ -7072,10 +7072,10 @@ HTML_TEMPLATE = '''
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                type: 'line', options: makeEnergyOpts('kWh'),
+                type: 'bar', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Energy (kWh)', data: [], backgroundColor: 'rgba(16,185,129,0.85)', borderColor: '#10b981', borderWidth: 1, borderRadius: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], backgroundColor: 'rgba(168,85,247,0.85)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 2 }
                 ]}
             });
 
@@ -7360,13 +7360,13 @@ HTML_TEMPLATE = '''
             const avgV = values.reduce((a, b) => a + b, 0) / values.length;
             const lastV = values[values.length - 1];
             const isKwh = field === 'energy_kwh';
-            const totalV = isKwh ? (values[values.length - 1] - values[0]) : values.reduce((a, b) => a + b, 0);
+            const totalV = values.reduce((a, b) => a + b, 0);
             const dp = isKwh ? 4 : 2;
             const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
             set(prefix + '-latest', lastV.toFixed(dp));
             set(prefix + '-min', minV.toFixed(dp));
             set(prefix + '-max', maxV.toFixed(dp));
-            // kWh: show total accumulated energy in period
+            // kWh: show total sum of deltas
             set(prefix + '-avg', isKwh ? totalV.toFixed(4) : avgV.toFixed(2));
         }
 
@@ -7455,6 +7455,14 @@ HTML_TEMPLATE = '''
         // Track current period per field so auto-refresh doesn't reset user selection
         var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
 
+        function toDelta(values) {
+            var out = [0]; // First interval has no previous point to diff against
+            for (var i = 1; i < values.length; i++) {
+                out.push(Math.max(0, parseFloat((values[i] - values[i-1]).toFixed(4))));
+            }
+            return out;
+        }
+
         function loadEnergyHistory(field, period, btnElement) {
             // Save current period for this field
             _activePeriod[field] = period;
@@ -7483,6 +7491,12 @@ HTML_TEMPLATE = '''
                 if (chart && chart.data && chart.data.datasets) {
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
+                    
+                    if (field === 'energy_kwh') {
+                        acValues = toDelta(acValues);
+                        lampValues = toDelta(lampValues);
+                    }
+                    
                     chart.data.labels = acData.map(function(d){ return d.time; });
                     chart.data.datasets[0].data = acValues;
                     // Only update lamp dataset if chart has 2nd dataset (power, current, kwh; not voltage)
@@ -7530,7 +7544,7 @@ HTML_TEMPLATE = '''
             if (field === 'power') { setEl('lamp-power-latest', latest); setEl('lamp-power-avg', avg); }
             else if (field === 'current') { setEl('lamp-current-latest', latest); setEl('lamp-current-avg', avg); }
             else if (field === 'energy_kwh') {
-                var total = values[values.length - 1] - values[0];
+                var total = values.reduce(function(a,b){ return a+b; }, 0);
                 setEl('lamp-kwh-latest', latest);
                 setEl('lamp-kwh-avg', total);
             }
