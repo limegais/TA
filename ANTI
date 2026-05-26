@@ -7072,10 +7072,10 @@ HTML_TEMPLATE = '''
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                type: 'bar', options: makeEnergyOpts('kWh'),
+                type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], backgroundColor: 'rgba(16,185,129,0.85)', borderColor: '#10b981', borderWidth: 1, borderRadius: 2 },
-                    { label: 'Lamp Energy (kWh)', data: [], backgroundColor: 'rgba(168,85,247,0.85)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 2 }
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.1, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.1, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
             });
 
@@ -7469,7 +7469,6 @@ HTML_TEMPLATE = '''
                 
                 var diff = curr - prev;
                 if (diff < 0) diff = 0; // Sensor reset or glitch
-                if (diff > 500) diff = 0; // Massive gap artifact (impossible for single room)
                 
                 out.push(parseFloat(diff.toFixed(4)));
             }
