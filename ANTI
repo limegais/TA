@@ -3496,8 +3496,7 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    # Data is written with tags 'esp32_ac' / 'esp32_lamp' (see save_lamp_data, _fetch_mysql_power)
-    device_tag = 'esp32_ac' if device == 'ac' else 'esp32_lamp'
+    device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
     p = period_map[period]
 
     try:
