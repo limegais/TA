@@ -902,20 +902,9 @@ def run_optimization_cycle(algo='both'):
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
             mode_idx = sol[2] if len(sol) > 2 else 0
-            # Compute recommended RH setpoint based on selected mode and current humidity
-            _cur_rh = opt_sensor_data.get('humidity', 55.0)
-            if mode_idx == 1:    # DRY mode — actively dehumidifying
-                ga_rh_set = 55.0
-            elif _cur_rh > 65:   # High humidity: target dehumidification to 55%
-                ga_rh_set = 55.0
-            elif _cur_rh < 40:   # Too dry: target 50%
-                ga_rh_set = 50.0
-            else:
-                ga_rh_set = 50.0  # Normal comfort target
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
-                'rh_set': ga_rh_set,
                 'stats': hist, 'brute_force': bf,
                 'initial_fitness': round(hist[0], 2) if hist else 0,
                 'final_fitness': round(fit, 2),
@@ -935,7 +924,7 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={ga_rh_set}% fitness={fit:.2f}")
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err = run_pso_optimization()
@@ -983,7 +972,6 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
-            'ga_rh_set': last_opt_results['ga'].get('rh_set', 50.0),
             'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
             'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
@@ -1043,10 +1031,8 @@ def run_optimization_cycle(algo='both'):
                 'temperature': last_opt_results['ga']['temp'],
                 'fan_speed': last_opt_results['ga']['fan'],
                 'mode': last_opt_results['ga'].get('mode', 'COOL'),
-                'mode_idx': last_opt_results['ga'].get('mode_idx', 0),
-                'rh_set': last_opt_results['ga'].get('rh_set', 50.0)
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
             }
-            status_payload['ga_rh_set'] = last_opt_results['ga'].get('rh_set', 50.0)
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
         socketio.emit('ml_status', status_payload)
@@ -1074,7 +1060,6 @@ def persist_opt_results(algo):
                 'temp':             float(ga.get('temp', 0)),
                 'fan':              float(ga.get('fan', 0)),
                 'mode_idx':         float(ga.get('mode_idx', 0)),
-                'rh_set':           float(ga.get('rh_set', 50.0)),
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
@@ -1135,6 +1120,7 @@ def restore_opt_results():
                 mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
                 mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
                 mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
+                mqtt_data['system']['ga_rh_set']  = last_opt_results['ga'].get('rh_set', 50.0)
                 print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
@@ -3500,16 +3486,10 @@ def energy_history():
         '30d':  {'range': '-30d',  'window': '6h'},
         '12mo': {'range': '-12mo', 'window': '1mo'},  # bulanan: 12 bulan terakhir
         '5y':   {'range': '-5y',   'window': '1y'},   # tahunan: 5 tahun terakhir
-        # Per-period energy view — backend returns delta (consumption per interval)
-        '5min':  {'range': '-1h',   'window': '5m',  'delta': True},
-        'day':   {'range': '-24h',  'window': '1h',  'delta': True},
-        'week':  {'range': '-7d',   'window': '1d',  'delta': True},
-        'month': {'range': '-30d',  'window': '1d',  'delta': True},
-        'year':  {'range': '-12mo', 'window': '1mo', 'delta': True},
     }
 
     if period not in period_map:
-        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y, 5min, day, week, month, year'}), 400
+        return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y'}), 400
 
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
@@ -3522,29 +3502,26 @@ def energy_history():
     try:
         _, _, query_api = _get_influx_client()
 
-        if period in ('1h', '6h', '24h', '5min'):
+        if period in ('1h', '6h', '24h'):
             time_format = '%H:%M'
-        elif period in ('7d', 'day'):
+        elif period in ('7d', '30d'):
             time_format = '%m/%d %H:%M'
-        elif period in ('30d', 'week', 'month'):
-            time_format = '%m/%d'
-        elif period in ('12mo', 'year'):
-            time_format = '%b %Y'
+        elif period == '12mo':
+            time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
         else:  # 5y
-            time_format = '%Y'
+            time_format = '%Y'      # 2024, 2025, 2026, ...
 
         def query_field_points(field_name):
-            # For cumulative energy_kwh: use last() per window then difference() to get per-interval delta
-            use_delta = p.get('delta', False) and field_name == 'energy_kwh'
+            # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
+            # setiap interval diambil (bukan rata-rata), sehingga JS bisa diff antar titik
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
-            diff_line = '\n              |> difference(nonNegative: true)' if use_delta else ''
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
               |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
               |> filter(fn: (r) => r["_field"] == "{field_name}")
               |> filter(fn: (r) => r["device"] == "{device_tag}")
-              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false){diff_line}
+              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false)
               |> yield(name: "{agg_fn}")
             '''
             result = query_api.query(query=query)
@@ -3605,7 +3582,6 @@ def ml_status():
         'ga_temp':          mqtt_data['system'].get('ga_temp', 0),
         'ga_fan':           mqtt_data['system'].get('ga_fan', 0),
         'ga_mode':          mqtt_data['system'].get('ga_mode', 'COOL'),
-        'ga_rh_set':        mqtt_data['system'].get('ga_rh_set', 50.0),
         'pso_brightness':   mqtt_data['system'].get('pso_brightness', 0),
         'pso_brightness1':  mqtt_data['system'].get('pso_brightness1', 0),
         'pso_brightness2':  mqtt_data['system'].get('pso_brightness2', 0),
@@ -3652,41 +3628,41 @@ def ga_export_csv():
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
-    wr.writerow(['=== LAPORAN HASIL GA (GENETIC ALGORITHM) - SMART ROOM ==='])
+    wr.writerow(['=== GA OPTIMIZATION REPORT (GENETIC ALGORITHM) - SMART ROOM ==='])
     wr.writerow([])
-    wr.writerow(['Tanggal Run', run_time])
+    wr.writerow(['Run Date', run_time])
     wr.writerow([])
 
     # ── Parameter GA ────────────────────────────────────────────────────────
-    wr.writerow(['--- PARAMETER GA ---'])
-    wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
-    wr.writerow(['Jumlah Generasi',   params.get('generations', '-')])
+    wr.writerow(['--- GA PARAMETERS ---'])
+    wr.writerow(['Population Size',   params.get('population_size', '-')])
+    wr.writerow(['Number of Generations',   params.get('generations', '-')])
     wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
     wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
     wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
     wr.writerow([])
 
     # ── Kondisi Ruangan Saat Run ─────────────────────────────────────────────
-    wr.writerow(['--- KONDISI RUANGAN SAAT OPTIMASI ---'])
-    wr.writerow(['Suhu Ruangan',   f"{snap.get('temp_room', '-')} °C"])
-    wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
+    wr.writerow(['--- ROOM CONDITIONS AT OPTIMIZATION ---'])
+    wr.writerow(['Room Temperature',   f"{snap.get('temp_room', '-')} °C"])
+    wr.writerow(['Humidity',     f"{snap.get('humidity', '-')} %"])
     wr.writerow(['People Detected', 'Yes' if snap.get('person_detected') else 'No'])
     wr.writerow(['People Count',  snap.get('person_count', 0)])
-    wr.writerow(['Daya AC (real)', f"{snap.get('actual_watt', '-')} W"])
+    wr.writerow(['AC Power (actual)', f"{snap.get('actual_watt', '-')} W"])
     wr.writerow([])
 
     # ── Hasil Optimal ────────────────────────────────────────────────────────
-    wr.writerow(['--- HASIL OPTIMASI AC ---'])
-    wr.writerow(['Suhu AC Optimal',        f"{temp_opt} °C"])
-    wr.writerow(['Kecepatan Fan Optimal',   f"{fan_opt} ({fan_label})"])
-    wr.writerow(['Mode AC Optimal',         mode_opt])
+    wr.writerow(['--- AC OPTIMIZATION RESULTS ---'])
+    wr.writerow(['Optimal AC Temperature',        f"{temp_opt} °C"])
+    wr.writerow(['Optimal Fan Speed',   f"{fan_opt} ({fan_label})"])
+    wr.writerow(['Optimal AC Mode',         mode_opt])
     wr.writerow([])
 
     # ── Performa GA ─────────────────────────────────────────────────────────
-    wr.writerow(['--- PERFORMA ALGORITMA ---'])
-    wr.writerow(['Fitness Awal (Gen 1)',     init_fit])
-    wr.writerow(['Fitness Akhir (Terbaik)',  final_fit])
-    wr.writerow(['Peningkatan Fitness',      f"{improvement}%" if improvement != '-' else '-'])
+    wr.writerow(['--- ALGORITHM PERFORMANCE ---'])
+    wr.writerow(['Initial Fitness (Gen 1)',     init_fit])
+    wr.writerow(['Final Fitness (Best)',  final_fit])
+    wr.writerow(['Fitness Improvement',      f"{improvement}%" if improvement != '-' else '-'])
     if bf:
         wr.writerow(['Brute-Force Validation',
                      f"Temp={bf.get('solution', ['-','-','-'])[0]}°C "
@@ -3697,8 +3673,8 @@ def ga_export_csv():
 
     # ── Riwayat Konvergensi ──────────────────────────────────────────────────
     if history:
-        wr.writerow(['=== RIWAYAT KONVERGENSI FITNESS ==='])
-        wr.writerow(['Generasi', 'Fitness Terbaik', 'Delta'])
+        wr.writerow(['=== FITNESS CONVERGENCE HISTORY ==='])
+        wr.writerow(['Generation', 'Best Fitness', 'Delta'])
         prev = None
         for idx, val in enumerate(history, 1):
             v = round(val, 4)
@@ -3729,8 +3705,8 @@ def pso_export_csv():
     wr  = csv_mod.writer(buf)
 
     # Header
-    wr.writerow(['Iterasi', 'PWM 1', 'PWM 2', 'Lux 1', 'Lux 2', 'Lux 3',
-                 'Rata-rata Lux', 'Fitness'])
+    wr.writerow(['Iteration', 'PWM 1', 'PWM 2', 'Lux 1', 'Lux 2', 'Lux 3',
+                 'Average Lux', 'Fitness'])
 
     # Baris per iterasi
     for entry in iteration_log:
@@ -3749,7 +3725,7 @@ def pso_export_csv():
     return Response(
         output,
         mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename=pso_iterasi_{ts}.csv'}
+        headers={'Content-Disposition': f'attachment; filename=pso_iterations_{ts}.csv'}
     )
 
 @app.route('/api/ml/run', methods=['POST'])
@@ -5663,25 +5639,6 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="acPowerChart" height="80"></canvas>
             </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">AC Energy Consumption per Period (kWh)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac', '5min', this)">5min</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'day', this)">Day</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'week', this)">Week</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'month', this)">Month</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac', 'year', this)">Year</button>
-                    </div>
-                </div>
-                <canvas id="acAnalyticsKwhChart" height="80"></canvas>
-                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:12px;">
-                    <span style="color:#10b981;font-weight:600;">AC kWh per interval</span>
-                    <span style="color:var(--text-secondary);">Last: <strong id="ac-analytics-kwh-latest" style="color:var(--text);">--</strong> kWh</span>
-                    <span style="color:var(--text-secondary);">Total: <strong id="ac-analytics-kwh-total" style="color:var(--text);">--</strong> kWh</span>
-                </div>
-            </div>
         </div>
 
         <!-- Lamp Analytics Page -->
@@ -5729,25 +5686,6 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="lampPowerChart" height="80"></canvas>
-            </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Lamp Energy Consumption per Period (kWh)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('lamp', '5min', this)">5min</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'day', this)">Day</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'week', this)">Week</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'month', this)">Month</button>
-                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp', 'year', this)">Year</button>
-                    </div>
-                </div>
-                <canvas id="lampAnalyticsKwhChart" height="80"></canvas>
-                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:12px;">
-                    <span style="color:#a855f7;font-weight:600;">Lamp kWh per interval</span>
-                    <span style="color:var(--text-secondary);">Last: <strong id="lamp-analytics-kwh-latest" style="color:var(--text);">--</strong> kWh</span>
-                    <span style="color:var(--text-secondary);">Total: <strong id="lamp-analytics-kwh-total" style="color:var(--text);">--</strong> kWh</span>
-                </div>
             </div>
         </div>
         <div id="camera" class="page">
@@ -5865,7 +5803,7 @@ HTML_TEMPLATE = '''
                         <thead>
                             <tr style="background:rgba(168,85,247,0.08);">
                                 <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>
-                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Jam</th>
+                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Hour</th>
                                 <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">People Count</th>
                                 <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
                             </tr>
@@ -6144,13 +6082,13 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Energy per Period &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '5min', this)">5min</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'day', this)">Day</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'week', this)">Week</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'month', this)">Month</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', 'year', this)">Year</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">12 Mo</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '5y', this)">5 Yr</button>
                         </div>
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
@@ -6587,7 +6525,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#06b6d4;">--</span>%</span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
                 </div>
 
                 <div class="stat-card">
@@ -7279,7 +7217,7 @@ HTML_TEMPLATE = '''
                     plugins: {
                         legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
                         tooltip: { callbacks: {
-                            title: items => `Iterasi ${items[0].label}`,
+                            title: items => `Iteration ${items[0].label}`,
                             label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y}`
                         }}
                     },
@@ -7517,7 +7455,7 @@ HTML_TEMPLATE = '''
         }
 
         // Track current period per field so auto-refresh doesn't reset user selection
-        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: 'day' };
+        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
 
         function toDelta(values) {
             // Convert cumulative kWh array -> per-interval delta array
@@ -7556,18 +7494,11 @@ HTML_TEMPLATE = '''
                 if (chart && chart.data && chart.data.datasets) {
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
-                    // energy_kwh: backend already returns per-period delta for new period names
-                    var DELTA_PERIODS = ['5min','day','week','month','year'];
+                    // energy_kwh: konversi kumulatif -> delta per interval
                     if (field === 'energy_kwh') {
-                        if (DELTA_PERIODS.indexOf(period) >= 0) {
-                            // Backend used difference(nonNegative:true) — values are already per-period
-                            chart.data.labels = acData.map(function(d){ return d.time; });
-                        } else {
-                            // Legacy cumulative data — compute delta client-side
-                            chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
-                            acValues = toDelta(acValues);
-                            lampValues = toDelta(lampValues);
-                        }
+                        chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
+                        acValues = toDelta(acValues);
+                        lampValues = toDelta(lampValues);
                     } else {
                         chart.data.labels = acData.map(function(d){ return d.time; });
                     }
@@ -7594,7 +7525,7 @@ HTML_TEMPLATE = '''
                         var overlay = document.createElement('div');
                         overlay.id = noDataId;
                         overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
-                        overlay.textContent = 'Menunggu data MySQL (polling setiap 5 detik)...';
+                        overlay.textContent = 'Waiting for MySQL data (polling every 5 seconds)...';
                         canvas.parentElement.style.position = 'relative';
                         canvas.parentElement.appendChild(overlay);
                     }
@@ -7635,72 +7566,6 @@ HTML_TEMPLATE = '''
             loadRecordingState();
             loadLampRecordingState();
             loadDailySummary();
-        }
-
-        // ==================== ANALYTICS ENERGY CHART ====================
-        function loadAnalyticsEnergy(device, period, btnElement) {
-            var chartKey = device === 'ac' ? 'acAnalyticsEnergy' : 'lampAnalyticsEnergy';
-            var canvasId = device === 'ac' ? 'acAnalyticsKwhChart' : 'lampAnalyticsKwhChart';
-            var latestId = device + '-analytics-kwh-latest';
-            var totalId  = device + '-analytics-kwh-total';
-            var color    = device === 'ac' ? '#10b981' : '#a855f7';
-
-            if (btnElement) {
-                var btns = btnElement.parentElement.querySelectorAll('.chart-option-btn');
-                btns.forEach(function(b){ b.classList.remove('active'); });
-                btnElement.classList.add('active');
-            }
-
-            var influxDevice = device === 'ac' ? 'mysql_ac' : 'mysql_lamp';
-            fetch('/api/energy/history?field=energy_kwh&period=' + period + '&device=' + influxDevice)
-                .then(function(r){ return r.json(); })
-                .then(function(result) {
-                    var data = result.data || [];
-                    var labels = data.map(function(d){ return d.time; });
-                    var values = data.map(function(d){ return parseFloat(d.value || 0); });
-
-                    var chart = charts[chartKey];
-                    if (!chart) {
-                        var ctx = document.getElementById(canvasId);
-                        if (!ctx) return;
-                        chart = new Chart(ctx, {
-                            type: 'bar',
-                            data: {
-                                labels: labels,
-                                datasets: [{
-                                    label: (device === 'ac' ? 'AC' : 'Lamp') + ' kWh',
-                                    data: values,
-                                    backgroundColor: color + '55',
-                                    borderColor: color,
-                                    borderWidth: 1,
-                                    borderRadius: 3,
-                                }]
-                            },
-                            options: {
-                                responsive: true, maintainAspectRatio: true,
-                                plugins: { legend: { display: false } },
-                                scales: {
-                                    x: { ticks: { maxTicksLimit: 12, color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
-                                    y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(148,163,184,0.1)' }, beginAtZero: true }
-                                }
-                            }
-                        });
-                        charts[chartKey] = chart;
-                    } else {
-                        chart.data.labels = labels;
-                        chart.data.datasets[0].data = values;
-                        chart.update('none');
-                    }
-
-                    var finite = values.filter(function(v){ return Number.isFinite(v) && v > 0; });
-                    var latest = finite.length ? finite[finite.length-1].toFixed(4) : '--';
-                    var total  = finite.length ? finite.reduce(function(a,b){ return a+b; }, 0).toFixed(4) : '--';
-                    var latestEl = document.getElementById(latestId);
-                    var totalEl  = document.getElementById(totalId);
-                    if (latestEl) latestEl.textContent = latest;
-                    if (totalEl)  totalEl.textContent  = total;
-                })
-                .catch(function(e){ console.warn('loadAnalyticsEnergy error:', e); });
         }
 
         // ==================== DAILY SUMMARY ====================
@@ -8113,13 +7978,11 @@ HTML_TEMPLATE = '''
                 ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
-                setTimeout(function(){ loadAnalyticsEnergy('ac', '5min', null); }, 100);
             }
             if (pageId === 'lamp-analytics') {
                 ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
-                setTimeout(function(){ loadAnalyticsEnergy('lamp', '5min', null); }, 100);
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -8187,7 +8050,6 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
-            setEl('ml-ga-rh', data.ga_rh_set != null ? parseFloat(data.ga_rh_set).toFixed(1) : '--');
             var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
             var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
@@ -8354,7 +8216,7 @@ HTML_TEMPLATE = '''
                         '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + d.iter + '</td>' +
                         '<td style="padding:4px 8px;text-align:center;color:#6366f1;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
                         '<td style="padding:4px 8px;text-align:center;color:#a855f7;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
-                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Membaca sensor...</td>' +
+                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Reading sensor...</td>' +
                     '</tr>');
 
             } else if (d.status === 'new_cycle') {
@@ -11766,7 +11628,7 @@ HTML_TEMPLATE = '''
                 <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">All</button>
             </div>
             <div style="display:flex;gap:10px;">
-                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Ekspor CSV</button>
+                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Export CSV</button>
                 <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Cancel</button>
             </div>
         </div>
