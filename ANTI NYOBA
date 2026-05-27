@@ -7496,7 +7496,7 @@ HTML_TEMPLATE = '''
                     if (field === 'energy_kwh') {
                         // energy_kwh is cumulative — compute delta per interval:
                         // delta[i] = cumulative[i+1] - cumulative[i]
-                        // This shows actual kWh consumed in each interval
+                        // Example: 10:00=100.00, 10:05=100.05 → delta = 0.05 kWh
                         function computeDeltas(cumValues) {
                             var deltas = [];
                             for (var i = 1; i < cumValues.length; i++) {
@@ -7506,11 +7506,43 @@ HTML_TEMPLATE = '''
                             }
                             return deltas;
                         }
+                        // Build range labels: "10:00→10:05", "10:05→10:10", etc.
+                        function buildRangeLabels(labels) {
+                            var rangeLabels = [];
+                            for (var i = 1; i < labels.length; i++) {
+                                rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
+                            }
+                            return rangeLabels;
+                        }
+                        // Store raw cumulative for tooltip detail
+                        var acCumRaw = acValues.slice();
+                        var lampCumRaw = lampValues.slice();
                         acValues = computeDeltas(acValues);
                         lampValues = computeDeltas(lampValues);
-                        // Labels align with deltas: drop the first label (no predecessor)
-                        acLabels = acLabels.slice(1);
-                        lampLabels = lampLabels.slice(1);
+                        acLabels = buildRangeLabels(acLabels);
+                        lampLabels = buildRangeLabels(lampLabels);
+                        // Attach cumulative data to chart for tooltip access
+                        chart._kwhCumAc = acCumRaw;
+                        chart._kwhCumLamp = lampCumRaw;
+
+                        // Override tooltip to show subtraction formula
+                        chart.options.plugins.tooltip.callbacks.title = function(items) {
+                            if (!items || !items[0]) return 'Time';
+                            return items[0].label.replace('\u2192', ' \u2192 ');
+                        };
+                        chart.options.plugins.tooltip.callbacks.label = function(ctx) {
+                            var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                            var delta = ctx.parsed.y;
+                            var idx = ctx.dataIndex;
+                            // idx in delta array corresponds to cumulative[idx+1] - cumulative[idx]
+                            var cumArr = ctx.datasetIndex === 0 ? chart._kwhCumAc : chart._kwhCumLamp;
+                            if (cumArr && cumArr.length > idx + 1) {
+                                var prev = cumArr[idx].toFixed(4);
+                                var curr = cumArr[idx + 1].toFixed(4);
+                                return dsLabel + ': ' + curr + ' \u2212 ' + prev + ' = ' + delta.toFixed(5) + ' kWh';
+                            }
+                            return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
+                        };
                     }
                     
                     chart.data.labels = acLabels;
