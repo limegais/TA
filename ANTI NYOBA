@@ -7072,10 +7072,10 @@ HTML_TEMPLATE = '''
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
-                type: 'bar', options: Object.assign({}, makeEnergyOpts('kWh'), { plugins: Object.assign({}, makeEnergyOpts('kWh').plugins, { tooltip: { mode: 'index', intersect: false } }) }),
+                type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], backgroundColor: 'rgba(16,185,129,0.55)', borderColor: '#10b981', borderWidth: 1, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.85 },
-                    { label: 'Lamp Energy (kWh)', data: [], backgroundColor: 'rgba(168,85,247,0.55)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 3, barPercentage: 0.7, categoryPercentage: 0.85 }
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
                 ]}
             });
 
