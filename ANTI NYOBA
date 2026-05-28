@@ -3494,7 +3494,6 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    # mysql_energy.py writes with tags 'mysql_ac' / 'mysql_lamp' (main data source)
     device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
     p = period_map[period]
 
@@ -3527,14 +3526,10 @@ def energy_history():
             points = []
             for table in result:
                 for record in table.records:
-                    # energy_kwh is cumulative — use 5 decimal places so JS delta
-                    # computation (diff between consecutive points) preserves small
-                    # per-interval changes (e.g. 0.003 kWh per 5 min interval).
-                    # Rounding to 2 decimals destroys these tiny deltas → chart shows 0.
-                    decimals = 5 if field_name == 'energy_kwh' else 2
+                    dec = 5 if field_name == 'energy_kwh' else 2
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(float(record.get_value()), decimals)
+                        'value': round(float(record.get_value()), dec)
                     })
             return points
 
@@ -3935,12 +3930,12 @@ def energy_daily_summary():
             elapsed_h = now_local.hour + now_local.minute / 60.0
             return round(elapsed_h * (on_count / total_today), 2)
 
-        # AC metrics (mysql_ac — written by mysql_energy.py poller)
+        # AC metrics (mysql_ac)
         ac_kwh     = _query_today('mysql_ac', 'energy_kwh', 'max')  # cumulative, so max is total
         ac_power_avg = _query_today('mysql_ac', 'power', 'mean')
         ac_power_peak = _query_today_max('mysql_ac', 'power')
 
-        # Lamp metrics (mysql_lamp — written by mysql_energy.py poller)
+        # Lamp metrics (mysql_lamp)
         lamp_kwh     = _query_today('mysql_lamp', 'energy_kwh', 'max')
         lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
         lamp_power_peak = _query_today_max('mysql_lamp', 'power')
@@ -5643,6 +5638,42 @@ HTML_TEMPLATE = '''
                 </div>
                 <canvas id="acPowerChart" height="80"></canvas>
             </div>
+
+            <!-- AC Energy Usage Section -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(16,185,129,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
+                    <div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Usage</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
+                    </div>
+                </div>
+                <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
+                    <div class="chart-header">
+                        <div class="chart-title">AC Energy per Interval (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac','24h',this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','7d',this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','30d',this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="acEnergyKwhChart" height="90"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
+                        <div id="ac-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
+                        <div id="ac-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
+                        <div id="ac-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Lamp Analytics Page -->
@@ -5690,6 +5721,42 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="lampPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- Lamp Energy Usage Section -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(168,85,247,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#128161;</div>
+                    <div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">Lamp Energy Usage</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
+                    </div>
+                </div>
+                <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
+                    <div class="chart-header">
+                        <div class="chart-title">Lamp Energy per Interval (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('lamp','24h',this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp','7d',this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp','30d',this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="lampEnergyKwhChart" height="90"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
+                        <div id="lamp-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
+                        <div id="lamp-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
+                        <div id="lamp-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                </div>
             </div>
         </div>
         <div id="camera" class="page">
@@ -7054,6 +7121,75 @@ HTML_TEMPLATE = '''
                 data: { labels: [], datasets: [{ label: 'Lamp Power (W)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
             });
 
+            // AC & Lamp individual energy kWh charts (analytics pages)
+            charts.acEnergyKwh = new Chart(document.getElementById('acEnergyKwhChart'), {
+                type: 'line',
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0', borderColor: 'rgba(16,185,129,0.4)', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(16,185,129,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                    }
+                },
+                data: { labels: [], datasets: [{
+                    label: 'AC Energy (kWh)', data: [],
+                    borderColor: '#10b981', borderWidth: 2, tension: 0.3,
+                    backgroundColor: function(ctx) {
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(16,185,129,0.1)';
+                        var g = c.createLinearGradient(0, a.top, 0, a.bottom);
+                        g.addColorStop(0, 'rgba(16,185,129,0.25)'); g.addColorStop(1, 'rgba(16,185,129,0.02)'); return g;
+                    },
+                    fill: true, pointRadius: 2, pointHoverRadius: 6,
+                    pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2
+                }] }
+            });
+
+            charts.lampEnergyKwh = new Chart(document.getElementById('lampEnergyKwhChart'), {
+                type: 'line',
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0', borderColor: 'rgba(168,85,247,0.4)', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(168,85,247,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                    }
+                },
+                data: { labels: [], datasets: [{
+                    label: 'Lamp Energy (kWh)', data: [],
+                    borderColor: '#a855f7', borderWidth: 2, tension: 0.3,
+                    backgroundColor: function(ctx) {
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(168,85,247,0.1)';
+                        var g = c.createLinearGradient(0, a.top, 0, a.bottom);
+                        g.addColorStop(0, 'rgba(168,85,247,0.25)'); g.addColorStop(1, 'rgba(168,85,247,0.02)'); return g;
+                    },
+                    fill: true, pointRadius: 2, pointHoverRadius: 6,
+                    pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2
+                }] }
+            });
+
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [
@@ -7654,6 +7790,57 @@ HTML_TEMPLATE = '''
             }
         }
 
+        // Analytics page individual energy chart loader
+        var _analyticsEnergyPeriod = { ac: '24h', lamp: '24h' };
+        function loadAnalyticsEnergy(device, period, btnEl) {
+            _analyticsEnergyPeriod[device] = period;
+            if (btnEl) {
+                var btns = btnEl.parentElement.querySelectorAll('.chart-option-btn');
+                btns.forEach(function(b){ b.classList.remove('active'); });
+                btnEl.classList.add('active');
+            }
+            fetch('/api/energy/history?field=energy_kwh&period=' + period + '&device=' + device)
+                .then(function(r){ return r.json(); })
+                .then(function(result) {
+                    var raw = result.data || [];
+                    var cumValues = raw.map(function(d){ return parseFloat(d.value || 0); });
+                    var labels = raw.map(function(d){ return d.time; });
+                    // Compute deltas from cumulative values
+                    var deltas = [];
+                    var rangeLabels = [];
+                    for (var i = 1; i < cumValues.length; i++) {
+                        var diff = cumValues[i] - cumValues[i - 1];
+                        deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
+                        rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
+                    }
+                    var chartKey = device === 'ac' ? 'acEnergyKwh' : 'lampEnergyKwh';
+                    var chart = charts[chartKey];
+                    if (chart && chart.data) {
+                        chart.data.labels = rangeLabels;
+                        chart.data.datasets[0].data = deltas;
+                        chart.update('none');
+                    }
+                    // Update stat cards
+                    var prefix = device === 'ac' ? 'ac' : 'lamp';
+                    var lastEl = document.getElementById(prefix + '-analytics-kwh-last');
+                    var totalEl = document.getElementById(prefix + '-analytics-kwh-total');
+                    var avgEl = document.getElementById(prefix + '-analytics-kwh-avg');
+                    if (deltas.length > 0) {
+                        var last = deltas[deltas.length - 1];
+                        var total = deltas.reduce(function(a,b){ return a+b; }, 0);
+                        var avg = total / deltas.length;
+                        if (lastEl) lastEl.textContent = last.toFixed(4) + ' kWh';
+                        if (totalEl) totalEl.textContent = total.toFixed(4) + ' kWh';
+                        if (avgEl) avgEl.textContent = avg.toFixed(4) + ' kWh';
+                    } else {
+                        if (lastEl) lastEl.textContent = '--';
+                        if (totalEl) totalEl.textContent = '--';
+                        if (avgEl) avgEl.textContent = '--';
+                    }
+                })
+                .catch(function(e){ console.error('Analytics energy error (' + device + '):', e); });
+        }
+
         function loadAllEnergyCharts() {
             loadEnergyHistory('power',      _activePeriod.power,      null);
             loadEnergyHistory('voltage',    _activePeriod.voltage,    null);
@@ -8079,11 +8266,13 @@ HTML_TEMPLATE = '''
                 ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                try { loadAnalyticsEnergy('ac', _analyticsEnergyPeriod.ac || '24h', null); } catch(e) {}
             }
             if (pageId === 'lamp-analytics') {
                 ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                try { loadAnalyticsEnergy('lamp', _analyticsEnergyPeriod.lamp || '24h', null); } catch(e) {}
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
