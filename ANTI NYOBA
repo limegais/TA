@@ -3494,8 +3494,8 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    # Data is written with tags 'esp32_ac' / 'esp32_lamp' (from MQTT and MySQL fetch)
-    device_tag = 'esp32_ac' if device == 'ac' else 'esp32_lamp'
+    # mysql_energy.py writes with tags 'mysql_ac' / 'mysql_lamp' (main data source)
+    device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
     p = period_map[period]
 
     try:
@@ -3527,9 +3527,14 @@ def energy_history():
             points = []
             for table in result:
                 for record in table.records:
+                    # energy_kwh is cumulative — use 5 decimal places so JS delta
+                    # computation (diff between consecutive points) preserves small
+                    # per-interval changes (e.g. 0.003 kWh per 5 min interval).
+                    # Rounding to 2 decimals destroys these tiny deltas → chart shows 0.
+                    decimals = 5 if field_name == 'energy_kwh' else 2
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(float(record.get_value()), 2)
+                        'value': round(float(record.get_value()), decimals)
                     })
             return points
 
@@ -3930,15 +3935,15 @@ def energy_daily_summary():
             elapsed_h = now_local.hour + now_local.minute / 60.0
             return round(elapsed_h * (on_count / total_today), 2)
 
-        # AC metrics (esp32_ac — same tag used in writes)
-        ac_kwh     = _query_today('esp32_ac', 'energy_kwh', 'max')  # cumulative, so max is total
-        ac_power_avg = _query_today('esp32_ac', 'power', 'mean')
-        ac_power_peak = _query_today_max('esp32_ac', 'power')
+        # AC metrics (mysql_ac — written by mysql_energy.py poller)
+        ac_kwh     = _query_today('mysql_ac', 'energy_kwh', 'max')  # cumulative, so max is total
+        ac_power_avg = _query_today('mysql_ac', 'power', 'mean')
+        ac_power_peak = _query_today_max('mysql_ac', 'power')
 
-        # Lamp metrics (esp32_lamp — same tag used in writes)
-        lamp_kwh     = _query_today('esp32_lamp', 'energy_kwh', 'max')
-        lamp_power_avg = _query_today('esp32_lamp', 'power', 'mean')
-        lamp_power_peak = _query_today_max('esp32_lamp', 'power')
+        # Lamp metrics (mysql_lamp — written by mysql_energy.py poller)
+        lamp_kwh     = _query_today('mysql_lamp', 'energy_kwh', 'max')
+        lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
+        lamp_power_peak = _query_today_max('mysql_lamp', 'power')
 
         # Runtime from ring buffers (fallback when InfluxDB has no data yet today)
         ac_runtime_h   = _runtime_hours_from_buffer(energy_runtime_history, threshold_power=50.0)
