@@ -2259,7 +2259,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     
     if is_success:
         mqtt_status['connected'] = True
-        mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
+        mqtt_status['last_connect_time'] = datetime.now().strftime('%d %b %Y %H:%M:%S')
         mqtt_status['error'] = None
         print("[OK] MQTT connected")
         client.subscribe("smartroom/#")
@@ -3086,7 +3086,7 @@ from(bucket: "{INFLUX_BUCKET}")
     end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     TYPE_MAP = {
-        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3'], None, None),
+        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3','ac_temp','fan_speed','ac_fan_mode','mode'], None, None),
         'lux':       ('lamp_sensor',     ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'],                        None, None),
         'occupancy': ('camera_detection',['person_count','confidence'],                                                        None, None),
     }
@@ -4315,7 +4315,7 @@ def get_device_status():
             dev['status'] = 'offline'
         else:
             dev['status'] = 'online'
-    return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
+    return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%d %b %H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
 
 @app.route('/api/sensor/health')
 def sensor_health_api():
@@ -4336,7 +4336,7 @@ def sensor_health_api():
             'label':   labels.get(dev_id, dev_id),
             'status':  status,
             'age':     'never' if age == float('inf') else f"{int(age)}s ago",
-            'last_seen': last.strftime('%H:%M:%S') if last else None,
+            'last_seen': last.strftime('%d %b %H:%M:%S') if last else None,
         }
     return jsonify(health)
 
@@ -5207,9 +5207,9 @@ HTML_TEMPLATE = '''
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-temp1">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-temp2">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-temp3">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Dekat)</small>: <strong id="dash-temp1">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Tengah)</small>: <strong id="dash-temp2">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Jauh)</small>: <strong id="dash-temp3">0</strong>°C</span>
                     </div>
                 </div>
 
@@ -5225,9 +5225,9 @@ HTML_TEMPLATE = '''
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-hum1">0</strong>%</span>
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-hum2">0</strong>%</span>
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-hum3">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Dekat)</small>: <strong id="dash-hum1">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Tengah)</small>: <strong id="dash-hum2">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Jauh)</small>: <strong id="dash-hum3">0</strong>%</span>
                     </div>
                 </div>
 
@@ -5314,13 +5314,79 @@ HTML_TEMPLATE = '''
                     <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                             <span>Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S1(Dekat): <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S2(Tengah): <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S3(Jauh): <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
                             <span>Hum: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
                         <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
                             AI Controlled
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fan & Mode Decision Range Table -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(234, 179, 8, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 13px;">
+                            &#9881;
+                        </div>
+                        <div>
+                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">Fan &amp; Mode — Definisi Range</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Batas-batas suhu &amp; kelembaban yang menentukan output Fan Speed dan Mode AC (dari GA)</div>
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px; overflow-x: auto;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 12px; color: var(--text);">
+                            <thead>
+                                <tr style="background: rgba(245, 158, 11, 0.06); border-bottom: 2px solid var(--border);">
+                                    <th style="padding: 10px 12px; text-align: left; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Kondisi</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Set Temp</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Fan Speed</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Mode AC</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">Tier 0</span> — Tidak ada orang</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">27–29°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(16,185,129,0.12); color: #10b981; font-weight: 600;">1 (Low)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL / FAN</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 orang, RH ≤ 65%</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">24–26°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">1–2 (Adaptif)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 orang, RH &gt; 65%</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22–24°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">2–3</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">Tier 2</span> — 3–5 orang</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">3 (High)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">Tier 3</span> — &gt;5 orang</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">16°C (Min)</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">4 (Max)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 10px 12px;"><span style="color: #a855f7; font-weight: 600;">Override</span> — RH &gt; 65% (semua tier)</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #6b7280;">−2°C offset</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">+1 boost</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div style="margin-top: 12px; padding: 8px 14px; border-radius: 8px; background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.15); font-size: 11px; color: var(--text-secondary);">
+                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization secara otomatis menentukan kombinasi optimal berdasarkan kondisi ruangan, jumlah orang, dan trend suhu. Tabel di atas adalah panduan umum.
                         </div>
                     </div>
                 </div>
@@ -5366,7 +5432,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
                         <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
-                        Data fetched directly from InfluxDB — columns: <strong>Time, Temperature (°C), Humidity (%), Heat Index (°C)</strong>
+                        Data fetched directly from InfluxDB — columns: <strong>Time, Temperature (°C), Humidity (%), Heat Index (°C), S1–S3 Temp/Hum, Set Temperature, Fan Speed, Mode AC, Control</strong>
                     </div>
                 </div>
 
