@@ -6799,7 +6799,7 @@ HTML_TEMPLATE = '''
         <div id="ml-optimization" class="page">
             <div class="header">
                 <h1>Machine Learning Optimization</h1>
-                <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
+                <p>GA &rarr; Adaptive AC | PSO &rarr; Adaptive Lamp | Auto-optimized in ADAPTIVE mode</p>
             </div>
 
             <!-- ML Summary Cards -->
@@ -6876,9 +6876,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
-                            Run GA
-                        </button>
                     </div>
                 </div>
                 <canvas id="gaFitnessChart" height="80"></canvas>
@@ -6891,9 +6888,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
-                            Run PSO
-                        </button>
                     </div>
                 </div>
                 <!-- Iteration detail table -->
@@ -6924,9 +6918,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
-                            Run Both
-                        </button>
                         <button class="chart-option-btn" onclick="clearMLCharts()">
                             Clear
                         </button>
@@ -6963,7 +6954,7 @@ HTML_TEMPLATE = '''
                             </tr>
                         </thead>
                         <tbody id="ml-history-body">
-                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Run GA or PSO to start.</td></tr>
+                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Set mode to ADAPTIVE to start automatic optimization.</td></tr>
                         </tbody>
                     </table>
                 </div>
