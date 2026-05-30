@@ -1155,6 +1155,7 @@ def persist_opt_results(algo):
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
+                'ga_stats_json':    json.dumps(ga.get('stats', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'ga', 'version': '1'})
@@ -1174,6 +1175,8 @@ def persist_opt_results(algo):
                 'lux_achieved':   float(pso.get('lux_achieved', 0)),
                 'target_lux':     float(pso.get('target_lux', 350.0)),
                 'run_time':       str(pso.get('run_time', '')),
+                'pso_stats_json':    json.dumps(pso.get('stats', [])),
+                'pso_iterlog_json':  json.dumps(pso.get('iteration_log', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'pso', 'version': '1'})
@@ -1200,7 +1203,14 @@ def restore_opt_results():
             if not rec_map:
                 continue
             if algo == 'ga' and rec_map.get('fitness', 0) > 0:
-                # Preserve stats already loaded from JSON file
+                # Try to restore stats from InfluxDB JSON field
+                restored_stats = []
+                if rec_map.get('ga_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['ga_stats_json'])
+                    except Exception:
+                        pass
+                # Preserve stats already loaded from JSON file, or use InfluxDB stats
                 existing_stats = last_opt_results['ga'].get('stats', [])
                 last_opt_results['ga'].update({
                     'fitness':          float(rec_map.get('fitness', 0)),
@@ -1212,21 +1222,35 @@ def restore_opt_results():
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
                 })
-                # Only clear stats if file didn't provide any
-                if not existing_stats:
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['ga']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['ga']['stats'] = restored_stats
+                else:
                     last_opt_results['ga']['stats'] = []
                 mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
                 mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
                 mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
                 mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
-                # Preserve ga_history if already loaded from file
-                if not mqtt_data['system'].get('ga_history'):
-                    mqtt_data['system']['ga_history'] = last_opt_results['ga'].get('stats', [])
-                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
+                mqtt_data['system']['ga_history'] = last_opt_results['ga'].get('stats', [])
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
-                # Preserve stats already loaded from JSON file
+                # Try to restore stats from InfluxDB JSON fields
+                restored_stats = []
+                restored_iter_log = []
+                if rec_map.get('pso_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['pso_stats_json'])
+                    except Exception:
+                        pass
+                if rec_map.get('pso_iterlog_json'):
+                    try:
+                        restored_iter_log = json.loads(rec_map['pso_iterlog_json'])
+                    except Exception:
+                        pass
                 existing_stats = last_opt_results['pso'].get('stats', [])
                 existing_iter_log = last_opt_results['pso'].get('iteration_log', [])
                 last_opt_results['pso'].update({
@@ -1242,10 +1266,18 @@ def restore_opt_results():
                     'target_lux':    float(rec_map.get('target_lux', 350.0)),
                     'run_time':      str(rec_map.get('run_time', '')),
                 })
-                # Preserve stats/iteration_log if file already provided them
-                if not existing_stats:
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['pso']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['pso']['stats'] = restored_stats
+                else:
                     last_opt_results['pso']['stats'] = []
-                if not existing_iter_log:
+                if existing_iter_log:
+                    last_opt_results['pso']['iteration_log'] = existing_iter_log
+                elif restored_iter_log:
+                    last_opt_results['pso']['iteration_log'] = restored_iter_log
+                else:
                     last_opt_results['pso']['iteration_log'] = []
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
                 mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
@@ -1253,10 +1285,8 @@ def restore_opt_results():
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
-                # Preserve pso_history if already loaded from file
-                if not mqtt_data['system'].get('pso_history'):
-                    mqtt_data['system']['pso_history'] = last_opt_results['pso'].get('stats', [])
-                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
+                mqtt_data['system']['pso_history']     = last_opt_results['pso'].get('stats', [])
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f} stats={len(last_opt_results['pso']['stats'])} pts")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
 
@@ -4155,9 +4185,25 @@ def control_ac():
 
         mqtt_data['ac']['ac_temp'] = payload['temperature']
         mqtt_data['ac']['fan_speed'] = payload['fan_speed']
+        mqtt_data['ac']['set_rh'] = payload['set_rh']
         mqtt_data['ac']['ac_state'] = payload['ac_state']
         mqtt_data['ac']['ac_fan_mode'] = payload['mode']
         socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+
+        # Force immediate InfluxDB write with updated set_rh so the chart reflects the change
+        try:
+            write_to_influxdb('ac_sensor', {
+                'ac_temp': float(payload['temperature']),
+                'fan_speed': int(payload['fan_speed']),
+                'set_rh': int(payload['set_rh']),
+                'ac_state': str(payload['ac_state']),
+                'ac_fan_mode': str(payload['mode']),
+                'temperature': float(mqtt_data['ac'].get('temperature', 0)),
+                'humidity': float(mqtt_data['ac'].get('humidity', 0)),
+                'heat_index': float(mqtt_data['ac'].get('heat_index', 0)),
+            }, tags={'device': 'esp32_ac', 'type': 'control', 'location': 'room'})
+        except Exception as e:
+            print(f'[WARN] control_ac influx write: {e}')
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ac': mqtt_data['ac'], 'payload': payload, 'ir_sent': True})
@@ -8451,9 +8497,18 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'ml-optimization') {
                 // Use requestAnimationFrame: fires AFTER browser paints the page with display:block
-                // so canvas has real dimensions when initMLCharts() creates the Chart.js instances
                 requestAnimationFrame(function() {
-                    try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    // Only create charts if they don't exist yet; otherwise just resize
+                    if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                        try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    } else {
+                        // Charts exist — just resize them for correct dimensions
+                        try {
+                            ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                                if (charts[k]) { charts[k].resize(); charts[k].update('none'); }
+                            });
+                        } catch(e) { console.warn('[NAV] chart resize error:', e); }
+                    }
                     try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
                 });
             }
@@ -8544,20 +8599,33 @@ HTML_TEMPLATE = '''
             if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
-            if (data.ga_history && data.ga_history.length > 0) {
-                updateMLChart('gaFitness', data.ga_history, 'GA');
+            // GA chart — use server data, or fallback to localStorage
+            var gaHistory = (data.ga_history && data.ga_history.length > 0) ? data.ga_history : null;
+            if (!gaHistory) {
+                try { gaHistory = JSON.parse(localStorage.getItem('ml_ga_history')); } catch(e) {}
             }
+            if (gaHistory && gaHistory.length > 0) {
+                updateMLChart('gaFitness', gaHistory, 'GA');
+            }
+
+            // PSO chart — use server data, or fallback to localStorage
             if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
                 updatePSOIterChart(data.pso_iteration_log);
-            } else if (data.pso_history && data.pso_history.length > 0) {
-                // Fallback: if no iteration_log yet, show pso_history as fitness line
-                const chart = charts.psoFitness;
-                if (chart) {
-                    chart.data.labels = data.pso_history.map((_, i) => i + 1);
-                    chart.data.datasets[0].data = [];
-                    chart.data.datasets[1].data = [];
-                    chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
-                    chart.update('none');
+            } else {
+                var savedIterLog = null;
+                try { savedIterLog = JSON.parse(localStorage.getItem('ml_pso_iterlog')); } catch(e) {}
+                if (savedIterLog && savedIterLog.length > 0) {
+                    updatePSOIterChart(savedIterLog);
+                } else if (data.pso_history && data.pso_history.length > 0) {
+                    // Fallback: if no iteration_log yet, show pso_history as fitness line
+                    const chart = charts.psoFitness;
+                    if (chart) {
+                        chart.data.labels = data.pso_history.map((_, i) => i + 1);
+                        chart.data.datasets[0].data = [];
+                        chart.data.datasets[1].data = [];
+                        chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
+                        chart.update('none');
+                    }
                 }
             }
         }
@@ -8572,6 +8640,10 @@ HTML_TEMPLATE = '''
                     // ML tab not yet active — store data to render when tab opens
                     window.__pendingMLData = window.__pendingMLData || {};
                     window.__pendingMLData[chartName] = { history, algo };
+                    // Also save to localStorage so data survives refresh
+                    if (algo === 'GA') {
+                        try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
+                    }
                     return;
                 }
             }
@@ -8582,6 +8654,8 @@ HTML_TEMPLATE = '''
                 chart.data.labels           = history.map((_, i) => 'Gen ' + (i + 1));
                 chart.data.datasets[0].data = history;
                 chart.update('none');
+                // Cache to localStorage for persistence across refresh
+                try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
             } else if (algo === 'PSO') {
                 // PSO fitness history sebagai fallback jika belum ada iteration_log
                 // Tampilkan sebagai Lux Avg estimasi (dataset index 2)
@@ -8602,6 +8676,8 @@ HTML_TEMPLATE = '''
             chart.data.datasets[1].data = iterLog.map(d => d.pwm2);
             chart.data.datasets[2].data = iterLog.map(d => d.lux_avg);
             chart.update('none');
+            // Cache to localStorage for persistence across refresh
+            try { localStorage.setItem('ml_pso_iterlog', JSON.stringify(iterLog)); } catch(e) {}
             // Update tabel
             const tbody = document.getElementById('pso-iter-tbody');
             const wrap  = document.getElementById('pso-iter-table-wrap');
