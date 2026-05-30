@@ -210,6 +210,7 @@ load_energy_recording()
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
 OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 255  # PWM range 0-255 sesuai spesifikasi
+OPT_RH_MIN, OPT_RH_MAX = 30, 80  # Set RH range 30-80%
 
 # AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
 OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
@@ -254,8 +255,9 @@ def _get_temp_uniformity():
     if len(temps) < 2: return 1.0
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
-def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
+def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+    Genes: [temp, fan_speed, mode_idx, set_rh]
     Crowd-based tier:
       Tier 0 — 0 persons  : energy saving (27-29°C, fan 1)
       Tier 1 — 1-2 persons: standard temp by time (24-26°C, fan adaptive)
@@ -270,7 +272,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    # ── Crowd-based temperature & fan tier ───────────────────────────────────
+    # ── Crowd-based temperature & fan tier ───────────────────────────────────────
     ideal_fan_crowd = None  # None = hitung dari temp_gap (hanya untuk tier 1)
     if not person_detected:
         # Tier 0: no persons — energy saving mode
@@ -320,7 +322,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    # ── Energy efficiency ─────────────────────────────────────────────────────
+    # ── Energy efficiency ─────────────────────────────────────────────────────────
     # Use real PZEM watt data when available; fall back to COP-based model.
     # COP model: efficiency drops exponentially as setpoint moves further below room temp.
     # Fan also consumes power — penalise high fan speed when gap is small.
@@ -367,7 +369,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     if person_count > 5 and fan_speed == OPT_FAN_MAX:
         fitness += 12.0
 
-    # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
+    # ── Mode bonus / penalty (max ±10 pts) ────────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
     # DRY  (1): dehumidification — reward when humidity > 65%
     # FAN  (2): no cooling, just air circulation — penalise when hot, reward when mild
@@ -387,6 +389,30 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
             fitness -= (temp_room - (target_temp + 1)) * 3.0  # hot room — penalise FAN
     elif mode_idx == 3:  # AUTO
         fitness += 3.0  # small neutral bonus
+
+    # ── Set RH fitness (max ±15 pts) ───────────────────────────────────────
+    # Target RH for comfort: 45-55% (ideal 50%)
+    # High humidity (>65%): reward low set_rh + DRY mode → dehumidify
+    # Low humidity (<45%):  reward high set_rh → don't over-dry
+    # Normal (45-55%):      reward set_rh near 50% (comfort zone)
+    if humidity > 65:
+        # High humidity — prefer low RH setpoint to dehumidify
+        ideal_rh = max(OPT_RH_MIN, 30 + int((humidity - 65) / 5) * -2)  # lower as humidity rises
+        ideal_rh = max(OPT_RH_MIN, min(45, 50 - int((humidity - 65) * 0.5)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Strong bonus for DRY mode when humidity is high
+        if mode_idx == 1:  # DRY
+            fitness += min(8.0, (humidity - 65) * 0.5)
+    elif humidity < 45:
+        # Low humidity — prefer higher RH setpoint
+        ideal_rh = min(OPT_RH_MAX, max(55, 50 + int((45 - humidity) * 0.8)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Penalize DRY mode when humidity is already low
+        if mode_idx == 1:
+            fitness -= 5.0
+    else:
+        # Normal humidity — reward set_rh near 50%
+        fitness += _gaussian_score(set_rh, 50, 8.0, 10.0)
 
     return max(0.0, round(fitness, 2))
 
@@ -632,21 +658,24 @@ def run_ga_optimization(verbose=False):
     seed_solutions = []
     if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
         seed_mode = last_opt_results['ga'].get('mode_idx', 0)
-        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode])
+        seed_rh = last_opt_results['ga'].get('set_rh', 50)
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode, seed_rh])
 
     def create_ind():
-        # ind = [temp, fan_speed, mode_idx]
+        # ind = [temp, fan_speed, mode_idx, set_rh]
         return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1),
                 random.randint(OPT_FAN_MIN, OPT_FAN_MAX),
-                random.randint(OPT_MODE_MIN, OPT_MODE_MAX)]
+                random.randint(OPT_MODE_MIN, OPT_MODE_MAX),
+                random.randint(OPT_RH_MIN, OPT_RH_MAX)]
 
     population = []
     for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
-        population.append([float(s[0]), int(s[1]), int(s[2])])
+        population.append([float(s[0]), int(s[1]), int(s[2]), int(s[3])])
         if len(population) < pop_size:
             population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
                                max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1]))),
-                               int(s[2])])
+                               int(s[2]),
+                               max(OPT_RH_MIN, min(OPT_RH_MAX, int(s[3]) + random.choice([-5, 0, 0, 5])))])
     while len(population) < pop_size:
         population.append(create_ind())
     population = population[:pop_size]
@@ -657,7 +686,7 @@ def run_ga_optimization(verbose=False):
     prev_best = 0
 
     for gen in range(generations):
-        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
         paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
         population = [p[0] for p in paired]
         scores = [p[1] for p in paired]
@@ -672,7 +701,7 @@ def run_ga_optimization(verbose=False):
         if stagnation_counter >= stagnation_limit:
             for i in range(max(2, pop_size // 4)):
                 population[-(i + 1)] = create_ind()
-            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
             boost = True
             stagnation_counter = 0
         if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
@@ -686,7 +715,7 @@ def run_ga_optimization(verbose=False):
             selected.append(population[best_idx][:])
         while len(next_pop) < pop_size:
             p1, p2 = random.sample(selected, 2)
-            # BLX-alpha crossover for temp; uniform for fan & mode
+            # BLX-alpha crossover for temp and RH; uniform for fan & mode
             if random.random() < crossover_rate:
                 alpha = 0.3
                 lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
@@ -697,7 +726,12 @@ def run_ga_optimization(verbose=False):
                 c2f = p2[1] if random.random() < 0.5 else p1[1]
                 c1m = p1[2] if random.random() < 0.5 else p2[2]
                 c2m = p2[2] if random.random() < 0.5 else p1[2]
-                child1, child2 = [c1t, c1f, c1m], [c2t, c2f, c2m]
+                # BLX-alpha crossover for set_rh
+                rh_lo, rh_hi = min(p1[3], p2[3]), max(p1[3], p2[3])
+                rh_span = rh_hi - rh_lo
+                c1r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                c2r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                child1, child2 = [c1t, c1f, c1m, c1r], [c2t, c2f, c2m, c2r]
             else:
                 child1, child2 = p1[:], p2[:]
             # mutate
@@ -712,23 +746,28 @@ def run_ga_optimization(verbose=False):
                     child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
                 if random.random() < adaptive_rate * 0.5:  # mode mutates less often
                     child[2] = random.randint(OPT_MODE_MIN, OPT_MODE_MAX)
+                if random.random() < adaptive_rate:
+                    rh_step = int((10.0 * (1 - progress) + 2.0) * (2.0 if boost else 1.0))
+                    child[3] = max(OPT_RH_MIN, min(OPT_RH_MAX, child[3] + random.randint(-rh_step, rh_step)))
             next_pop.append(child1)
             if len(next_pop) < pop_size:
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # brute-force validation (temp × fan × mode search)
+    # brute-force validation (temp × fan × mode × rh_samples search)
     bf_best_fit, bf_best_sol = -1, None
+    rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
         for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
             for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
-                fit = calculate_ac_fitness(t, f, m)
-                if fit > bf_best_fit:
-                    bf_best_fit, bf_best_sol = fit, [t, f, m]
+                for rh in rh_samples:
+                    fit = calculate_ac_fitness(t, f, m, rh)
+                    if fit > bf_best_fit:
+                        bf_best_fit, bf_best_sol = fit, [t, f, m, rh]
     if bf_best_fit > best_fitness:
-        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2]]
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2], bf_best_sol[3]]
         best_fitness = bf_best_fit
-    final = [int(round(best_solution[0])), best_solution[1], best_solution[2]]
+    final = [int(round(best_solution[0])), best_solution[1], best_solution[2], best_solution[3]]
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
@@ -902,9 +941,11 @@ def run_optimization_cycle(algo='both'):
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
             mode_idx = sol[2] if len(sol) > 2 else 0
+            opt_set_rh = sol[3] if len(sol) > 3 else 50
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
+                'set_rh': opt_set_rh,
                 'stats': hist, 'brute_force': bf,
                 'initial_fitness': round(hist[0], 2) if hist else 0,
                 'final_fitness': round(fit, 2),
@@ -924,7 +965,7 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             sol, fit, hist, initial_err, iter_log = run_pso_optimization()
@@ -972,6 +1013,7 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'ga_set_rh': last_opt_results['ga'].get('set_rh', 50),
             'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
             'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
@@ -988,6 +1030,7 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
+            'ga_set_rh': float(last_opt_results['ga'].get('set_rh', 50)),
             'pso_pwm1': float(last_opt_results['pso'].get('pwm1', 0)),
             'pso_pwm2': float(last_opt_results['pso'].get('pwm2', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
@@ -1004,6 +1047,7 @@ def run_optimization_cycle(algo='both'):
             opt_temp = last_opt_results['ga']['temp']
             opt_fan  = last_opt_results['ga']['fan']
             opt_mode = last_opt_results['ga'].get('mode', 'COOL')
+            opt_rh   = last_opt_results['ga'].get('set_rh', 50)
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 now = time.time()
                 temp_changed = abs(int(opt_temp) - _last_sent_ac_temp) >= AC_CHANGE_THRESHOLD_TEMP
@@ -1012,8 +1056,13 @@ def run_optimization_cycle(algo='both'):
                     _last_adaptive_ac_apply = now
                     _last_sent_ac_temp = int(opt_temp)
                     _last_sent_ac_fan  = int(opt_fan)
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                    # Update local state
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    mqtt_data['ac']['ac_fan_mode'] = opt_mode
+                    print(f"  [GA→AC] Applied: {int(opt_temp)}°C Fan={int(opt_fan)} Mode={opt_mode} RH={int(opt_rh)}%")
         # Catatan: Auto-apply lamp PSO TIDAK dilakukan di sini.
         # Apply PWM lampu dikendalikan sepenuhnya oleh _pso_lamp_cycle()
         # agar urutan Baca→Hitung→Send→Tunggu→Baca tetap terjaga.
@@ -1031,7 +1080,8 @@ def run_optimization_cycle(algo='both'):
                 'temperature': last_opt_results['ga']['temp'],
                 'fan_speed': last_opt_results['ga']['fan'],
                 'mode': last_opt_results['ga'].get('mode', 'COOL'),
-                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0),
+                'set_rh': last_opt_results['ga'].get('set_rh', 50)
             }
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
@@ -1120,6 +1170,7 @@ def load_opt_results_file():
             mqtt_data['system']['ga_temp']     = ga_data.get('temp', 0)
             mqtt_data['system']['ga_fan']      = ga_data.get('fan', 0)
             mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
+            mqtt_data['system']['ga_set_rh']   = ga_data.get('set_rh', 50)
             mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
             print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
                   f"fitness={ga_data.get('fitness',0):.2f} stats={len(ga_data.get('stats',[]))} pts")
@@ -1152,6 +1203,7 @@ def persist_opt_results(algo):
                 'temp':             float(ga.get('temp', 0)),
                 'fan':              float(ga.get('fan', 0)),
                 'mode_idx':         float(ga.get('mode_idx', 0)),
+                'set_rh':           float(ga.get('set_rh', 50)),
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
@@ -1218,6 +1270,7 @@ def restore_opt_results():
                     'fan':              int(rec_map.get('fan', 0)),
                     'mode_idx':         int(rec_map.get('mode_idx', 0)),
                     'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'set_rh':           int(rec_map.get('set_rh', 50)),
                     'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
@@ -1229,12 +1282,13 @@ def restore_opt_results():
                     last_opt_results['ga']['stats'] = restored_stats
                 else:
                     last_opt_results['ga']['stats'] = []
-                mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
-                mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
-                mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
-                mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
-                mqtt_data['system']['ga_history'] = last_opt_results['ga'].get('stats', [])
-                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
+                mqtt_data['system']['ga_fitness']  = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_temp']     = last_opt_results['ga']['temp']
+                mqtt_data['system']['ga_fan']      = last_opt_results['ga']['fan']
+                mqtt_data['system']['ga_mode']     = last_opt_results['ga']['mode']
+                mqtt_data['system']['ga_set_rh']   = last_opt_results['ga'].get('set_rh', 50)
+                mqtt_data['system']['ga_history']  = last_opt_results['ga'].get('stats', [])
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} Mode={last_opt_results['ga']['mode']} RH={last_opt_results['ga'].get('set_rh',50)}% fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
@@ -2267,6 +2321,9 @@ def camera_detection_loop():
             
             mqtt_data['camera']['status'] = 'active'
             camera_fail_count = 0  # Reset on successful frame
+            # Update device_last_seen so sensor fault detection shows 'Online'
+            device_last_seen['camera']['last_seen'] = datetime.now()
+            device_last_seen['camera']['status'] = 'online'
             frame_count += 1
             
             # Run YOLO only every Nth frame — other frames reuse last detection
@@ -2592,13 +2649,16 @@ def on_message(client, userdata, msg):
                 opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
                 opt_fan  = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
                 opt_mode = ga_sol.get('mode', 'COOL')
+                opt_rh   = ga_sol.get('set_rh', 50)
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                     global _last_adaptive_ac_apply
                     now = time.time()
                     if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                         _last_adaptive_ac_apply = now
-                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                                  'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                        mqtt_data['ac']['set_rh'] = int(opt_rh)
             # AUTO-APPLY Lamp — only if pso_solution was present in this payload
             if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
                 opt_b1, opt_b2 = _safe_lamp_brightness(
@@ -4280,14 +4340,17 @@ def update_optimization():
             opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
             opt_fan  = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
             opt_mode = ga_sol.get('mode', 'COOL')
+            opt_rh   = ga_sol.get('set_rh', 50)
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                 global _last_adaptive_ac_apply
                 now = time.time()
                 if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                     _last_adaptive_ac_apply = now
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode}', 'level': 'success'})
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode} RH:{opt_rh}%', 'level': 'success'})
         
         # AUTO-APPLY Lamp — only if pso_solution was provided in this request
         if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -6819,7 +6882,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -8581,6 +8644,7 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
+            setEl('ml-ga-rh', data.ga_set_rh || '--');
             var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
             var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
@@ -10134,20 +10198,27 @@ HTML_TEMPLATE = '''
                     const temperature = num(ac.temperature);
                     setText('dash-temp', temperature.toFixed(1));
                     setText('dash-hum', num(ac.humidity).toFixed(1));
-                    // Individual sensor readings
+                    // Individual sensor readings — sorted coldest→hottest (S1→S3)
+                    var rawTemps = [
+                        { t: num(ac.temp1), h: num(ac.hum1) },
+                        { t: num(ac.temp2), h: num(ac.hum2) },
+                        { t: num(ac.temp3), h: num(ac.hum3) }
+                    ];
+                    // Sort by temperature ascending (coldest first = S1)
+                    rawTemps.sort(function(a, b) { return a.t - b.t; });
                     const t1El = document.getElementById('dash-temp1');
                     const t2El = document.getElementById('dash-temp2');
                     const t3El = document.getElementById('dash-temp3');
-                    if (t1El) t1El.textContent = num(ac.temp1).toFixed(1);
-                    if (t2El) t2El.textContent = num(ac.temp2).toFixed(1);
-                    if (t3El) t3El.textContent = num(ac.temp3).toFixed(1);
-                    // Individual humidity readings
+                    if (t1El) t1El.textContent = rawTemps[0].t.toFixed(1);
+                    if (t2El) t2El.textContent = rawTemps[1].t.toFixed(1);
+                    if (t3El) t3El.textContent = rawTemps[2].t.toFixed(1);
+                    // Individual humidity readings (sorted same order as temp)
                     const h1El = document.getElementById('dash-hum1');
                     const h2El = document.getElementById('dash-hum2');
                     const h3El = document.getElementById('dash-hum3');
-                    if (h1El) h1El.textContent = num(ac.hum1).toFixed(1);
-                    if (h2El) h2El.textContent = num(ac.hum2).toFixed(1);
-                    if (h3El) h3El.textContent = num(ac.hum3).toFixed(1);
+                    if (h1El) h1El.textContent = rawTemps[0].h.toFixed(1);
+                    if (h2El) h2El.textContent = rawTemps[1].h.toFixed(1);
+                    if (h3El) h3El.textContent = rawTemps[2].h.toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
@@ -10255,13 +10326,13 @@ HTML_TEMPLATE = '''
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
                     if (roomHum) roomHum.textContent = num(ac.humidity).toFixed(1);
-                    // Individual sensors in AC panel footer
+                    // Individual sensors in AC panel footer (use sorted rawTemps from above)
                     const acT1 = document.getElementById('dash-ac-temp1');
                     const acT2 = document.getElementById('dash-ac-temp2');
                     const acT3 = document.getElementById('dash-ac-temp3');
-                    if (acT1) acT1.textContent = num(ac.temp1).toFixed(1);
-                    if (acT2) acT2.textContent = num(ac.temp2).toFixed(1);
-                    if (acT3) acT3.textContent = num(ac.temp3).toFixed(1);
+                    if (acT1 && rawTemps) acT1.textContent = rawTemps[0].t.toFixed(1);
+                    if (acT2 && rawTemps) acT2.textContent = rawTemps[1].t.toFixed(1);
+                    if (acT3 && rawTemps) acT3.textContent = rawTemps[2].t.toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -11777,6 +11848,8 @@ HTML_TEMPLATE = '''
                 if (data.ga_solution && data.ga_solution.mode) {
                     var modeEl = document.getElementById('ml-ga-mode');
                     if (modeEl) modeEl.textContent = data.ga_solution.mode;
+                    var rhEl = document.getElementById('ml-ga-rh');
+                    if (rhEl && data.ga_solution.set_rh != null) rhEl.textContent = data.ga_solution.set_rh;
                 }
                 // Directly update GA chart from socket payload (faster than waiting for refreshMLData fetch)
                 if (data.ga_history && data.ga_history.length > 0) {
