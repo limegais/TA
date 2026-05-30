@@ -1047,9 +1047,101 @@ def run_optimization_cycle(algo='both'):
 
 # ==================== PERSIST & RESTORE OPT RESULTS ====================
 OPT_PERSIST_MEASUREMENT = 'opt_results'  # InfluxDB measurement name
+OPT_RESULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'opt_results.json')
+
+def save_opt_results_file():
+    """Save last_opt_results (including stats/history arrays) to JSON file.
+    This supplements InfluxDB persistence which cannot store arrays.
+    Called after every GA or PSO completion."""
+    try:
+        ga = last_opt_results.get('ga', {})
+        pso = last_opt_results.get('pso', {})
+        payload = {
+            'ga': {
+                'fitness':         ga.get('fitness', 0),
+                'temp':            ga.get('temp', 0),
+                'fan':             ga.get('fan', 0),
+                'mode_idx':        ga.get('mode_idx', 0),
+                'mode':            ga.get('mode', 'COOL'),
+                'initial_fitness': ga.get('initial_fitness', 0),
+                'final_fitness':   ga.get('final_fitness', 0),
+                'run_time':        ga.get('run_time', ''),
+                'stats':           ga.get('stats', []),
+                'params':          ga.get('params', {}),
+                'sensor_snapshot': ga.get('sensor_snapshot', {}),
+            },
+            'pso': {
+                'fitness':       pso.get('fitness', 0),
+                'pwm1':          pso.get('pwm1', 0),
+                'pwm2':          pso.get('pwm2', 0),
+                'brightness':    pso.get('brightness', 0),
+                'brightness1':   pso.get('brightness1', 0),
+                'brightness2':   pso.get('brightness2', 0),
+                'initial_error': pso.get('initial_error', 0),
+                'final_error':   pso.get('final_error', 0),
+                'lux_achieved':  pso.get('lux_achieved', 0),
+                'target_lux':    pso.get('target_lux', 350.0),
+                'run_time':      pso.get('run_time', ''),
+                'stats':         pso.get('stats', []),
+                'iteration_log': pso.get('iteration_log', []),
+                'params':        pso.get('params', {}),
+            },
+            'saved_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        dir_path = os.path.dirname(OPT_RESULTS_FILE)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as fh:
+                json.dump(payload, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+        os.replace(tmp_path, OPT_RESULTS_FILE)
+    except Exception as e:
+        print(f"[PERSIST] save_opt_results_file failed: {e}")
+
+def load_opt_results_file():
+    """Load last_opt_results from JSON file on startup.
+    Restores stats/history arrays that InfluxDB cannot store."""
+    if not os.path.exists(OPT_RESULTS_FILE):
+        return False
+    try:
+        with open(OPT_RESULTS_FILE, 'r') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        ga_data  = data.get('ga', {})
+        pso_data = data.get('pso', {})
+        if ga_data and ga_data.get('fitness', 0) > 0:
+            last_opt_results['ga'].update(ga_data)
+            mqtt_data['system']['ga_fitness']  = ga_data.get('fitness', 0)
+            mqtt_data['system']['ga_temp']     = ga_data.get('temp', 0)
+            mqtt_data['system']['ga_fan']      = ga_data.get('fan', 0)
+            mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
+            mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
+            print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
+                  f"fitness={ga_data.get('fitness',0):.2f} stats={len(ga_data.get('stats',[]))} pts")
+        if pso_data and (pso_data.get('brightness1', 0) > 0 or pso_data.get('fitness', 0) > 0):
+            last_opt_results['pso'].update(pso_data)
+            mqtt_data['system']['pso_fitness']     = pso_data.get('fitness', 0)
+            mqtt_data['system']['pso_pwm1']        = pso_data.get('pwm1', 0)
+            mqtt_data['system']['pso_pwm2']        = pso_data.get('pwm2', 0)
+            mqtt_data['system']['pso_brightness']   = pso_data.get('brightness', 0)
+            mqtt_data['system']['pso_brightness1']  = pso_data.get('brightness1', 0)
+            mqtt_data['system']['pso_brightness2']  = pso_data.get('brightness2', 0)
+            mqtt_data['system']['pso_history']      = pso_data.get('stats', [])
+            print(f"  [RESTORE-FILE] PSO: PWM1={pso_data.get('pwm1')}/255 PWM2={pso_data.get('pwm2')}/255 "
+                  f"stats={len(pso_data.get('stats',[]))} pts iter_log={len(pso_data.get('iteration_log',[]))} entries")
+        return True
+    except Exception as e:
+        print(f"  [RESTORE-FILE] load_opt_results_file failed: {e}")
+        return False
 
 def persist_opt_results(algo):
-    """Write current GA or PSO results to InfluxDB so they survive restarts."""
+    """Write current GA or PSO results to InfluxDB so they survive restarts.
+    Also saves full results (including stats arrays) to JSON file."""
     try:
         if algo == 'ga':
             ga = last_opt_results['ga']
@@ -1085,11 +1177,15 @@ def persist_opt_results(algo):
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'pso', 'version': '1'})
+        # Also save full results (with stats arrays) to JSON file
+        save_opt_results_file()
     except Exception as e:
         print(f"[PERSIST] Error saving {algo} results: {e}")
 
 def restore_opt_results():
-    """Read the latest GA and PSO results from InfluxDB on startup."""
+    """Read the latest GA and PSO results from InfluxDB on startup.
+    NOTE: InfluxDB does not store stats/history arrays. If load_opt_results_file()
+    already loaded stats from JSON, we preserve them here (don't overwrite with [])."""
     try:
         _, _, query_api = _get_influx_client()
         for algo in ('ga', 'pso'):
@@ -1104,6 +1200,8 @@ def restore_opt_results():
             if not rec_map:
                 continue
             if algo == 'ga' and rec_map.get('fitness', 0) > 0:
+                # Preserve stats already loaded from JSON file
+                existing_stats = last_opt_results['ga'].get('stats', [])
                 last_opt_results['ga'].update({
                     'fitness':          float(rec_map.get('fitness', 0)),
                     'temp':             int(rec_map.get('temp', 0)),
@@ -1113,16 +1211,24 @@ def restore_opt_results():
                     'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
-                    'stats':            [],  # history not stored (too large)
                 })
+                # Only clear stats if file didn't provide any
+                if not existing_stats:
+                    last_opt_results['ga']['stats'] = []
                 mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
                 mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
                 mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
                 mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
+                # Preserve ga_history if already loaded from file
+                if not mqtt_data['system'].get('ga_history'):
+                    mqtt_data['system']['ga_history'] = last_opt_results['ga'].get('stats', [])
                 print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
+                # Preserve stats already loaded from JSON file
+                existing_stats = last_opt_results['pso'].get('stats', [])
+                existing_iter_log = last_opt_results['pso'].get('iteration_log', [])
                 last_opt_results['pso'].update({
                     'fitness':       float(rec_map.get('fitness', 0)),
                     'pwm1':          int(rec_map.get('pwm1', round(b1_restored * 255 / 100))),
@@ -1135,14 +1241,21 @@ def restore_opt_results():
                     'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
                     'target_lux':    float(rec_map.get('target_lux', 350.0)),
                     'run_time':      str(rec_map.get('run_time', '')),
-                    'stats':         [],
                 })
+                # Preserve stats/iteration_log if file already provided them
+                if not existing_stats:
+                    last_opt_results['pso']['stats'] = []
+                if not existing_iter_log:
+                    last_opt_results['pso']['iteration_log'] = []
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
                 mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
                 mqtt_data['system']['pso_pwm2']       = last_opt_results['pso']['pwm2']
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
+                # Preserve pso_history if already loaded from file
+                if not mqtt_data['system'].get('pso_history'):
+                    mqtt_data['system']['pso_history'] = last_opt_results['pso'].get('stats', [])
                 print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
@@ -12061,8 +12174,10 @@ if __name__ == '__main__':
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
 
-    # Restore last GA/PSO results from InfluxDB (survive restarts)
-    print("  [RESTORE] Loading last optimization results from InfluxDB...")
+    # Restore last GA/PSO results — first from JSON file (has stats/history arrays),
+    # then supplement with InfluxDB (has latest scalar values)
+    print("  [RESTORE] Loading last optimization results...")
+    load_opt_results_file()
     restore_opt_results()
 
     # Start sensor fault detection thread
