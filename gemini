@@ -927,7 +927,7 @@ def run_optimization_cycle(algo='both'):
             print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
-            sol, fit, hist, initial_err = run_pso_optimization()
+            sol, fit, hist, initial_err, iter_log = run_pso_optimization()
             # sol adalah PWM 0-255 langsung dari algoritma
             pwm1_val = int(round(min(255, max(0, sol[0]))))
             pwm2_val = int(round(min(255, max(0, sol[1]))))
@@ -3159,7 +3159,7 @@ from(bucket: "{INFLUX_BUCKET}")
 # Allowed lists prevent InfluxDB injection
 _CHART_ALLOWED_MEAS = {'ac_sensor', 'lamp_sensor', 'camera_detection', 'energy_monitor'}
 _CHART_ALLOWED_FIELDS = {
-    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed',
+    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed', 'set_rh',
     'lux', 'lux_avg', 'lux1', 'lux2', 'lux3',
     'brightness', 'brightness_avg', 'brightness1', 'brightness2',
     'person_count', 'confidence',
@@ -5701,13 +5701,13 @@ HTML_TEMPLATE = '''
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
                     <div style="width:36px;height:36px;border-radius:10px;background:rgba(16,185,129,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
                     <div>
-                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Usage</div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Consumption</div>
                         <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
                     </div>
                 </div>
                 <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
                     <div class="chart-header">
-                        <div class="chart-title">AC Energy per Interval (kWh)</div>
+                        <div class="chart-title">AC Energy Consumption (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac','24h',this)">24h</button>
                             <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','7d',this)">7d</button>
@@ -7162,7 +7162,12 @@ HTML_TEMPLATE = '''
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'AC Target Temp (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Set Temperature (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.acHum = new Chart(document.getElementById('acHumChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Set RH (%)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
@@ -7443,6 +7448,18 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
+
+            // Load any pending ML data that was stored while the ML page was hidden
+            if (window.__pendingMLData) {
+                var pending = window.__pendingMLData;
+                window.__pendingMLData = null;
+                Object.keys(pending).forEach(function(chartName) {
+                    var pd = pending[chartName];
+                    if (pd && pd.history && pd.history.length > 0) {
+                        try { updateMLChart(chartName, pd.history, pd.algo); } catch(e) { console.warn('[CHART] pending ML data load failed:', e); }
+                    }
+                });
+            }
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -7505,6 +7522,7 @@ HTML_TEMPLATE = '''
                 case 'temp': endpoint = '/api/chart/ac_sensor/temperature/' + hours; break;
                 case 'hum': endpoint = '/api/chart/ac_sensor/humidity/' + hours; break;
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
+                case 'acHum': endpoint = '/api/chart/ac_sensor/set_rh/' + hours; break;
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
                 case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
@@ -8327,7 +8345,7 @@ HTML_TEMPLATE = '''
                 });
             }
             if (pageId === 'ac-analytics') {
-                ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
+                ['temp', 'hum', 'acTemp', 'acHum', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
                 try { loadAnalyticsEnergy('ac', _analyticsEnergyPeriod.ac || '24h', null); } catch(e) {}
@@ -11579,6 +11597,13 @@ HTML_TEMPLATE = '''
                 if (data.ga_solution && data.ga_solution.mode) {
                     var modeEl = document.getElementById('ml-ga-mode');
                     if (modeEl) modeEl.textContent = data.ga_solution.mode;
+                }
+                // Directly update GA chart from socket payload (faster than waiting for refreshMLData fetch)
+                if (data.ga_history && data.ga_history.length > 0) {
+                    try { updateMLChart('gaFitness', data.ga_history, 'GA'); } catch(e) { console.warn('[ML] Direct GA chart update failed:', e); }
+                }
+                if (data.pso_history && data.pso_history.length > 0) {
+                    try { updateMLChart('psoFitness', data.pso_history, 'PSO'); } catch(e) { console.warn('[ML] Direct PSO chart update failed:', e); }
                 }
                 // Refresh ML data
                 refreshMLData();
