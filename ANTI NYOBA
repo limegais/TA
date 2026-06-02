@@ -83,9 +83,9 @@ lamp_recording = {
 }
 
 # Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)
-LAMP_RATED_WATT = 30.0   # Total watt kedua lampu at 100% brightness (2 × 15W LED)
+LAMP_RATED_WATT = 30.0   # Total watts of both lamps at 100% brightness (2 × 15W LED)
 LAMP_VOLTAGE = 220.0     # Voltage nominal Indonesia
-_lamp_energy_kwh = 0.0   # Akumulator kWh estimasi lampu
+_lamp_energy_kwh = 0.0   # kWh accumulator for lamp estimation
 _lamp_energy_last_ts = 0.0
 
 # Lock for all recording-state globals (energy_phase, energy_recording, lamp_phase, lamp_recording, _lamp_energy_kwh)
@@ -210,6 +210,7 @@ load_energy_recording()
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
 OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 255  # PWM range 0-255 sesuai spesifikasi
+OPT_RH_MIN, OPT_RH_MAX = 30, 80  # Set RH range 30-80%
 
 # AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
 OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
@@ -254,8 +255,9 @@ def _get_temp_uniformity():
     if len(temps) < 2: return 1.0
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
-def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
+def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+    Genes: [temp, fan_speed, mode_idx, set_rh]
     Crowd-based tier:
       Tier 0 — 0 persons  : energy saving (27-29°C, fan 1)
       Tier 1 — 1-2 persons: standard temp by time (24-26°C, fan adaptive)
@@ -270,8 +272,8 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    # ── Crowd-based temperature & fan tier ───────────────────────────────────
-    ideal_fan_crowd = None  # None = hitung dari temp_gap (hanya untuk tier 1)
+    # ── Crowd-based temperature & fan tier ───────────────────────────────────────
+    ideal_fan_crowd = None  # None = calculated from temp_gap (only for tier 1)
     if not person_detected:
         # Tier 0: no persons — energy saving mode
         target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
@@ -282,7 +284,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     elif person_count > 5:
         # Tier 3: >5 persons — AC as cold as possible, max fan
         target_temp = OPT_TEMP_MIN   # 16°C (batas bawah GA)
-        sigma = 0.8                  # band sangat ketat — GA harus pilih suhu minimum
+        sigma = 0.8                  # very tight band — GA must choose minimum temperature
         ideal_fan_crowd = float(OPT_FAN_MAX)  # fan 4
     elif person_count >= 3:
         # Tier 2: 3-5 persons — medium cooling
@@ -297,9 +299,9 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         if person_count == 2:
             target_temp = max(target_temp - 0.5, 22.0)  # slightly cooler for 2 persons
         sigma = std_sigma.get(time_period, 2.0)
-        # ideal_fan_crowd = None → akan dihitung dari temp_gap di bawah
-    # Trend offset: jika suhu ruangan naik cepat, turunkan target; jika turun, naikkan
-    # Untuk tier >5, trend offset tetap diterapkan tapi target sudah di minimum
+        # ideal_fan_crowd = None → will be calculated from temp_gap below
+    # Trend offset: if room temp rises fast, lower target; if falls, raise target
+    # For tier >5, trend offset still applied but target is already at minimum
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
     adjusted_target = max(OPT_TEMP_MIN, target_temp + trend_offset) if person_count > 5 \
                       else target_temp + trend_offset
@@ -314,13 +316,13 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
     temp_gap = abs(temp_room - temp_set)
-    # Ideal fan: tier 2 & 3 sudah ditetapkan di atas; tier 1 hitung dari temp_gap
+    # Ideal fan: tier 2 & 3 already set above; tier 1 calculated from temp_gap
     if ideal_fan_crowd is not None:
         ideal_fan = ideal_fan_crowd
     else:
         ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    # ── Energy efficiency ─────────────────────────────────────────────────────
+    # ── Energy efficiency ─────────────────────────────────────────────────────────
     # Use real PZEM watt data when available; fall back to COP-based model.
     # COP model: efficiency drops exponentially as setpoint moves further below room temp.
     # Fan also consumes power — penalise high fan speed when gap is small.
@@ -333,7 +335,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
         fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
         energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
-    # >5 orang: kenyamanan & pendinginan lebih prioritas dari efisiensi energi
+    # >5 people: comfort & cooling takes priority over energy efficiency
     if person_count > 5:
         energy_weight = 4.0
     elif person_detected:
@@ -354,20 +356,20 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
     if not person_detected and temp_set < 24:
         fitness -= (24.0 - temp_set) * 3.0
-    # Temperature < 18 dengan fan mid: penalti hanya jika bukan tier >5 (tier >5 justru inginkan ini)
+    # Temperature < 18 with mid fan: penalty only if not tier >5 (tier >5 wants this)
     if temp_set < 18 and fan_speed == 3 and person_count <= 5:
         fitness -= 10.0
-    # Overcooling: penalti HANYA untuk tier 1-2 (tier >5 memang inginkan suhu minimum)
+    # Overcooling: penalty ONLY for tier 1-2 (tier >5 wants minimum temperature)
     if person_detected and person_count <= 5 and temp_set < target_temp - 1.5:
         fitness -= (target_temp - 1.5 - temp_set) * 5.0
-    # Unnecessary high fan: penalti hanya untuk crowd kecil
+    # Unnecessary high fan: penalty only for small crowd
     if fan_speed >= 3 and abs(temp_room - target_temp) <= 1.0 and person_count < 3:
         fitness -= (fan_speed - 2) * 4.0
-    # Bonus: reward fan maksimum saat crowd >5 (kenyamanan pendinginan maksimal)
+    # Bonus: reward maximum fan when crowd >5 (maximum cooling comfort)
     if person_count > 5 and fan_speed == OPT_FAN_MAX:
         fitness += 12.0
 
-    # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
+    # ── Mode bonus / penalty (max ±10 pts) ────────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
     # DRY  (1): dehumidification — reward when humidity > 65%
     # FAN  (2): no cooling, just air circulation — penalise when hot, reward when mild
@@ -388,21 +390,45 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     elif mode_idx == 3:  # AUTO
         fitness += 3.0  # small neutral bonus
 
+    # ── Set RH fitness (max ±15 pts) ───────────────────────────────────────
+    # Target RH for comfort: 45-55% (ideal 50%)
+    # High humidity (>65%): reward low set_rh + DRY mode → dehumidify
+    # Low humidity (<45%):  reward high set_rh → don't over-dry
+    # Normal (45-55%):      reward set_rh near 50% (comfort zone)
+    if humidity > 65:
+        # High humidity — prefer low RH setpoint to dehumidify
+        ideal_rh = max(OPT_RH_MIN, 30 + int((humidity - 65) / 5) * -2)  # lower as humidity rises
+        ideal_rh = max(OPT_RH_MIN, min(45, 50 - int((humidity - 65) * 0.5)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Strong bonus for DRY mode when humidity is high
+        if mode_idx == 1:  # DRY
+            fitness += min(8.0, (humidity - 65) * 0.5)
+    elif humidity < 45:
+        # Low humidity — prefer higher RH setpoint
+        ideal_rh = min(OPT_RH_MAX, max(55, 50 + int((45 - humidity) * 0.8)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Penalize DRY mode when humidity is already low
+        if mode_idx == 1:
+            fitness -= 5.0
+    else:
+        # Normal humidity — reward set_rh near 50%
+        fitness += _gaussian_score(set_rh, 50, 8.0, 10.0)
+
     return max(0.0, round(fitness, 2))
 
 def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
 
-    Tujuan:
-    1. Lux_avg mendekati 350 lux (target utama)
-    2. Distribusi antar sensor seimbang — tidak boleh ada sensor yang jauh lebih
-       terang atau gelap dari yang lain
-    3. Setiap sensor minimal 200 lux (tidak ada sudut yang terlalu gelap)
+    Goal:
+    1. Lux_avg near 350 lux (main target)
+    2. Balanced distribution between sensors — no sensor should be much
+       brighter or darker than the others
+    3. Each sensor at least 200 lux (no completely dark corners)
 
-    Rumus fitness:
-        error_avg     = (Lux_avg - 350)^2              → kejar target rata-rata
-        error_balance = variance(L1, L2, L3)            → hukum jika tidak merata
-        error_min     = penalty jika ada sensor < 200   → hukum sudut gelap
+    Fitness formula:
+        error_avg     = (Lux_avg - 350)^2              → pursue average target
+        error_balance = variance(L1, L2, L3)            → penalize uneven distribution
+        error_min     = penalty if any sensor < 200     → penalize dark corners
         Fitness = error_avg + w_bal * error_balance + w_min * error_min
 
     Estimasi lux per sensor menggunakan model proporsional berbasis gain aktual.
@@ -412,19 +438,19 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
     lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX  = 350.0 if person_detected else 0.0
-    MIN_LUX     = 200.0  # minimum lux yang diterima per sensor
+    MIN_LUX     = 200.0  # minimum accepted lux per sensor
     W_BALANCE   = 0.5    # bobot penalty distribusi
     W_MIN       = 1.5    # bobot penalty sensor di bawah minimum (lebih ketat)
 
-    # PWM rata-rata saat ini (0-255)
+    # Current average PWM (0-255)
     b1_pct  = float(opt_sensor_data.get('curr_brightness1', 0))
     b2_pct  = float(opt_sensor_data.get('curr_brightness2', 0))
     pwm_now = ((b1_pct + b2_pct) / 2.0) * 255.0 / 100.0
 
-    # PWM kandidat rata-rata
+    # Candidate average PWM
     pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
 
-    # Estimasi lux tiap sensor pada kandidat PWM
+    # Estimated lux per sensor for candidate PWM
     lux_now = (lux1 + lux2 + lux3) / 3.0
     if pwm_now > 5:
         ratio    = pwm_cand / pwm_now
@@ -439,21 +465,21 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
 
     lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
 
-    # 1. Error rata-rata terhadap target
+    # 1. Average error relative to target
     error_avg = (lux_est_avg - TARGET_LUX) ** 2
 
-    # 2. Penalty distribusi: variance antar sensor (seimbang = variance kecil)
+    # 2. Distribution penalty: variance between sensors (balanced = small variance)
     mean_e = lux_est_avg
     variance = ((est_lux1 - mean_e)**2 + (est_lux2 - mean_e)**2 + (est_lux3 - mean_e)**2) / 3.0
     error_balance = variance
 
-    # 3. Penalty sensor di bawah minimum 200 lux
+    # 3. Penalty for sensor below minimum 200 lux
     error_min = 0.0
     for est in [est_lux1, est_lux2, est_lux3]:
         if est < MIN_LUX:
             error_min += (MIN_LUX - est) ** 2
 
-    # Toleransi: fitness = 0 jika avg 315-385 DAN semua sensor >= 200
+    # Tolerance: fitness = 0 if avg 315-385 AND all sensors >= 200
     if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
             and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
         return 0.0
@@ -504,12 +530,12 @@ def _fetch_mysql_power():
         voltage        = float(ac_data.get('voltage')  or 0)
         current        = float(ac_data.get('current')       or 0)
         frequency      = float(ac_data.get('frequency')  or 0)
-        energy_wh      = float(ac_data.get('total_energy') or 0)   # Wh dari PHP
+        energy_wh      = float(ac_data.get('total_energy') or 0)   # Wh from PHP
         pf = round(active_power / apparent_power, 3) if apparent_power > 0.001 else 1.0
         opt_sensor_data['actual_watt']   = active_power
         opt_sensor_data['power_factor']  = pf
         print(f"[OPT] MySQL power: {active_power:.1f}W {voltage:.0f}V {current:.2f}A PF={pf:.2f}")
-        # Tulis semua field ke InfluxDB — agar export CSV energy lengkap
+        # Write all fields to InfluxDB — for complete energy CSV export
         try:
             write_to_influxdb('energy_monitor', {
                 'voltage':      voltage,
@@ -528,15 +554,15 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     # Fetch real power from MySQL energy meter first
     _fetch_mysql_power()
 
-    # --- Prioritas 1: gunakan data MQTT real-time jika tersedia (paling segar) ---
-    # lux di mqtt_data['lamp'] sudah difilter _filter_lux di MQTT callback.
+    # --- Priority 1: use real-time MQTT data if available (freshest) ---
+    # lux di mqtt_data['lamp'] is already filtered by _filter_lux di MQTT callback.
     # Only falls back to InfluxDB if ESP32 not connected (MQTT timeout > 2 minutes).
     mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh if < 2 minutes
     if mqtt_has_lux:
-        # Data MQTT sudah fresh — nilai di mqtt_data['lamp'] sudah melewati _filter_lux
-        # di MQTT callback, jadi langsung sync ke opt_sensor_data tanpa filter ulang.
-        # opt_sensor_data lux sudah diupdate di MQTT callback via update_opt_sensor_data,
-        # tapi kita sync ulang di sini untuk memastikan konsistensi saat PSO membaca.
+        # MQTT data is fresh — value in mqtt_data['lamp'] already passed _filter_lux
+        # in MQTT callback, so sync directly to opt_sensor_data without refiltering.
+        # opt_sensor_data lux is already updated in MQTT callback via update_opt_sensor_data,
+        # but we sync again here to ensure consistency when PSO reads it.
         l1 = float(mqtt_data['lamp'].get('lux1', 0))
         l2 = float(mqtt_data['lamp'].get('lux2', 0))
         l3 = float(mqtt_data['lamp'].get('lux3', 0))
@@ -546,12 +572,12 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
         opt_sensor_data['lux']  = round((l1 + l2 + l3) / 3.0, 1)
         opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
         opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
-        print(f"[OPT] Lux dari MQTT (filtered): L1={l1} L2={l2} L3={l3} "
+        print(f"[OPT] Lux from MQTT (filtered): L1={l1} L2={l2} L3={l3} "
               f"B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
 
     try:
         _, _, query_api = _get_influx_client()
-        # AC: pakai mean() — suhu berubah lambat, rata-rata masih relevan untuk GA
+        # AC: use mean() — temperature changes slowly, average is still relevant for GA
         ac_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                     f' |> range(start: -{time_range_minutes}m)'
                     f' |> filter(fn: (r) => r._measurement == "ac_sensor")'
@@ -564,10 +590,10 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                 elif rec.get_field() == 'humidity' and rec.get_value() is not None:
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
 
-        # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
-        # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
+        # Lux: use last() instead of mean() — light changes fast, latest value is relevant
+        # Only query InfluxDB if MQTT has no data yet (ESP32 not connected)
         # Stale limit: if InfluxDB record older than 10 minutes, ignore to avoid
-        # menimpa opt_sensor_data dengan nilai lama (misal 350 dari sesi sebelumnya).
+        # overwriting opt_sensor_data with old values (e.g., 350 from previous session).
         INFLUX_LAX_STALE_LIMIT_S = 600  # 10 minutes
         if not mqtt_has_lux:
             lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
@@ -584,7 +610,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     val = rec.get_value()
                     if val is None:
                         continue
-                    # Cek umur record — tolak jika terlalu lama (data stale)
+                    # Check record age — reject if too old (stale data)
                     rec_time = rec.get_time()
                     if rec_time is not None:
                         try:
@@ -595,13 +621,13 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                                 print(f"[OPT] InfluxDB {field} diabaikan — usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
                                 continue
                         except Exception:
-                            pass  # jika gagal parse waktu, tetap pakai data
+                            pass  # if time parse fails, still use data
                     if field == 'lux_avg':
                         opt_sensor_data['lux'] = round(float(val), 1)
                         influx_lux_used = True
                     elif field in ('lux1', 'lux2', 'lux3'):
-                        # Lewatkan _filter_lux agar nilai stale dari InfluxDB juga difilter
-                        # brightness=0 karena fallback ini hanya jalan saat MQTT tidak ada
+                        # Skip _filter_lux so stale values from InfluxDB are also filtered
+                        # brightness=0 because this fallback only runs when MQTT is absent
                         sensor_idx = {'lux1': 0, 'lux2': 1, 'lux3': 2}[field]
                         filtered = _filter_lux(float(val), sensor_idx,
                                                brightness1=opt_sensor_data.get('curr_brightness1', 0),
@@ -613,9 +639,9 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     elif field == 'brightness2':
                         opt_sensor_data['curr_brightness2'] = round(float(val), 1)
             if influx_lux_used:
-                print(f"[OPT] Lux dari InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                print(f"[OPT] Lux from InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
             else:
-                print(f"[OPT] InfluxDB lux stale/kosong — pakai opt_sensor_data saat ini: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                print(f"[OPT] InfluxDB lux stale/empty — using current opt_sensor_data: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
 
         opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
@@ -632,21 +658,24 @@ def run_ga_optimization(verbose=False):
     seed_solutions = []
     if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
         seed_mode = last_opt_results['ga'].get('mode_idx', 0)
-        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode])
+        seed_rh = last_opt_results['ga'].get('set_rh', 50)
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode, seed_rh])
 
     def create_ind():
-        # ind = [temp, fan_speed, mode_idx]
+        # ind = [temp, fan_speed, mode_idx, set_rh]
         return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1),
                 random.randint(OPT_FAN_MIN, OPT_FAN_MAX),
-                random.randint(OPT_MODE_MIN, OPT_MODE_MAX)]
+                random.randint(OPT_MODE_MIN, OPT_MODE_MAX),
+                random.randint(OPT_RH_MIN, OPT_RH_MAX)]
 
     population = []
     for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
-        population.append([float(s[0]), int(s[1]), int(s[2])])
+        population.append([float(s[0]), int(s[1]), int(s[2]), int(s[3])])
         if len(population) < pop_size:
             population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
                                max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1]))),
-                               int(s[2])])
+                               int(s[2]),
+                               max(OPT_RH_MIN, min(OPT_RH_MAX, int(s[3]) + random.choice([-5, 0, 0, 5])))])
     while len(population) < pop_size:
         population.append(create_ind())
     population = population[:pop_size]
@@ -657,7 +686,7 @@ def run_ga_optimization(verbose=False):
     prev_best = 0
 
     for gen in range(generations):
-        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
         paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
         population = [p[0] for p in paired]
         scores = [p[1] for p in paired]
@@ -672,7 +701,7 @@ def run_ga_optimization(verbose=False):
         if stagnation_counter >= stagnation_limit:
             for i in range(max(2, pop_size // 4)):
                 population[-(i + 1)] = create_ind()
-            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
             boost = True
             stagnation_counter = 0
         if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
@@ -686,7 +715,7 @@ def run_ga_optimization(verbose=False):
             selected.append(population[best_idx][:])
         while len(next_pop) < pop_size:
             p1, p2 = random.sample(selected, 2)
-            # BLX-alpha crossover for temp; uniform for fan & mode
+            # BLX-alpha crossover for temp and RH; uniform for fan & mode
             if random.random() < crossover_rate:
                 alpha = 0.3
                 lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
@@ -697,7 +726,12 @@ def run_ga_optimization(verbose=False):
                 c2f = p2[1] if random.random() < 0.5 else p1[1]
                 c1m = p1[2] if random.random() < 0.5 else p2[2]
                 c2m = p2[2] if random.random() < 0.5 else p1[2]
-                child1, child2 = [c1t, c1f, c1m], [c2t, c2f, c2m]
+                # BLX-alpha crossover for set_rh
+                rh_lo, rh_hi = min(p1[3], p2[3]), max(p1[3], p2[3])
+                rh_span = rh_hi - rh_lo
+                c1r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                c2r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                child1, child2 = [c1t, c1f, c1m, c1r], [c2t, c2f, c2m, c2r]
             else:
                 child1, child2 = p1[:], p2[:]
             # mutate
@@ -712,27 +746,32 @@ def run_ga_optimization(verbose=False):
                     child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
                 if random.random() < adaptive_rate * 0.5:  # mode mutates less often
                     child[2] = random.randint(OPT_MODE_MIN, OPT_MODE_MAX)
+                if random.random() < adaptive_rate:
+                    rh_step = int((10.0 * (1 - progress) + 2.0) * (2.0 if boost else 1.0))
+                    child[3] = max(OPT_RH_MIN, min(OPT_RH_MAX, child[3] + random.randint(-rh_step, rh_step)))
             next_pop.append(child1)
             if len(next_pop) < pop_size:
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # brute-force validation (temp × fan × mode search)
+    # brute-force validation (temp × fan × mode × rh_samples search)
     bf_best_fit, bf_best_sol = -1, None
+    rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
         for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
             for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
-                fit = calculate_ac_fitness(t, f, m)
-                if fit > bf_best_fit:
-                    bf_best_fit, bf_best_sol = fit, [t, f, m]
+                for rh in rh_samples:
+                    fit = calculate_ac_fitness(t, f, m, rh)
+                    if fit > bf_best_fit:
+                        bf_best_fit, bf_best_sol = fit, [t, f, m, rh]
     if bf_best_fit > best_fitness:
-        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2]]
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2], bf_best_sol[3]]
         best_fitness = bf_best_fit
-    final = [int(round(best_solution[0])), best_solution[1], best_solution[2]]
+    final = [int(round(best_solution[0])), best_solution[1], best_solution[2], best_solution[3]]
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO dengan baca lux real per iterasi.
+    """2D PSO with real lux read per iteration.
 
     Alur per iterasi:
         1. Update kecepatan & posisi semua partikel (di memori)
@@ -776,12 +815,12 @@ def run_pso_optimization(verbose=False):
     g_pos  = pb_pos[g_idx][:]
     g_fit  = pb_fit[g_idx]
 
-    fitness_history = []   # error per iterasi (untuk grafik konvergensi)
-    iteration_log   = []   # {iter, pwm1, pwm2, b1, b2, lux_avg, fitness} untuk grafik detail
+    fitness_history = []   # error per iteration (for convergence chart)
+    iteration_log   = []   # {iter, pwm1, pwm2, b1, b2, lux_avg, fitness} for detail chart
 
     start_time = time.time()
 
-    # ── Phase 5-7: Loop iterasi dengan baca lux nyata ───────────────────────
+    # ── Phase 5-7: Iteration loop with real lux reading ───────────────────────
     for it in range(iterations):
         # Timeout check
         elapsed = time.time() - start_time
@@ -800,13 +839,13 @@ def run_pso_optimization(verbose=False):
                 positions[i][d]  = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
                                        int(round(positions[i][d] + velocities[i][d]))))
 
-        # Tentukan kandidat Gbest dari posisi baru (estimasi)
+        # Determine Gbest candidate from new position (estimation)
         cand_fits      = [calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
                           for i in range(swarm_size)]
         best_cand_idx  = cand_fits.index(min(cand_fits))
         best_cand_pos  = positions[best_cand_idx][:]
 
-        # Send hanya Gbest kandidat ke lampu — satu kali per iterasi
+        # Send only Gbest candidate to lamp — once per iteration
         b1_send = round(best_cand_pos[0] * 100.0 / 255.0, 1)
         b2_send = round(best_cand_pos[1] * 100.0 / 255.0, 1)
         b1_send, b2_send = _safe_lamp_brightness(b1_send, b2_send)
@@ -815,7 +854,7 @@ def run_pso_optimization(verbose=False):
             json.dumps({'brightness1': b1_send, 'brightness2': b2_send, 'source': 'pso_iter'})
         )
 
-        # Emit progress iterasi ke dashboard secara real-time
+        # Emit iteration progress to dashboard in real-time
         socketio.emit('pso_iter_progress', {
             'iter': it + 1,
             'pwm1': best_cand_pos[0], 'pwm2': best_cand_pos[1],
@@ -842,7 +881,7 @@ def run_pso_optimization(verbose=False):
 
         print(f"[PSO] Lux nyata={lux_real} | fitness={real_fit} | target={TARGET_LUX:.0f}")
 
-        # Catat log iterasi untuk grafik dashboard
+        # Record iteration log for dashboard chart
         log_entry = {
             'iter':    it + 1,
             'pwm1':    best_cand_pos[0],
@@ -858,7 +897,7 @@ def run_pso_optimization(verbose=False):
         iteration_log.append(log_entry)
         fitness_history.append(real_fit)
 
-        # Emit hasil iterasi ke dashboard (update grafik live)
+        # Emit iteration result to dashboard (update live chart)
         socketio.emit('pso_iter_progress', {**log_entry, 'status': 'done'})
 
         # Update Pbest
@@ -881,7 +920,7 @@ def run_pso_optimization(verbose=False):
                       f"L1={lux1_r} L2={lux2_r} L3={lux3_r} semua ≥200")
                 break
             else:
-                print(f"[PSO] Lux avg={lux_real} dalam target tapi ada sensor < 200 "
+                print(f"[PSO] Lux avg={lux_real} in target but some sensor < 200 "
                       f"(L1={lux1_r} L2={lux2_r} L3={lux3_r}) — lanjut iterasi")
 
     elapsed_total = time.time() - start_time
@@ -902,9 +941,11 @@ def run_optimization_cycle(algo='both'):
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
             mode_idx = sol[2] if len(sol) > 2 else 0
+            opt_set_rh = sol[3] if len(sol) > 3 else 50
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
+                'set_rh': opt_set_rh,
                 'stats': hist, 'brute_force': bf,
                 'initial_fitness': round(hist[0], 2) if hist else 0,
                 'final_fitness': round(fit, 2),
@@ -924,14 +965,14 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
-            sol, fit, hist, initial_err = run_pso_optimization()
-            # sol adalah PWM 0-255 langsung dari algoritma
+            sol, fit, hist, initial_err, iter_log = run_pso_optimization()
+            # sol is PWM 0-255 directly from algorithm
             pwm1_val = int(round(min(255, max(0, sol[0]))))
             pwm2_val = int(round(min(255, max(0, sol[1]))))
-            # Konversi ke brightness % untuk MQTT/ESP32
+            # Convert to brightness % for MQTT/ESP32
             b1 = round(pwm1_val * 100 / 255)
             b2 = round(pwm2_val * 100 / 255)
             # Estimate achieved lux from optimal brightness
@@ -940,13 +981,13 @@ def run_optimization_cycle(algo='both'):
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            # lux_achieved: rata-rata SENSOR NYATA L1+L2+L3 (bukan estimasi model)
+            # lux_achieved: average REAL SENSOR L1+L2+L3 (not model estimation)
             lux_achieved = round((lux1 + lux2 + lux3) / 3.0, 1)
             last_opt_results['pso'] = {
                 'fitness': fit,
-                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
-                'brightness': int((b1 + b2) / 2),           # rata-rata brightness % untuk referensi
-                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 untuk MQTT/ESP32
+                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # raw PWM value 0-255 from algorithm
+                'brightness': int((b1 + b2) / 2),           # average brightness % for reference
+                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 for MQTT/ESP32
                 'stats': hist,
                 'initial_error': round(initial_err, 2),
                 'final_error': round(fit, 2),
@@ -972,6 +1013,7 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'ga_set_rh': last_opt_results['ga'].get('set_rh', 50),
             'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
             'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
@@ -988,13 +1030,14 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
+            'ga_set_rh': float(last_opt_results['ga'].get('set_rh', 50)),
             'pso_pwm1': float(last_opt_results['pso'].get('pwm1', 0)),
             'pso_pwm2': float(last_opt_results['pso'].get('pwm2', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
-            # combined_fitness: GA maximize, PSO minimize — PSO fitness sudah dalam % (0-100)
+            # combined_fitness: GA maximize, PSO minimize — PSO fitness is already in % (0-100)
             'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
                                 + max(0.0, 100.0 - float(last_opt_results['pso']['fitness'])) * 0.5
         })
@@ -1004,6 +1047,7 @@ def run_optimization_cycle(algo='both'):
             opt_temp = last_opt_results['ga']['temp']
             opt_fan  = last_opt_results['ga']['fan']
             opt_mode = last_opt_results['ga'].get('mode', 'COOL')
+            opt_rh   = last_opt_results['ga'].get('set_rh', 50)
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 now = time.time()
                 temp_changed = abs(int(opt_temp) - _last_sent_ac_temp) >= AC_CHANGE_THRESHOLD_TEMP
@@ -1012,10 +1056,15 @@ def run_optimization_cycle(algo='both'):
                     _last_adaptive_ac_apply = now
                     _last_sent_ac_temp = int(opt_temp)
                     _last_sent_ac_fan  = int(opt_fan)
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        # Catatan: Auto-apply lamp PSO TIDAK dilakukan di sini.
-        # Apply PWM lampu dikendalikan sepenuhnya oleh _pso_lamp_cycle()
+                    # Update local state
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    mqtt_data['ac']['ac_fan_mode'] = opt_mode
+                    print(f"  [GA→AC] Applied: {int(opt_temp)}°C Fan={int(opt_fan)} Mode={opt_mode} RH={int(opt_rh)}%")
+        # Note: Auto-apply lamp PSO is NOT done here.
+        # Apply lamp PWM controlled fully by _pso_lamp_cycle()
         # agar urutan Baca→Hitung→Send→Tunggu→Baca tetap terjaga.
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
@@ -1031,7 +1080,8 @@ def run_optimization_cycle(algo='both'):
                 'temperature': last_opt_results['ga']['temp'],
                 'fan_speed': last_opt_results['ga']['fan'],
                 'mode': last_opt_results['ga'].get('mode', 'COOL'),
-                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0),
+                'set_rh': last_opt_results['ga'].get('set_rh', 50)
             }
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
@@ -1047,9 +1097,102 @@ def run_optimization_cycle(algo='both'):
 
 # ==================== PERSIST & RESTORE OPT RESULTS ====================
 OPT_PERSIST_MEASUREMENT = 'opt_results'  # InfluxDB measurement name
+OPT_RESULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'opt_results.json')
+
+def save_opt_results_file():
+    """Save last_opt_results (including stats/history arrays) to JSON file.
+    This supplements InfluxDB persistence which cannot store arrays.
+    Called after every GA or PSO completion."""
+    try:
+        ga = last_opt_results.get('ga', {})
+        pso = last_opt_results.get('pso', {})
+        payload = {
+            'ga': {
+                'fitness':         ga.get('fitness', 0),
+                'temp':            ga.get('temp', 0),
+                'fan':             ga.get('fan', 0),
+                'mode_idx':        ga.get('mode_idx', 0),
+                'mode':            ga.get('mode', 'COOL'),
+                'initial_fitness': ga.get('initial_fitness', 0),
+                'final_fitness':   ga.get('final_fitness', 0),
+                'run_time':        ga.get('run_time', ''),
+                'stats':           ga.get('stats', []),
+                'params':          ga.get('params', {}),
+                'sensor_snapshot': ga.get('sensor_snapshot', {}),
+            },
+            'pso': {
+                'fitness':       pso.get('fitness', 0),
+                'pwm1':          pso.get('pwm1', 0),
+                'pwm2':          pso.get('pwm2', 0),
+                'brightness':    pso.get('brightness', 0),
+                'brightness1':   pso.get('brightness1', 0),
+                'brightness2':   pso.get('brightness2', 0),
+                'initial_error': pso.get('initial_error', 0),
+                'final_error':   pso.get('final_error', 0),
+                'lux_achieved':  pso.get('lux_achieved', 0),
+                'target_lux':    pso.get('target_lux', 350.0),
+                'run_time':      pso.get('run_time', ''),
+                'stats':         pso.get('stats', []),
+                'iteration_log': pso.get('iteration_log', []),
+                'params':        pso.get('params', {}),
+            },
+            'saved_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        dir_path = os.path.dirname(OPT_RESULTS_FILE)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as fh:
+                json.dump(payload, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+        os.replace(tmp_path, OPT_RESULTS_FILE)
+    except Exception as e:
+        print(f"[PERSIST] save_opt_results_file failed: {e}")
+
+def load_opt_results_file():
+    """Load last_opt_results from JSON file on startup.
+    Restores stats/history arrays that InfluxDB cannot store."""
+    if not os.path.exists(OPT_RESULTS_FILE):
+        return False
+    try:
+        with open(OPT_RESULTS_FILE, 'r') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        ga_data  = data.get('ga', {})
+        pso_data = data.get('pso', {})
+        if ga_data and ga_data.get('fitness', 0) > 0:
+            last_opt_results['ga'].update(ga_data)
+            mqtt_data['system']['ga_fitness']  = ga_data.get('fitness', 0)
+            mqtt_data['system']['ga_temp']     = ga_data.get('temp', 0)
+            mqtt_data['system']['ga_fan']      = ga_data.get('fan', 0)
+            mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
+            mqtt_data['system']['ga_set_rh']   = ga_data.get('set_rh', 50)
+            mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
+            print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
+                  f"fitness={ga_data.get('fitness',0):.2f} stats={len(ga_data.get('stats',[]))} pts")
+        if pso_data and (pso_data.get('brightness1', 0) > 0 or pso_data.get('fitness', 0) > 0):
+            last_opt_results['pso'].update(pso_data)
+            mqtt_data['system']['pso_fitness']     = pso_data.get('fitness', 0)
+            mqtt_data['system']['pso_pwm1']        = pso_data.get('pwm1', 0)
+            mqtt_data['system']['pso_pwm2']        = pso_data.get('pwm2', 0)
+            mqtt_data['system']['pso_brightness']   = pso_data.get('brightness', 0)
+            mqtt_data['system']['pso_brightness1']  = pso_data.get('brightness1', 0)
+            mqtt_data['system']['pso_brightness2']  = pso_data.get('brightness2', 0)
+            mqtt_data['system']['pso_history']      = pso_data.get('stats', [])
+            print(f"  [RESTORE-FILE] PSO: PWM1={pso_data.get('pwm1')}/255 PWM2={pso_data.get('pwm2')}/255 "
+                  f"stats={len(pso_data.get('stats',[]))} pts iter_log={len(pso_data.get('iteration_log',[]))} entries")
+        return True
+    except Exception as e:
+        print(f"  [RESTORE-FILE] load_opt_results_file failed: {e}")
+        return False
 
 def persist_opt_results(algo):
-    """Write current GA or PSO results to InfluxDB so they survive restarts."""
+    """Write current GA or PSO results to InfluxDB so they survive restarts.
+    Also saves full results (including stats arrays) to JSON file."""
     try:
         if algo == 'ga':
             ga = last_opt_results['ga']
@@ -1060,9 +1203,11 @@ def persist_opt_results(algo):
                 'temp':             float(ga.get('temp', 0)),
                 'fan':              float(ga.get('fan', 0)),
                 'mode_idx':         float(ga.get('mode_idx', 0)),
+                'set_rh':           float(ga.get('set_rh', 50)),
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
+                'ga_stats_json':    json.dumps(ga.get('stats', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'ga', 'version': '1'})
@@ -1082,14 +1227,20 @@ def persist_opt_results(algo):
                 'lux_achieved':   float(pso.get('lux_achieved', 0)),
                 'target_lux':     float(pso.get('target_lux', 350.0)),
                 'run_time':       str(pso.get('run_time', '')),
+                'pso_stats_json':    json.dumps(pso.get('stats', [])),
+                'pso_iterlog_json':  json.dumps(pso.get('iteration_log', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'pso', 'version': '1'})
+        # Also save full results (with stats arrays) to JSON file
+        save_opt_results_file()
     except Exception as e:
         print(f"[PERSIST] Error saving {algo} results: {e}")
 
 def restore_opt_results():
-    """Read the latest GA and PSO results from InfluxDB on startup."""
+    """Read the latest GA and PSO results from InfluxDB on startup.
+    NOTE: InfluxDB does not store stats/history arrays. If load_opt_results_file()
+    already loaded stats from JSON, we preserve them here (don't overwrite with [])."""
     try:
         _, _, query_api = _get_influx_client()
         for algo in ('ga', 'pso'):
@@ -1104,25 +1255,58 @@ def restore_opt_results():
             if not rec_map:
                 continue
             if algo == 'ga' and rec_map.get('fitness', 0) > 0:
+                # Try to restore stats from InfluxDB JSON field
+                restored_stats = []
+                if rec_map.get('ga_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['ga_stats_json'])
+                    except Exception:
+                        pass
+                # Preserve stats already loaded from JSON file, or use InfluxDB stats
+                existing_stats = last_opt_results['ga'].get('stats', [])
                 last_opt_results['ga'].update({
                     'fitness':          float(rec_map.get('fitness', 0)),
                     'temp':             int(rec_map.get('temp', 0)),
                     'fan':              int(rec_map.get('fan', 0)),
                     'mode_idx':         int(rec_map.get('mode_idx', 0)),
                     'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'set_rh':           int(rec_map.get('set_rh', 50)),
                     'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
-                    'stats':            [],  # history not stored (too large)
                 })
-                mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
-                mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
-                mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
-                mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
-                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['ga']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['ga']['stats'] = restored_stats
+                else:
+                    last_opt_results['ga']['stats'] = []
+                mqtt_data['system']['ga_fitness']  = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_temp']     = last_opt_results['ga']['temp']
+                mqtt_data['system']['ga_fan']      = last_opt_results['ga']['fan']
+                mqtt_data['system']['ga_mode']     = last_opt_results['ga']['mode']
+                mqtt_data['system']['ga_set_rh']   = last_opt_results['ga'].get('set_rh', 50)
+                mqtt_data['system']['ga_history']  = last_opt_results['ga'].get('stats', [])
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} Mode={last_opt_results['ga']['mode']} RH={last_opt_results['ga'].get('set_rh',50)}% fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
+                # Try to restore stats from InfluxDB JSON fields
+                restored_stats = []
+                restored_iter_log = []
+                if rec_map.get('pso_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['pso_stats_json'])
+                    except Exception:
+                        pass
+                if rec_map.get('pso_iterlog_json'):
+                    try:
+                        restored_iter_log = json.loads(rec_map['pso_iterlog_json'])
+                    except Exception:
+                        pass
+                existing_stats = last_opt_results['pso'].get('stats', [])
+                existing_iter_log = last_opt_results['pso'].get('iteration_log', [])
                 last_opt_results['pso'].update({
                     'fitness':       float(rec_map.get('fitness', 0)),
                     'pwm1':          int(rec_map.get('pwm1', round(b1_restored * 255 / 100))),
@@ -1135,15 +1319,28 @@ def restore_opt_results():
                     'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
                     'target_lux':    float(rec_map.get('target_lux', 350.0)),
                     'run_time':      str(rec_map.get('run_time', '')),
-                    'stats':         [],
                 })
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['pso']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['pso']['stats'] = restored_stats
+                else:
+                    last_opt_results['pso']['stats'] = []
+                if existing_iter_log:
+                    last_opt_results['pso']['iteration_log'] = existing_iter_log
+                elif restored_iter_log:
+                    last_opt_results['pso']['iteration_log'] = restored_iter_log
+                else:
+                    last_opt_results['pso']['iteration_log'] = []
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
                 mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
                 mqtt_data['system']['pso_pwm2']       = last_opt_results['pso']['pwm2']
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
-                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
+                mqtt_data['system']['pso_history']     = last_opt_results['pso'].get('stats', [])
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f} stats={len(last_opt_results['pso']['stats'])} pts")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
 
@@ -1195,7 +1392,7 @@ def sensor_fault_loop():
                     print(msg)
                 elif lvl == 'ok' and prev != 'ok':
                     # Recovery
-                    msg = f'[SENSOR OK] {dev_label} kembali online'
+                    msg = f'[SENSOR OK] {dev_label} back online'
                     socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': 'ok', 'age': age_str})
                     socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
@@ -1209,7 +1406,7 @@ def sensor_fault_loop():
         time.sleep(60)
 
 def _pso_lamp_cycle():
-    """Satu siklus penuh PSO lampu dengan urutan:
+    """One full lamp PSO cycle with sequence:
         1. Baca lux sekarang
         2. PSO hitung PWM baru
         3. Send PWM ke lampu
@@ -1220,8 +1417,8 @@ def _pso_lamp_cycle():
     """
     global _pso_locked, _pso_lock_pwm
 
-    # ── Langkah 1: Baca lux sekarang ─────────────────────────────────────────
-    # Paksa refresh opt_sensor_data dari MQTT/InfluxDB sebelum membaca nilai lux
+    # ── Step 1: Baca lux sekarang ─────────────────────────────────────────
+    # Force refresh opt_sensor_data from MQTT/InfluxDB before reading lux value
     fetch_sensor_data_from_db()
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
     lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
@@ -1230,7 +1427,7 @@ def _pso_lamp_cycle():
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
     mode_now = mqtt_data['lamp'].get('mode', 'MANUAL')
 
-    print(f"[PSO] Siklus baru — Lux avg={lux_avg:.1f} | Person={'ya' if person_now else 'tidak'} | Mode={mode_now}")
+    print(f"[PSO] New cycle — Lux avg={lux_avg:.1f} | Person={'yes' if person_now else 'no'} | Mode={mode_now}")
 
     # Hanya jalan di mode ADAPTIVE
     if mode_now != 'ADAPTIVE':
@@ -1255,9 +1452,9 @@ def _pso_lamp_cycle():
             print(f"[PSO] No persons — lamps already off, PSO stopped")
         return False
 
-    # ── Evaluasi lux saat ini terhadap target ─────────────────────────────────
-    # Di sini person_now sudah pasti True (sudah dicek di atas)
-    # Konvergen jika: lux avg 315-385 DAN semua sensor >= 200 lux
+    # ── Evaluate current lux against target ─────────────────────────────────
+    # Here person_now is definitely True (already checked above)
+    # Converged if: lux avg 315-385 AND all sensors >= 200 lux
     lux_in_range = (315.0 <= lux_avg <= 385.0
                     and lux1 >= 200.0 and lux2 >= 200.0 and lux3 >= 200.0)
 
@@ -1267,16 +1464,16 @@ def _pso_lamp_cycle():
             _pso_lock_pwm[1] = mqtt_data['lamp'].get('brightness2', 0)
             _pso_locked = True
         print(f"[PSO] Lux {lux_avg:.1f} dalam toleransi — brightness dikunci "
-              f"(B1={_pso_lock_pwm[0]}% B2={_pso_lock_pwm[1]}%), tidak ada perubahan PWM")
-        return False  # tidak perlu lanjut ke langkah 2-3
+              f"(B1={_pso_lock_pwm[0]}% B2={_pso_lock_pwm[1]}%), no PWM change")
+        return False  # no need to proceed to steps 2-3
 
     # Lux di luar target — buka kunci
     _pso_locked = False
     _pso_lock_pwm[0] = None
     _pso_lock_pwm[1] = None
-    print(f"[PSO] Lux {lux_avg:.1f} di luar 315-385 — lanjut ke hitung PWM")
+    print(f"[PSO] Lux {lux_avg:.1f} outside 315-385 — proceeding to calculate PWM")
 
-    # ── Langkah 2: PSO — hitung PWM, kirim per iterasi, stop jika konvergen ──
+    # ── Step 2: PSO — calculate PWM, send per iteration, stop if converged ──
     g_pos, g_fit, fitness_history, initial_err, iteration_log = run_pso_optimization()
     pwm1_val = int(g_pos[0])
     pwm2_val = int(g_pos[1])
@@ -1285,7 +1482,7 @@ def _pso_lamp_cycle():
     b_avg = round((b1 + b2) / 2.0, 1)
     target_lux = 350.0 if person_now else 0.0
 
-    # Save hasil PSO termasuk iteration_log untuk grafik dashboard
+    # Save PSO results including iteration_log for dashboard chart
     last_opt_results['pso'].update({
         'brightness': b_avg, 'brightness1': b1, 'brightness2': b2,
         'pwm1': pwm1_val, 'pwm2': pwm2_val,
@@ -1303,21 +1500,21 @@ def _pso_lamp_cycle():
         },
     })
 
-    # ── Langkah 3: Send Gbest final ke lampu ────────────────────────────────
-    # PSO sudah mengirim Gbest di setiap iterasi. Langkah ini memastikan
-    # lampu berada di posisi Gbest terbaik setelah semua iterasi selesai.
+    # ── Step 3: Send final Gbest to lamp ────────────────────────────────
+    # PSO already sends Gbest in each iteration. This step ensures
+    # lamp is at the best Gbest position after all iterations complete.
     opt_b1, opt_b2 = _safe_lamp_brightness(b1, b2)
     mqtt_client.publish(
         'smartroom/lamp/control',
         json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive_final'})
     )
-    # Sinkron mqtt_data['lamp'] langsung — jangan tunggu MQTT balik dari ESP32
+    # Sync mqtt_data['lamp'] directly — don't wait for MQTT back from ESP32
     # agar Lamp Dashboard brightness terupdate segera
     mqtt_data['lamp']['brightness1']    = opt_b1
     mqtt_data['lamp']['brightness2']    = opt_b2
     mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
     _record_lamp_apply(opt_b1, opt_b2)
-    # Emit ke semua client agar Lamp Dashboard dan ML Optimization sinkron seketika
+    # Emit to all clients so Lamp Dashboard and ML Optimization sync instantly
     socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
     print(f"[PSO] Gbest final dikirim — B1={opt_b1}% B2={opt_b2}% | fitness={g_fit:.2f}")
 
@@ -1354,7 +1551,7 @@ def _pso_lamp_cycle():
 
     # ── Step 4 & 5: Wait 5 minutes then read new lux ────────────────────
     # The 5 minute wait is controlled by optimization_auto_loop via last_pso_time.
-    # Pembacaan lux baru otomatis terjadi saat siklus berikutnya dipanggil (Langkah 1).
+    # New lux reading automatically occurs when next cycle is called (Step 1).
     print(f"[PSO] Done — waiting 5 minutes, new lux will be read in next cycle")
 
     # Cek apakah PSO berhasil konvergen (lux akhir dalam toleransi)
@@ -1366,7 +1563,7 @@ def _pso_lamp_cycle():
     converged = (315.0 <= lux_final <= 385.0
                  and lux1_f >= 200.0 and lux2_f >= 200.0 and lux3_f >= 200.0)
     print(f"[PSO] Lux akhir={lux_final:.1f} (L1={lux1_f} L2={lux2_f} L3={lux3_f}) "
-          f"— {'KONVERGEN' if converged else 'BELUM konvergen, akan ulang'}")
+          f"— {'CONVERGED' if converged else 'NOT converged, will retry'}")
     return converged
 
 
@@ -1375,7 +1572,7 @@ def optimization_auto_loop():
     PSO lamp:
       - If lux is within 315-385: wait 5 minutes then check again
       - If lux not at target: immediately retry PSO without waiting 5 minutes
-    GA dan PSO tidak pernah jalan bersamaan."""
+    GA and PSO never run simultaneously."""
     time.sleep(10)
     print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
     last_ga_time  = 0
@@ -1390,7 +1587,7 @@ def optimization_auto_loop():
                 run_optimization_cycle('ga')
                 last_ga_time = time.time()
             elif run_pso:
-                # Beri sinyal ke dashboard bahwa siklus PSO baru dimulai
+                # Signal dashboard that a new PSO cycle has started
                 socketio.emit('pso_iter_progress', {'status': 'new_cycle'})
                 converged = _pso_lamp_cycle()
                 now_after = time.time()
@@ -1399,11 +1596,11 @@ def optimization_auto_loop():
                     last_pso_time = now_after
                     print(f"[PSO] Konvergen — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
                 else:
-                    # Lux belum di target (atau mode bukan ADAPTIVE) —
-                    # cek apakah memang karena sudah di target (_pso_locked)
-                    # atau karena belum konvergen
+                    # Lux not at target (or mode is not ADAPTIVE) —
+                    # check if it's because already at target (_pso_locked)
+                    # or because not converged
                     if _pso_locked:
-                        # Sudah di target, kunci aktif — tunggu normal
+                        # Already at target, lock active — wait normal
                         last_pso_time = now_after
                         print(f"[PSO] Lux dikunci dalam target — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
                     else:
@@ -1455,39 +1652,39 @@ _latest_frame_bytes = None
 _latest_frame_lock = threading.Lock()
 _detection_thread_running = False
 
-# Lamp apply: tidak ada kalibrasi gain EMA (sesuai dokumen spesifikasi)
-_pending_calibration = None  # tidak dipakai, dipertahankan untuk kompatibilitas referensi
+# Lamp apply: no EMA gain calibration (according to specification doc)
+_pending_calibration = None  # not used, kept for reference compatibility
 
 # ── Filter BH1750: validasi + EMA smoothing ───────────────────────────────────
-# BH1750 kadang menghasilkan spike tinggi (ratusan/ribuan lux) saat kondisi gelap
-# akibat I2C noise atau pembacaan sebelum konversi selesai. Filter ini mencegah
-# nilai anomali masuk ke PSO dan InfluxDB.
+# BH1750 sometimes produces high spikes (hundreds/thousands lux) in dark conditions
+# due to I2C noise or reading before conversion completes. This filter prevents
+# anomaly values from entering PSO and InfluxDB.
 LUX_MAX_PHYSICAL   = 65535.0  # batas hardware BH1750 (16-bit)
 LUX_SPIKE_RATIO    = 5.0      # bacaan > 5x EMA sebelumnya dianggap spike
-LUX_DARK_THRESHOLD = 10.0     # jika brightness1=brightness2=0, lux harusnya < ini
+LUX_DARK_THRESHOLD = 10.0     # if brightness1=brightness2=0, lux should be < this
 LUX_EMA_ALPHA      = 0.3      # bobot data baru dalam smoothing (0=ignore, 1=raw)
-# EMA state per sensor (None = belum diinisialisasi, pakai raw pertama kali)
+# EMA state per sensor (None = not initialized, use raw for first time)
 _lux_ema = [None, None, None]  # [L1_ema, L2_ema, L3_ema]
 
-# ── PWM lock: jangan ubah brightness jika lux sudah di target ────────────────
-_pso_locked = False   # True = lux in range, PWM dikunci, PSO tidak apply
-_pso_lock_pwm = [None, None]  # [b1%, b2%] yang dikunci
+# ── PWM lock: don't change brightness if lux already at target ────────────────
+_pso_locked = False   # True = lux in range, PWM locked, PSO does not apply
+_pso_lock_pwm = [None, None]  # [b1%, b2%] locked
 
 def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
-    """Validasi pembacaan BH1750 yang diterima dari ESP32.
+    """Validate BH1750 reading received from ESP32.
 
     ESP32 sudah menjalankan: raw -> kalibrasi -> median filter (5 sampel).
-    Raspi TIDAK menerapkan EMA lagi agar tidak terjadi double-smoothing yang
+    Raspi DOES NOT apply EMA again to prevent double-smoothing that
     menyebabkan nilai dashboard berbeda jauh dari Serial Monitor ESP32.
 
     Raspi hanya melakukan:
-    1. Batas fisik: nilai negatif atau > 65535 -> pakai nilai terakhir valid.
+    1. Physical bounds: negative value or > 65535 -> use last valid value.
     2. Ghost lux: lampu OFF tapi sensor baca tinggi -> kembalikan 0.
        - Grace period 8 seconds after PSO sends brightness=0.
     3. Spike detection: nilai > LUX_SPIKE_RATIO x referensi -> buang.
        Referensi = nilai valid terakhir (bukan EMA).
     """
-    global _lux_ema  # dipakai sebagai "nilai valid terakhir", bukan EMA
+    global _lux_ema  # used as "last valid value", not EMA
     raw = float(raw_val)
 
     # 1. Batas fisik BH1750 (16-bit)
@@ -1496,32 +1693,32 @@ def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
 
     lamp_is_off = (brightness1 <= 0 and brightness2 <= 0)
 
-    # 2. Ghost lux saat lampu mati
-    # PENTING: lamp_is_off TIDAK berarti ruangan gelap — bisa ada cahaya alami (sinar matahari, dll).
-    # Kita hanya curiga ghost lux jika:
-    # - Value JAUH lebih tinggi dari referensi sebelumnya (spike besar saat lampu baru mati)
-    # - DAN masih dalam grace period (lampu baru saja dimatikan)
+    # 2. Ghost lux when lamp is off
+    # IMPORTANT: lamp_is_off DOES NOT mean room is dark — there could be natural light (sunlight, etc.).
+    # We only suspect ghost lux if:
+    # - Value is MUCH higher than previous reference (large spike when lamp just turned off)
+    # - AND still within grace period (lamp just turned off)
     if lamp_is_off:
         time_since_apply = time.time() - _last_adaptive_lamp_apply
         in_grace = time_since_apply < 8.0
 
         if in_grace and raw > LUX_DARK_THRESHOLD:
-            # Dalam grace period: sensor mungkin masih membaca sisa cahaya lampu
-            # Pertahankan referensi lama sampai lampu benar-benar padam
+            # In grace period: sensor might still read residual lamp light
+            # Keep old reference until lamp is fully dark
             if _lux_ema[sensor_idx] is not None:
                 return round(_lux_ema[sensor_idx], 1)
             return round(raw, 1)
-        # Setelah grace period: terima nilai apa adanya — bisa saja ada cahaya alami
-        # Tidak reset ke 0 secara otomatis, biarkan spike detection yang menentukan
+        # After grace period: accept value as is — there might be natural light
+        # Do not reset to 0 automatically, let spike detection handle it
 
-    # 3. Spike detection: buang jika jauh melebihi referensi terakhir
+    # 3. Spike detection: discard if far exceeds last reference
     if _lux_ema[sensor_idx] is not None and _lux_ema[sensor_idx] > 5.0:
         if raw > _lux_ema[sensor_idx] * LUX_SPIKE_RATIO:
             print(f"[LUX_FILTER] L{sensor_idx+1}: spike {raw:.1f} lx "
                   f"(ref={_lux_ema[sensor_idx]:.1f}) -> dibuang")
             return round(_lux_ema[sensor_idx], 1)
 
-    # Lolos semua cek — simpan sebagai referensi terakhir dan kembalikan langsung
+    # Passed all checks — save as last reference and return directly
     _lux_ema[sensor_idx] = raw
     return round(raw, 1)
 
@@ -1539,7 +1736,7 @@ LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — sesuai interval PSO dokumen
 
 # Global data storage
 mqtt_data = {
-    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
+    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'set_rh': 50, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
@@ -1570,10 +1767,10 @@ lamp_runtime_history = deque(maxlen=5000)
 
 # InfluxDB write throttle — save every 6 minutes so database does not fill up
 INFLUX_WRITE_INTERVAL = 360  # seconds (6 minutes)
-_last_sensor_influx_ts   = 0.0   # kapan terakhir ac_sensor ditulis ke InfluxDB
-_last_lamp_influx_ts     = 0.0   # kapan terakhir lamp_sensor ditulis ke InfluxDB
+_last_sensor_influx_ts   = 0.0   # when last ac_sensor written to InfluxDB
+_last_lamp_influx_ts     = 0.0   # when last lamp_sensor written to InfluxDB
 _last_lamp_mqtt_ts       = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
-_last_ac_energy_influx_ts = 0.0  # kapan terakhir energy AC ditulis ke InfluxDB
+_last_ac_energy_influx_ts = 0.0  # when last AC energy written to InfluxDB
 
 # ==================== INFLUXDB SINGLETON ====================
 # One persistent client + write_api shared across all threads.
@@ -1656,6 +1853,12 @@ def save_sensor_data(temperature, humidity, heat_index,
             'temp1': float(temp1), 'hum1': float(hum1),
             'temp2': float(temp2), 'hum2': float(hum2),
             'temp3': float(temp3), 'hum3': float(hum3),
+            'ac_temp': float(mqtt_data['ac'].get('ac_temp', 0)),
+            'fan_speed': int(mqtt_data['ac'].get('fan_speed', 0)),
+            'ac_fan_mode': str(mqtt_data['ac'].get('ac_fan_mode', '')),
+            'mode': str(mqtt_data['ac'].get('mode', '')),
+            'set_rh': int(mqtt_data['ac'].get('set_rh', 50)),
+            'ac_state': str(mqtt_data['ac'].get('ac_state', 'OFF')),
         }, tags={'device': 'esp32_ac', 'location': 'room'})
     except Exception as e:
         print(f'[ERROR] save_sensor_data: {e}')
@@ -1675,7 +1878,7 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
                 'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
                 'motion': bool(motion)
             }, tags={'device': 'esp32_lamp', 'location': 'room'})
-        # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
+        # Estimate lamp energy from brightness (no PZEM on ESP32 Lamp)
         now_ts = time.time()
         lamp_power = round((bright_avg / 100.0) * LAMP_RATED_WATT, 2)
         lamp_current = round(lamp_power / LAMP_VOLTAGE, 3) if lamp_power > 0 else 0.0
@@ -1815,7 +2018,7 @@ def _person_present_recently_lamp():
     return time_confirmed or currently_detected
 
 def _safe_lamp_brightness(b1, b2):
-    """Pastikan nilai brightness tidak negatif."""
+    """Ensure brightness value is not negative."""
     return max(0, int(b1)), max(0, int(b2))
 
 def _should_apply_lamp(b1, b2):
@@ -1827,7 +2030,7 @@ def _should_apply_lamp(b1, b2):
     return True
 
 def _record_lamp_apply(b1, b2):
-    """Catat waktu terakhir apply brightness ke lampu.
+    """Record last time brightness was applied to lamp.
     Jika brightness=0 (lampu dimatikan), schedule EMA reset setelah grace period
     agar filter langsung siap menerima lux=0 tanpa drift lambat.
     """
@@ -1835,13 +2038,13 @@ def _record_lamp_apply(b1, b2):
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
-    # Jika lampu dimatikan, reset EMA sekarang ke nilai rendah agar
+    # If lamp is turned off, reset EMA now to low value so
     # after 8 second grace period, ghost lux detected with exact threshold.
     if int(b1) == 0 and int(b2) == 0:
         for i in range(3):
             if _lux_ema[i] is not None and _lux_ema[i] > LUX_DARK_THRESHOLD:
-                # Set ke nilai batas, bukan 0, agar spike detection masih bekerja
-                # kalau ada cahaya alami yang sebenarnya masuk ke ruangan
+                # Set to threshold value, not 0, so spike detection still works
+                # in case real natural light enters the room
                 _lux_ema[i] = LUX_DARK_THRESHOLD
 
 # ==================== SMART PERSON-BASED CONTROL ====================
@@ -2118,6 +2321,9 @@ def camera_detection_loop():
             
             mqtt_data['camera']['status'] = 'active'
             camera_fail_count = 0  # Reset on successful frame
+            # Update device_last_seen so sensor fault detection shows 'Online'
+            device_last_seen['camera']['last_seen'] = datetime.now()
+            device_last_seen['camera']['status'] = 'online'
             frame_count += 1
             
             # Run YOLO only every Nth frame — other frames reuse last detection
@@ -2305,6 +2511,7 @@ def on_message(client, userdata, msg):
                 'ac_state': payload.get('ac_state', 'OFF'),
                 'ac_temp': payload.get('ac_temp', 24),
                 'fan_speed': payload.get('fan_speed', 1),
+                'set_rh': payload.get('set_rh', 50),
                 'ac_mode': payload.get('ac_mode', 'ADAPTIVE'),
                 'ac_fan_mode': payload.get('ac_fan_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
@@ -2442,13 +2649,16 @@ def on_message(client, userdata, msg):
                 opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
                 opt_fan  = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
                 opt_mode = ga_sol.get('mode', 'COOL')
+                opt_rh   = ga_sol.get('set_rh', 50)
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                     global _last_adaptive_ac_apply
                     now = time.time()
                     if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                         _last_adaptive_ac_apply = now
-                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                                  'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                        mqtt_data['ac']['set_rh'] = int(opt_rh)
             # AUTO-APPLY Lamp — only if pso_solution was present in this payload
             if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
                 opt_b1, opt_b2 = _safe_lamp_brightness(
@@ -2663,7 +2873,7 @@ def login():
             session['username'] = username
             session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Username atau password salah')
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid username or password')
     return render_template_string(LOGIN_TEMPLATE, error=None)
 
 @app.route('/logout')
@@ -2781,7 +2991,7 @@ def mqtt_config():
     new_broker = data.get('broker', '').strip()
     new_port = int(data.get('port', 1883))
     if not new_broker:
-        return jsonify({'status': 'error', 'message': 'Broker IP tidak boleh kosong'}), 400
+        return jsonify({'status': 'error', 'message': 'Broker IP cannot be empty'}), 400
     old_broker = MQTT_BROKER
     MQTT_BROKER = new_broker
     MQTT_PORT = new_port
@@ -2800,7 +3010,7 @@ def mqtt_config():
         except Exception as e:
             mqtt_status['error'] = str(e)
     threading.Thread(target=reconnect_thread, daemon=True).start()
-    return jsonify({'status': 'ok', 'message': f'Mencoba connect ke {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
+    return jsonify({'status': 'ok', 'message': f'Trying to connect to {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
 
 @app.route('/api/simulate', methods=['POST'])
 def simulate_data():
@@ -2974,14 +3184,14 @@ def export_csv_from_db():
     if dtype not in valid_types:
         return jsonify({'error': f'Invalid type. Options: {", ".join(valid_types)}'}), 400
 
-    # ── Energy: ambil dari MySQL via PHP (sumber data lengkap) ──────────────
+    # ── Energy: fetch from MySQL via PHP (complete data source) ──────────────
     if dtype in ('energy_ac', 'energy_lamp'):
         id_kwh   = 1 if dtype == 'energy_ac' else 3
         dev_name = 'AC' if dtype == 'energy_ac' else 'Lamp'
         try:
             mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
         except Exception as ex:
-            # Fallback ke InfluxDB jika PHP tidak bisa dijangkau
+            # Fallback to InfluxDB if PHP is unreachable
             mysql_rows = None
             influx_err = str(ex)
 
@@ -3049,7 +3259,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 if not rows_by_ts:
                     return jsonify({'error': f'No data ditemukan. MySQL error: {influx_err}'}), 404
                 sorted_ts = sorted(rows_by_ts.keys())
-                # Buat energy_kwh relatif (kurangi nilai pertama)
+                # Make energy_kwh relative (subtract first value)
                 first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
                                   for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
                 output = io.StringIO()
@@ -3075,7 +3285,7 @@ from(bucket: "{INFLUX_BUCKET}")
             except Exception as e2:
                 return jsonify({'error': f'MySQL: {influx_err} | InfluxDB: {e2}'}), 500
 
-    # ── Temp / Lux / Occupancy: tetap dari InfluxDB ──────────────────────────
+    # ── Temp / Lux / Occupancy: remain from InfluxDB ──────────────────────────
     wib = timezone(_td(hours=7))
     try:
         start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
@@ -3152,7 +3362,7 @@ from(bucket: "{INFLUX_BUCKET}")
 # Allowed lists prevent InfluxDB injection
 _CHART_ALLOWED_MEAS = {'ac_sensor', 'lamp_sensor', 'camera_detection', 'energy_monitor'}
 _CHART_ALLOWED_FIELDS = {
-    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed',
+    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed', 'set_rh',
     'lux', 'lux_avg', 'lux1', 'lux2', 'lux3',
     'brightness', 'brightness_avg', 'brightness1', 'brightness2',
     'person_count', 'confidence',
@@ -3396,8 +3606,8 @@ def energy_export_csv():
     rows = []
 
     if source == 'realtime':
-        # Ambil dari ring buffer _mysqlBuf yang ada di JS — tidak bisa langsung.
-        # Gunakan energy_runtime_history yang ada di Python.
+        # Fetch from _mysqlBuf ring buffer in JS — cannot directly.
+        # Use energy_runtime_history in Python.
         with _recording_lock:
             hist = list(energy_runtime_history)
         for rec in hist:
@@ -3414,7 +3624,7 @@ def energy_export_csv():
                 'semu':      '',
             })
     else:
-        # Ambil langsung dari PHP proxy (fresh data)
+        # Fetch directly from PHP proxy (fresh data)
         import urllib.request as _ureq, json as _json
         PHP_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024'
         try:
@@ -3510,8 +3720,8 @@ def energy_history():
             time_format = '%Y'      # 2024, 2025, 2026, ...
 
         def query_field_points(field_name):
-            # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
-            # setiap interval diambil (bukan rata-rata), sehingga JS bisa diff antar titik
+            # energy_kwh is cumulative — use last() per window so final value
+            # of each interval is taken (not average), so JS can diff between points
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
@@ -3589,7 +3799,7 @@ def ml_status():
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
         'ga_history':       mqtt_data['system'].get('ga_history', []),
         'pso_history':      mqtt_data['system'].get('pso_history', []),
-        # iteration_log untuk grafik PSO detail (PWM1, PWM2, Lux per iterasi)
+        # iteration_log for detailed PSO chart (PWM1, PWM2, Lux per iteration)
         'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
     })
 
@@ -3627,7 +3837,7 @@ def ga_export_csv():
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
-    wr.writerow(['=== LAPORAN HASIL GA (GENETIC ALGORITHM) - SMART ROOM ==='])
+    wr.writerow(['=== GA RESULT REPORT (GENETIC ALGORITHM) - SMART ROOM ==='])
     wr.writerow([])
     wr.writerow(['Run Date', run_time])
     wr.writerow([])
@@ -3641,7 +3851,7 @@ def ga_export_csv():
     wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
     wr.writerow([])
 
-    # ── Kondisi Room Saat Run ─────────────────────────────────────────────
+    # ── Room Condition on Run ─────────────────────────────────────────────
     wr.writerow(['--- ROOM CONDITIONS DURING OPTIMIZATION ---'])
     wr.writerow(['Temperature Room',   f"{snap.get('temp_room', '-')} °C"])
     wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
@@ -3746,7 +3956,7 @@ def ml_run():
             if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
         
         # PSO: gunakan _pso_lamp_cycle() agar urutan Baca→Hitung→Send konsisten
-        # dengan siklus otomatis. GA tetap pakai run_optimization_cycle().
+        # with automatic cycle. GA still uses run_optimization_cycle().
         if algo == 'pso':
             t = threading.Thread(target=_pso_lamp_cycle, daemon=True)
         elif algo == 'ga':
@@ -3991,6 +4201,7 @@ def control_ac():
         command = str(data.get('command', data.get('action', '')) or '').strip().upper()
         current_temp = int(mqtt_data['ac'].get('ac_temp', 24) or 24)
         current_fan = int(mqtt_data['ac'].get('fan_speed', 1) or 1)
+        current_rh = int(mqtt_data['ac'].get('set_rh', 50) or 50)
         current_mode = str(mqtt_data['ac'].get('ac_fan_mode', 'COOL') or 'COOL').upper()
         current_state = str(mqtt_data['ac'].get('ac_state', 'OFF') or 'OFF').upper()
         payload = dict(data)
@@ -3998,6 +4209,7 @@ def control_ac():
         payload['action'] = command
         payload['temperature'] = int(payload.get('temperature', current_temp) or current_temp)
         payload['fan_speed'] = int(payload.get('fan_speed', current_fan) or current_fan)
+        payload['set_rh'] = int(payload.get('set_rh', current_rh) or current_rh)
         payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
         payload['ac_state'] = str(payload.get('ac_state', current_state) or current_state).upper()
         payload['power'] = payload['ac_state']
@@ -4033,9 +4245,25 @@ def control_ac():
 
         mqtt_data['ac']['ac_temp'] = payload['temperature']
         mqtt_data['ac']['fan_speed'] = payload['fan_speed']
+        mqtt_data['ac']['set_rh'] = payload['set_rh']
         mqtt_data['ac']['ac_state'] = payload['ac_state']
         mqtt_data['ac']['ac_fan_mode'] = payload['mode']
         socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+
+        # Force immediate InfluxDB write with updated set_rh so the chart reflects the change
+        try:
+            write_to_influxdb('ac_sensor', {
+                'ac_temp': float(payload['temperature']),
+                'fan_speed': int(payload['fan_speed']),
+                'set_rh': int(payload['set_rh']),
+                'ac_state': str(payload['ac_state']),
+                'ac_fan_mode': str(payload['mode']),
+                'temperature': float(mqtt_data['ac'].get('temperature', 0)),
+                'humidity': float(mqtt_data['ac'].get('humidity', 0)),
+                'heat_index': float(mqtt_data['ac'].get('heat_index', 0)),
+            }, tags={'device': 'esp32_ac', 'type': 'control', 'location': 'room'})
+        except Exception as e:
+            print(f'[WARN] control_ac influx write: {e}')
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ac': mqtt_data['ac'], 'payload': payload, 'ir_sent': True})
@@ -4112,14 +4340,17 @@ def update_optimization():
             opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
             opt_fan  = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
             opt_mode = ga_sol.get('mode', 'COOL')
+            opt_rh   = ga_sol.get('set_rh', 50)
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                 global _last_adaptive_ac_apply
                 now = time.time()
                 if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                     _last_adaptive_ac_apply = now
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode}', 'level': 'success'})
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode} RH:{opt_rh}%', 'level': 'success'})
         
         # AUTO-APPLY Lamp — only if pso_solution was provided in this request
         if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -5177,7 +5408,7 @@ HTML_TEMPLATE = '''
                     <strong style="color: #f59e0b;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
-                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
+                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Click the button below to diagnose...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
                         Test Frontend (Inject Dummy Data)
@@ -5333,7 +5564,7 @@ HTML_TEMPLATE = '''
                         </div>
                         <div>
                             <div style="font-size: 15px; font-weight: 700; color: var(--text);">Fan &amp; Mode — Definisi Range</div>
-                            <div style="font-size: 11px; color: var(--text-secondary);">Batas-batas suhu &amp; kelembaban yang menentukan output Fan Speed dan Mode AC (dari GA)</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Temperature &amp; humidity limits that determine Fan Speed and AC Mode output (from GA)</div>
                         </div>
                     </div>
                     <div style="padding: 16px 20px; overflow-x: auto;">
@@ -5348,31 +5579,31 @@ HTML_TEMPLATE = '''
                             </thead>
                             <tbody>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">Tier 0</span> — Tidak ada orang</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">Tier 0</span> — No person</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">27–29°C</td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(16,185,129,0.12); color: #10b981; font-weight: 600;">1 (Low)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL / FAN</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 orang, RH ≤ 65%</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH ≤ 65%</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">24–26°C</td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">1–2 (Adaptif)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 orang, RH &gt; 65%</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH &gt; 65%</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22–24°C</td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">2–3</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">Tier 2</span> — 3–5 orang</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">Tier 2</span> — 3–5 persons</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22°C</td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">3 (High)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">Tier 3</span> — &gt;5 orang</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">Tier 3</span> — &gt;5 persons</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">16°C (Min)</td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">4 (Max)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
@@ -5386,7 +5617,7 @@ HTML_TEMPLATE = '''
                             </tbody>
                         </table>
                         <div style="margin-top: 12px; padding: 8px 14px; border-radius: 8px; background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.15); font-size: 11px; color: var(--text-secondary);">
-                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization secara otomatis menentukan kombinasi optimal berdasarkan kondisi ruangan, jumlah orang, dan trend suhu. Tabel di atas adalah panduan umum.
+                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization automatically determines the optimal combination based on room conditions, number of people, and temperature trends. The table above is a general guide.
                         </div>
                     </div>
                 </div>
@@ -5621,38 +5852,10 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Room Temperature Trend</div>
+                    <div class="chart-title">Set Temperature</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Temperature (C)')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
-                    </div>
-                </div>
-                <canvas id="tempChart" height="80"></canvas>
-            </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Humidity Trend</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Humidity (%)')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
-                    </div>
-                </div>
-                <canvas id="humChart" height="80"></canvas>
-            </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">AC Target Temperature</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'AC Target Temp (C)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'Set Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'Set Temperature (C)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -5663,7 +5866,49 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">AC Power Consumption (W)</div>
+                    <div class="chart-title">Set RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acHum', 'Set RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acHum', 'Set RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('acHum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acHumChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual Temperature</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Actual Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Actual Temperature (C)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="tempChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Actual RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Actual RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="humChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">AC Power (kW)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('acPower', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acPower', 6)">6h</button>
@@ -5678,13 +5923,13 @@ HTML_TEMPLATE = '''
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
                     <div style="width:36px;height:36px;border-radius:10px;background:rgba(16,185,129,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
                     <div>
-                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Usage</div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Consumption</div>
                         <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
                     </div>
                 </div>
                 <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
                     <div class="chart-header">
-                        <div class="chart-title">AC Energy per Interval (kWh)</div>
+                        <div class="chart-title">AC Energy Consumption (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac','24h',this)">24h</button>
                             <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','7d',this)">7d</button>
@@ -5868,7 +6113,7 @@ HTML_TEMPLATE = '''
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
                         <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Daily Occupancy Chart</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Persons detected per hour (auto-recorded every hour) &mdash; max 24 data/hari</p>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Persons detected per hour (auto-recorded every hour) &mdash; max 24 data/day</p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
@@ -6275,7 +6520,7 @@ HTML_TEMPLATE = '''
             <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Data Energy dari Database</h2>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Energy Data from Database</h2>
                         <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch energy data directly from InfluxDB — select date range &amp; device, export to CSV</p>
                     </div>
                     <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
@@ -6486,6 +6731,13 @@ HTML_TEMPLATE = '''
                         </div>
                     </div>
                     <div class="control-group" style="margin-bottom: 15px;">
+                        <label class="control-label">Set RH: <span id="ac-rh-display" style="color: var(--primary); font-weight: bold;">50</span>%</label>
+                        <input type="range" min="30" max="80" value="50" class="slider" id="ac-rh-slider" oninput="updateACRH(this.value)" style="width: 100%;">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span>30%</span><span>40%</span><span>50%</span><span>60%</span><span>70%</span><span>80%</span>
+                        </div>
+                    </div>
+                    <div class="control-group" style="margin-bottom: 15px;">
                         <label class="control-label">Fan Speed: Level <span id="fan-speed-display" style="color: var(--primary); font-weight: bold;">1</span></label>
                         <input type="range" min="1" max="3" value="1" class="slider" id="fan-speed-slider" oninput="updateFanSpeed(this.value)" style="width: 100%;">
                         <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
@@ -6610,7 +6862,7 @@ HTML_TEMPLATE = '''
         <div id="ml-optimization" class="page">
             <div class="header">
                 <h1>Machine Learning Optimization</h1>
-                <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
+                <p>GA &rarr; Adaptive AC | PSO &rarr; Adaptive Lamp | Auto-optimized in ADAPTIVE mode</p>
             </div>
 
             <!-- ML Summary Cards -->
@@ -6630,7 +6882,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -6685,11 +6937,8 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export GA Report"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
-                            Run GA
-                        </button>
                     </div>
                 </div>
                 <canvas id="gaFitnessChart" height="80"></canvas>
@@ -6700,11 +6949,8 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export PSO Report"><i class="fas fa-download"></i></button>
                         <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
-                            Run PSO
-                        </button>
                     </div>
                 </div>
                 <!-- Iteration detail table -->
@@ -6735,9 +6981,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
-                            Run Both
-                        </button>
                         <button class="chart-option-btn" onclick="clearMLCharts()">
                             Clear
                         </button>
@@ -6774,7 +7017,7 @@ HTML_TEMPLATE = '''
                             </tr>
                         </thead>
                         <tbody id="ml-history-body">
-                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Run GA or PSO to start.</td></tr>
+                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Set mode to ADAPTIVE to start automatic optimization.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -7132,7 +7375,12 @@ HTML_TEMPLATE = '''
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'AC Target Temp (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Set Temperature (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.acHum = new Chart(document.getElementById('acHumChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Set RH (%)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
@@ -7413,6 +7661,18 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
+
+            // Load any pending ML data that was stored while the ML page was hidden
+            if (window.__pendingMLData) {
+                var pending = window.__pendingMLData;
+                window.__pendingMLData = null;
+                Object.keys(pending).forEach(function(chartName) {
+                    var pd = pending[chartName];
+                    if (pd && pd.history && pd.history.length > 0) {
+                        try { updateMLChart(chartName, pd.history, pd.algo); } catch(e) { console.warn('[CHART] pending ML data load failed:', e); }
+                    }
+                });
+            }
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -7475,6 +7735,7 @@ HTML_TEMPLATE = '''
                 case 'temp': endpoint = '/api/chart/ac_sensor/temperature/' + hours; break;
                 case 'hum': endpoint = '/api/chart/ac_sensor/humidity/' + hours; break;
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
+                case 'acHum': endpoint = '/api/chart/ac_sensor/set_rh/' + hours; break;
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
                 case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
@@ -8290,14 +8551,23 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'ml-optimization') {
                 // Use requestAnimationFrame: fires AFTER browser paints the page with display:block
-                // so canvas has real dimensions when initMLCharts() creates the Chart.js instances
                 requestAnimationFrame(function() {
-                    try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    // Only create charts if they don't exist yet; otherwise just resize
+                    if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                        try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    } else {
+                        // Charts exist — just resize them for correct dimensions
+                        try {
+                            ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                                if (charts[k]) { charts[k].resize(); charts[k].update('none'); }
+                            });
+                        } catch(e) { console.warn('[NAV] chart resize error:', e); }
+                    }
                     try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
                 });
             }
             if (pageId === 'ac-analytics') {
-                ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
+                ['temp', 'hum', 'acTemp', 'acHum', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
                 try { loadAnalyticsEnergy('ac', _analyticsEnergyPeriod.ac || '24h', null); } catch(e) {}
@@ -8374,6 +8644,7 @@ HTML_TEMPLATE = '''
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
+            setEl('ml-ga-rh', data.ga_set_rh || '--');
             var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
             var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
@@ -8383,20 +8654,33 @@ HTML_TEMPLATE = '''
             if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
-            if (data.ga_history && data.ga_history.length > 0) {
-                updateMLChart('gaFitness', data.ga_history, 'GA');
+            // GA chart — use server data, or fallback to localStorage
+            var gaHistory = (data.ga_history && data.ga_history.length > 0) ? data.ga_history : null;
+            if (!gaHistory) {
+                try { gaHistory = JSON.parse(localStorage.getItem('ml_ga_history')); } catch(e) {}
             }
+            if (gaHistory && gaHistory.length > 0) {
+                updateMLChart('gaFitness', gaHistory, 'GA');
+            }
+
+            // PSO chart — use server data, or fallback to localStorage
             if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
                 updatePSOIterChart(data.pso_iteration_log);
-            } else if (data.pso_history && data.pso_history.length > 0) {
-                // Fallback: if no iteration_log yet, show pso_history as fitness line
-                const chart = charts.psoFitness;
-                if (chart) {
-                    chart.data.labels = data.pso_history.map((_, i) => i + 1);
-                    chart.data.datasets[0].data = [];
-                    chart.data.datasets[1].data = [];
-                    chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
-                    chart.update('none');
+            } else {
+                var savedIterLog = null;
+                try { savedIterLog = JSON.parse(localStorage.getItem('ml_pso_iterlog')); } catch(e) {}
+                if (savedIterLog && savedIterLog.length > 0) {
+                    updatePSOIterChart(savedIterLog);
+                } else if (data.pso_history && data.pso_history.length > 0) {
+                    // Fallback: if no iteration_log yet, show pso_history as fitness line
+                    const chart = charts.psoFitness;
+                    if (chart) {
+                        chart.data.labels = data.pso_history.map((_, i) => i + 1);
+                        chart.data.datasets[0].data = [];
+                        chart.data.datasets[1].data = [];
+                        chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
+                        chart.update('none');
+                    }
                 }
             }
         }
@@ -8411,6 +8695,10 @@ HTML_TEMPLATE = '''
                     // ML tab not yet active — store data to render when tab opens
                     window.__pendingMLData = window.__pendingMLData || {};
                     window.__pendingMLData[chartName] = { history, algo };
+                    // Also save to localStorage so data survives refresh
+                    if (algo === 'GA') {
+                        try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
+                    }
                     return;
                 }
             }
@@ -8421,6 +8709,8 @@ HTML_TEMPLATE = '''
                 chart.data.labels           = history.map((_, i) => 'Gen ' + (i + 1));
                 chart.data.datasets[0].data = history;
                 chart.update('none');
+                // Cache to localStorage for persistence across refresh
+                try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
             } else if (algo === 'PSO') {
                 // PSO fitness history sebagai fallback jika belum ada iteration_log
                 // Tampilkan sebagai Lux Avg estimasi (dataset index 2)
@@ -8441,6 +8731,8 @@ HTML_TEMPLATE = '''
             chart.data.datasets[1].data = iterLog.map(d => d.pwm2);
             chart.data.datasets[2].data = iterLog.map(d => d.lux_avg);
             chart.update('none');
+            // Cache to localStorage for persistence across refresh
+            try { localStorage.setItem('ml_pso_iterlog', JSON.stringify(iterLog)); } catch(e) {}
             // Update tabel
             const tbody = document.getElementById('pso-iter-tbody');
             const wrap  = document.getElementById('pso-iter-table-wrap');
@@ -8971,6 +9263,11 @@ HTML_TEMPLATE = '''
             saveSettings();
         }
 
+        function updateACRH(value) {
+            document.getElementById('ac-rh-display').textContent = value;
+            saveSettings();
+        }
+
         function updateFanSpeed(value) {
             document.getElementById('fan-speed-display').textContent = value;
             saveSettings();
@@ -8991,6 +9288,13 @@ HTML_TEMPLATE = '''
                 var fanDisplay = document.getElementById('fan-speed-display');
                 if (fanSlider && Number.isFinite(fanValue)) fanSlider.value = fanValue;
                 if (fanDisplay && Number.isFinite(fanValue)) fanDisplay.textContent = fanValue;
+            }
+            if (ac.set_rh !== undefined && ac.set_rh !== null) {
+                var rhValue = parseInt(ac.set_rh, 10);
+                var rhSlider = document.getElementById('ac-rh-slider');
+                var rhDisplay = document.getElementById('ac-rh-display');
+                if (rhSlider && Number.isFinite(rhValue)) rhSlider.value = rhValue;
+                if (rhDisplay && Number.isFinite(rhValue)) rhDisplay.textContent = rhValue;
             }
             if (ac.ac_fan_mode) {
                 selectedACMode = String(ac.ac_fan_mode).toUpperCase();
@@ -9071,6 +9375,7 @@ HTML_TEMPLATE = '''
                     return;
                 }
                 const temp = document.getElementById('ac-temp-slider').value;
+                const rh = document.getElementById('ac-rh-slider').value;
                 const fan = document.getElementById('fan-speed-slider').value;
 
                 fetch('/api/ac/control', {
@@ -9079,6 +9384,7 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({
                         command: 'SET',
                         temperature: parseInt(temp),
+                        set_rh: parseInt(rh),
                         fan_speed: parseInt(fan),
                         mode: selectedACMode
                     })
@@ -9086,7 +9392,7 @@ HTML_TEMPLATE = '''
                 .then(r => r.json())
                 .then(result => {
                     if (result && result.ac) applyACSnapshot(result.ac);
-                    showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode);
+                    showToast('AC: ' + temp + '°C, RH ' + rh + '%, Fan ' + fan + ', ' + selectedACMode);
                 })
                 .catch(e => showToast('Error: ' + e, 'error'));
             });
@@ -9892,20 +10198,27 @@ HTML_TEMPLATE = '''
                     const temperature = num(ac.temperature);
                     setText('dash-temp', temperature.toFixed(1));
                     setText('dash-hum', num(ac.humidity).toFixed(1));
-                    // Individual sensor readings
+                    // Individual sensor readings — sorted coldest→hottest (S1→S3)
+                    var rawTemps = [
+                        { t: num(ac.temp1), h: num(ac.hum1) },
+                        { t: num(ac.temp2), h: num(ac.hum2) },
+                        { t: num(ac.temp3), h: num(ac.hum3) }
+                    ];
+                    // Sort by temperature ascending (coldest first = S1)
+                    rawTemps.sort(function(a, b) { return a.t - b.t; });
                     const t1El = document.getElementById('dash-temp1');
                     const t2El = document.getElementById('dash-temp2');
                     const t3El = document.getElementById('dash-temp3');
-                    if (t1El) t1El.textContent = num(ac.temp1).toFixed(1);
-                    if (t2El) t2El.textContent = num(ac.temp2).toFixed(1);
-                    if (t3El) t3El.textContent = num(ac.temp3).toFixed(1);
-                    // Individual humidity readings
+                    if (t1El) t1El.textContent = rawTemps[0].t.toFixed(1);
+                    if (t2El) t2El.textContent = rawTemps[1].t.toFixed(1);
+                    if (t3El) t3El.textContent = rawTemps[2].t.toFixed(1);
+                    // Individual humidity readings (sorted same order as temp)
                     const h1El = document.getElementById('dash-hum1');
                     const h2El = document.getElementById('dash-hum2');
                     const h3El = document.getElementById('dash-hum3');
-                    if (h1El) h1El.textContent = num(ac.hum1).toFixed(1);
-                    if (h2El) h2El.textContent = num(ac.hum2).toFixed(1);
-                    if (h3El) h3El.textContent = num(ac.hum3).toFixed(1);
+                    if (h1El) h1El.textContent = rawTemps[0].h.toFixed(1);
+                    if (h2El) h2El.textContent = rawTemps[1].h.toFixed(1);
+                    if (h3El) h3El.textContent = rawTemps[2].h.toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
@@ -10013,13 +10326,13 @@ HTML_TEMPLATE = '''
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
                     if (roomHum) roomHum.textContent = num(ac.humidity).toFixed(1);
-                    // Individual sensors in AC panel footer
+                    // Individual sensors in AC panel footer (use sorted rawTemps from above)
                     const acT1 = document.getElementById('dash-ac-temp1');
                     const acT2 = document.getElementById('dash-ac-temp2');
                     const acT3 = document.getElementById('dash-ac-temp3');
-                    if (acT1) acT1.textContent = num(ac.temp1).toFixed(1);
-                    if (acT2) acT2.textContent = num(ac.temp2).toFixed(1);
-                    if (acT3) acT3.textContent = num(ac.temp3).toFixed(1);
+                    if (acT1 && rawTemps) acT1.textContent = rawTemps[0].t.toFixed(1);
+                    if (acT2 && rawTemps) acT2.textContent = rawTemps[1].t.toFixed(1);
+                    if (acT3 && rawTemps) acT3.textContent = rawTemps[2].t.toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -10245,7 +10558,7 @@ HTML_TEMPLATE = '''
 
         function runMqttReconnect() {
             diagClear('=== RECONNECT MQTT ===');
-            diagLog('Mencoba reconnect ke MQTT broker...');
+            diagLog('Trying to reconnect to MQTT broker...');
             fetch('/api/mqtt/reconnect', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
@@ -10467,7 +10780,7 @@ HTML_TEMPLATE = '''
         var _PHP_ENERGY_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024';
         var _phpPollErr = 0;
         function _phpDirectPoll() {
-            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket masih aktif, skip
+            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket still active, skip
             fetch(_PHP_ENERGY_URL)
                 .then(function(r) {
                     if (!r.ok) { console.error('[PHP-poll] HTTP ' + r.status); return null; }
@@ -10523,7 +10836,7 @@ HTML_TEMPLATE = '''
                     var badge = document.getElementById('rec-status-badge');
                     if (badge) {
                         if (st.energy) {
-                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                             badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                         } else { _recUpdateBadge(); }
                     }
@@ -10531,14 +10844,14 @@ HTML_TEMPLATE = '''
                 if (!_tempActive) {
                     var tb = document.getElementById('temp-rec-badge');
                     if (tb && st.temp) {
-                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (tb && !st.temp) { _tempUpdateBadge(); }
                 }
                 if (!_luxActive) {
                     var lb = document.getElementById('lux-rec-badge');
                     if (lb && st.lux) {
-                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (lb && !st.lux) { _luxUpdateBadge(); }
                 }
@@ -10597,7 +10910,7 @@ HTML_TEMPLATE = '''
             var badge = document.getElementById('rec-status-badge');
             if (!badge) return;
             if (_recActive) {
-                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam';
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording';
                 badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
             } else {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10612,7 +10925,7 @@ HTML_TEMPLATE = '''
             if (!tbody) return;
             var filtered = _recFilter === 'all' ? _recRows : _recRows.filter(function(r){ return r.device === _recFilter; });
             if (filtered.length === 0) {
-                var msg = _recRows.length > 0 ? 'No data for filter <strong>' + _recFilter + '</strong>.' : 'No data yet. Click <strong>Start Record</strong> untuk memulai.';
+                var msg = _recRows.length > 0 ? 'No data for filter <strong>' + _recFilter + '</strong>.' : 'No data yet. Click <strong>Start Record</strong> to begin.';
                 tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
                 var rngHide = document.getElementById('rec-date-range'); if (rngHide) rngHide.style.display = 'none';
                 return;
@@ -10750,7 +11063,7 @@ HTML_TEMPLATE = '''
 
         // Hook to _applyEnergyData — record every 6 minutes (360 seconds)
         var _lastRecTime = 0;
-        var _REC_INTERVAL_MS = 360000; // 6 menit
+        var _REC_INTERVAL_MS = 360000; // 6 minutes
         var _origApply = _applyEnergyData;
         _applyEnergyData = function(ac, lamp) {
             _origApply(ac, lamp);
@@ -10760,7 +11073,7 @@ HTML_TEMPLATE = '''
             }
         };
 
-        // ==================== REKAM SUHU & HUMIDITY ====================
+        // ==================== RECORD TEMP & HUMIDITY ====================
         function _tempServerPush() {
             fetch('/api/rec/data?type=temp', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -10782,7 +11095,7 @@ HTML_TEMPLATE = '''
 
         var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
         var _tempTimer = null, _lastTempRecTime = 0;
-        var _TEMP_REC_MS = 60000; // 1 menit
+        var _TEMP_REC_MS = 60000; // 1 minute
 
         function _tempFmt(v, d) { var n = parseFloat(v); return Number.isFinite(n) ? n.toFixed(d != null ? d : 1) : '--'; }
 
@@ -10793,7 +11106,11 @@ HTML_TEMPLATE = '''
             var t1   = document.getElementById('dash-ac-temp1')      ? document.getElementById('dash-ac-temp1').textContent      : '--';
             var t2   = document.getElementById('dash-ac-temp2')      ? document.getElementById('dash-ac-temp2').textContent      : '--';
             var t3   = document.getElementById('dash-ac-temp3')      ? document.getElementById('dash-ac-temp3').textContent      : '--';
-            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3 });
+            var setT = document.getElementById('dash-ac-temp')       ? document.getElementById('dash-ac-temp').textContent       : '--';
+            var fan  = document.getElementById('dash-ac-fan-label')  ? document.getElementById('dash-ac-fan-label').textContent  : '--';
+            var mode = document.getElementById('dash-ac-mode')       ? document.getElementById('dash-ac-mode').textContent       : '--';
+            var ctrl = document.getElementById('dash-ac-ctrl-mode')  ? document.getElementById('dash-ac-ctrl-mode').textContent  : '--';
+            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3, setT: setT, fan: fan, mode: mode, ctrl: ctrl });
             _tempUpdatePreview();
             var c = document.getElementById('temp-rec-count');
             if (c) c.textContent = _tempRows.length;
@@ -10817,7 +11134,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('temp-rec-badge');
             if (!b) return;
             if (_tempActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10829,7 +11146,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('temp-rec-preview');
             if (!tbody) return;
             if (_tempRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -10883,9 +11200,9 @@ HTML_TEMPLATE = '''
 
         function tempExportCSV() {
             if (_tempRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
-            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
             var body = _tempRows.map(function(r) {
-                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
+                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl;
             }).join('\\n');
             var now = new Date();
             var fname = 'temp_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
@@ -10917,7 +11234,7 @@ HTML_TEMPLATE = '''
 
         var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
         var _luxTimer = null, _lastLuxRecTime = 0;
-        var _LUX_REC_MS = 60000; // 1 menit
+        var _LUX_REC_MS = 60000; // 1 minute
 
         function _luxAddRow() {
             var ts = new Date().toLocaleString('id-ID');
@@ -10950,7 +11267,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('lux-rec-badge');
             if (!b) return;
             if (_luxActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10962,7 +11279,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('lux-rec-preview');
             if (!tbody) return;
             if (_luxRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -11237,7 +11554,7 @@ HTML_TEMPLATE = '''
                 const lamp = data.data;
                 const luxAvg    = parseFloat(lamp.lux_avg)    || 0;
                 const brightAvg = parseFloat(lamp.brightness_avg) || 0;
-                // setText lokal — tidak bergantung pada scope luar
+                // local setText — does not depend on outer scope
                 const _set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
 
                 // Update Lamp Dashboard lux dan brightness secara real-time
@@ -11471,7 +11788,7 @@ HTML_TEMPLATE = '''
                 const autoOffTriggered = data.data.auto_off_triggered;
                 if (autoOffEl) {
                     if (autoOffTriggered) {
-                        autoOffEl.textContent = 'MATI';
+                        autoOffEl.textContent = 'OFF';
                         autoOffEl.style.color = '#ef4444';
                         if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
@@ -11531,6 +11848,15 @@ HTML_TEMPLATE = '''
                 if (data.ga_solution && data.ga_solution.mode) {
                     var modeEl = document.getElementById('ml-ga-mode');
                     if (modeEl) modeEl.textContent = data.ga_solution.mode;
+                    var rhEl = document.getElementById('ml-ga-rh');
+                    if (rhEl && data.ga_solution.set_rh != null) rhEl.textContent = data.ga_solution.set_rh;
+                }
+                // Directly update GA chart from socket payload (faster than waiting for refreshMLData fetch)
+                if (data.ga_history && data.ga_history.length > 0) {
+                    try { updateMLChart('gaFitness', data.ga_history, 'GA'); } catch(e) { console.warn('[ML] Direct GA chart update failed:', e); }
+                }
+                if (data.pso_history && data.pso_history.length > 0) {
+                    try { updateMLChart('psoFitness', data.pso_history, 'PSO'); } catch(e) { console.warn('[ML] Direct PSO chart update failed:', e); }
                 }
                 // Refresh ML data
                 refreshMLData();
@@ -11675,7 +12001,7 @@ HTML_TEMPLATE = '''
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Tidak diketahui') + '\\n\\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Unknown') + '\\n\\nClick "Test Frontend" or "Test MQTT Broker" button below.';
                         }
                     }
                 }).catch(function() {});
@@ -11810,8 +12136,8 @@ HTML_TEMPLATE = '''
                 showDateRangePicker('Export temperature & humidity recording', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3; }).join('\\n');
+                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\\n');
                     var fname = 'temp_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' rows exported: ' + fname, 'success');
@@ -11988,8 +12314,10 @@ if __name__ == '__main__':
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
 
-    # Restore last GA/PSO results from InfluxDB (survive restarts)
-    print("  [RESTORE] Loading last optimization results from InfluxDB...")
+    # Restore last GA/PSO results — first from JSON file (has stats/history arrays),
+    # then supplement with InfluxDB (has latest scalar values)
+    print("  [RESTORE] Loading last optimization results...")
+    load_opt_results_file()
     restore_opt_results()
 
     # Start sensor fault detection thread
