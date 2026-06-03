@@ -3296,9 +3296,31 @@ from(bucket: "{INFLUX_BUCKET}")
     end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     TYPE_MAP = {
-        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3','ac_temp','fan_speed','ac_fan_mode','mode'], None, None),
+        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3','ac_temp','fan_speed','ac_fan_mode','mode','set_rh','ac_state'], None, None),
         'lux':       ('lamp_sensor',     ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'],                        None, None),
         'occupancy': ('camera_detection',['person_count','confidence'],                                                        None, None),
+    }
+
+    # Human-readable column headers per export type
+    HEADER_MAP = {
+        'temp': [
+            'Timestamp',
+            'Temp Ruang (°C)', 'Kelembapan (%)', 'Heat Index (°C)',
+            'Temp Sensor 1 (°C)', 'Hum Sensor 1 (%)',
+            'Temp Sensor 2 (°C)', 'Hum Sensor 2 (%)',
+            'Temp Sensor 3 (°C)', 'Hum Sensor 3 (%)',
+            'Set T AC (°C)', 'Fan Speed', 'Mode AC', 'Mode Kontrol',
+            'Set RH (%)', 'Status AC (ON/OFF)',
+        ],
+        'lux': [
+            'Timestamp',
+            'Lux Sensor 1', 'Lux Sensor 2', 'Lux Sensor 3', 'Lux Rata-rata',
+            'Brightness Lamp 1 (%)', 'Brightness Lamp 2 (%)',
+        ],
+        'occupancy': [
+            'Timestamp',
+            'Jumlah Orang', 'Confidence (%)',
+        ],
     }
     measurement, fields, tag_key, tag_val = TYPE_MAP[dtype]
 
@@ -3338,7 +3360,9 @@ from(bucket: "{INFLUX_BUCKET}")
         sorted_ts = sorted(rows_by_ts.keys())
         output    = io.StringIO()
         writer    = _csv.writer(output)
-        writer.writerow(['Timestamp'] + fields)
+        # Use human-readable headers if available, else fall back to raw field names
+        col_headers = HEADER_MAP.get(dtype, ['Timestamp'] + fields)
+        writer.writerow(col_headers)
         for ts_str in sorted_ts:
             row_d = rows_by_ts[ts_str]
             row = [ts_str] + [
