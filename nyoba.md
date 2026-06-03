@@ -4677,16 +4677,16 @@ LOGIN_TEMPLATE = '''
         body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
         .login-box { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 40px; width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
         .login-logo { text-align: center; margin-bottom: 30px; }
-        .login-logo i { font-size: 48px; color: #6366f1; }
-        .login-logo h1 { color: #f1f5f9; font-size: 24px; margin-top: 10px; }
+        .login-logo i { font-size: 48px; color: #2563eb; }
+        .login-logo h1 { color: #eff6ff; font-size: 24px; margin-top: 10px; }
         .login-logo p { color: #94a3b8; font-size: 14px; margin-top: 5px; }
         .form-group { margin-bottom: 20px; }
         .form-group label { display: block; color: #94a3b8; font-size: 13px; margin-bottom: 6px; font-weight: 500; }
-        .form-group input { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f1f5f9; font-size: 14px; transition: border-color 0.3s; }
-        .form-group input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.2); }
-        .login-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s; }
-        .login-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(99,102,241,0.4); }
-        .error-msg { background: rgba(239,68,68,0.15); border: 1px solid #ef4444; color: #ef4444; padding: 10px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; text-align: center; }
+        .form-group input { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #eff6ff; font-size: 14px; transition: border-color 0.3s; }
+        .form-group input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.2); }
+        .login-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s; }
+        .login-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(37,99,235,0.4); }
+        .error-msg { background: rgba(30,64,175,0.15); border: 1px solid #1e40af; color: #1e40af; padding: 10px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; text-align: center; }
     </style>
 </head>
 <body>
@@ -4733,13 +4733,13 @@ HTML_TEMPLATE = '''
             margin: 0; padding: 0; box-sizing: border-box;
         }
         :root {
-            --primary: #6366f1; --primary-dark: #4f46e5; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --bg-dark: #f1f5f9;
-            --bg-card: #ffffff; --bg-card-hover: #f8fafc; --text-primary: #1e293b; --text-secondary: #64748b; --border: #e2e8f0; --shadow: rgba(0, 0, 0, 0.08);
-            --input-bg: #f8fafc;
+            --primary: #2563eb; --primary-dark: #1d4ed8; --success: #3b82f6; --warning: #0ea5e9; --danger: #1e40af; --bg-dark: #eff6ff;
+            --bg-card: #ffffff; --bg-card-hover: #dbeafe; --text-primary: #1e293b; --text-secondary: #3b6cb7; --border: #bfdbfe; --shadow: rgba(37, 99, 235, 0.08);
+            --input-bg: #f0f7ff;
         }
         [data-theme="dark"] {
-            --bg-dark: #0f172a; --bg-card: #1e293b; --bg-card-hover: #334155; --text-primary: #f1f5f9;
-            --text-secondary: #94a3b8; --border: #334155; --shadow: rgba(0, 0, 0, 0.3); --input-bg: #0f172a;
+            --bg-dark: #03111e; --bg-card: #0c1a35; --bg-card-hover: #1a3261; --text-primary: #e8f0fe;
+            --text-secondary: #93c5fd; --border: #1e3a5f; --shadow: rgba(0, 0, 0, 0.3); --input-bg: #03111e;
         }
         body {
             font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
@@ -4807,7 +4807,7 @@ HTML_TEMPLATE = '''
             font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;
         }
         .occupancy-kpi .kpi-value {
-            font-size: 36px; font-weight: 700; color: #06b6d4; line-height: 1;
+            font-size: 36px; font-weight: 700; color: #0ea5e9; line-height: 1;
         }
         .occupancy-mini-note {
             margin-top: 8px; font-size: 12px; color: var(--text-secondary);
@@ -4828,7 +4828,7 @@ HTML_TEMPLATE = '''
         .rating-btn.active {
             background: var(--primary); border-color: var(--primary);
             color: #fff; transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(99, 102, 241, 0.35);
+            box-shadow: 0 10px 20px rgba(37, 99, 235, 0.35);
         }
         .feedback-input {
             width: 100%; background: var(--input-bg); border: 1px solid var(--border);
@@ -4893,7 +4893,7 @@ HTML_TEMPLATE = '''
             padding: 10px 14px; text-align: center; border-bottom: 1px solid var(--border);
         }
         .ml-table th {
-            background: rgba(99, 102, 241, 0.1); color: var(--primary); font-weight: 600;
+            background: rgba(37, 99, 235, 0.1); color: var(--primary); font-weight: 600;
             text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;
         }
         .ml-table tr:hover {
@@ -4910,7 +4910,7 @@ HTML_TEMPLATE = '''
             border-radius: 8px; color: var(--text-primary); font-size: 14px; transition: border-color 0.3s;
         }
         .ml-input:focus {
-            outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+            outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
         }
         .ml-action-btn {
             padding: 8px 18px !important; font-weight: 600 !important; cursor: pointer; transition: all 0.3s !important;
@@ -4921,9 +4921,9 @@ HTML_TEMPLATE = '''
         .ml-badge {
             display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
         }
-            .ml-badge.good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-            .ml-badge.mid { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
-            .ml-badge.low { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+            .ml-badge.good { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
+            .ml-badge.mid { background: rgba(14, 165, 233, 0.2); color: #0ea5e9; }
+            .ml-badge.low { background: rgba(30, 64, 175, 0.2); color: #1e40af; }
         @media (max-width: 768px) {
             .ml-param-grid { grid-template-columns: 1fr; }
         }
@@ -4933,13 +4933,13 @@ HTML_TEMPLATE = '''
             transition: all 0.3s;
         }
         .mode-badge.adaptive {
-            background: linear-gradient(135deg, #10b981, #059669); color: white;
+            background: linear-gradient(135deg, #3b82f6, #2563eb); color: white;
         }
         .mode-badge.manual {
-            background: linear-gradient(135deg, #f59e0b, #d97706); color: white;
+            background: linear-gradient(135deg, #0ea5e9, #0284c7); color: white;
         }
         .mode-badge:hover {
-            transform: scale(1.05); box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
+            transform: scale(1.05); box-shadow: 0 5px 15px rgba(37, 99, 235, 0.4);
         }
         .control-panel {
             background: var(--bg-card); padding: 24px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 20px;
@@ -4970,7 +4970,7 @@ HTML_TEMPLATE = '''
             background: var(--primary); color: white;
         }
         .btn-primary:hover {
-            background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
+            background: var(--primary-dark); transform: translateY(-2px); box-shadow: 0 5px 15px rgba(37, 99, 235, 0.4);
         }
         .btn-success {
             background: var(--success); color: white;
@@ -5042,8 +5042,8 @@ HTML_TEMPLATE = '''
             .toast.show { display: block; }
         /* Energy data bubble notification */
         .energy-bubble {
-            position: fixed; top: 80px; right: 30px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95)); color: #fff; padding: 10px 18px; border-radius: 20px; font-size: 13px; font-weight: 600;
-            z-index: 9998; pointer-events: none; opacity: 0; transform: translateY(-10px) scale(0.9); transition: opacity 0.3s, transform 0.3s; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4); display: flex; align-items: center; gap: 8px;
+            position: fixed; top: 80px; right: 30px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.95)); color: #fff; padding: 10px 18px; border-radius: 20px; font-size: 13px; font-weight: 600;
+            z-index: 9998; pointer-events: none; opacity: 0; transform: translateY(-10px) scale(0.9); transition: opacity 0.3s, transform 0.3s; box-shadow: 0 4px 16px rgba(59, 130, 246, 0.4); display: flex; align-items: center; gap: 8px;
         }
         .energy-bubble.show {
             opacity: 1; transform: translateY(0) scale(1);
@@ -5104,8 +5104,8 @@ HTML_TEMPLATE = '''
             font-size: 18px; font-weight: bold; color: var(--text-primary);
         }
         .detection-alert {
-            position: fixed; top: 100px; right: 30px; background: linear-gradient(135deg, #ef4444, #dc2626); color: white; padding: 20px 25px;
-            border-radius: 12px; box-shadow: 0 10px 40px rgba(239, 68, 68, 0.5); display: none; z-index: 8888; animation: slideInRight 0.5s, pulse 2s infinite; max-width: 300px;
+            position: fixed; top: 100px; right: 30px; background: linear-gradient(135deg, #1e40af, #1d4ed8); color: white; padding: 20px 25px;
+            border-radius: 12px; box-shadow: 0 10px 40px rgba(30, 64, 175, 0.5); display: none; z-index: 8888; animation: slideInRight 0.5s, pulse 2s infinite; max-width: 300px;
         }
         .detection-alert.show {
             display: block;
@@ -5138,7 +5138,7 @@ HTML_TEMPLATE = '''
             animation: fadeIn 0.3s;
         }
         .person-badge.detected {
-            background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+            background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
         }
         .person-badge.not-detected {
             background: linear-gradient(135deg, #64748b, #475569); color: rgba(255,255,255,0.7);
@@ -5253,7 +5253,7 @@ HTML_TEMPLATE = '''
         }
         .hamburger-btn {
             display: none; position: fixed; top: 12px; left: 12px; z-index: 1998; width: 44px; height: 44px; border-radius: 10px;
-            background: var(--primary); color: white; border: none; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; box-shadow: 0 4px 15px rgba(99,102,241,0.4);
+            background: var(--primary); color: white; border: none; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; box-shadow: 0 4px 15px rgba(37,99,235,0.4);
             touch-action: manipulation;
         }
         .sidebar-overlay {
@@ -5280,10 +5280,10 @@ HTML_TEMPLATE = '''
             width: 8px; height: 8px; border-radius: 50%; display: inline-block;
         }
         .device-dot.online {
-            background: #10b981; box-shadow: 0 0 6px #10b981; animation: pulse-green 2s infinite;
+            background: #3b82f6; box-shadow: 0 0 6px #3b82f6; animation: pulse-green 2s infinite;
         }
         .device-dot.offline {
-            background: #ef4444;
+            background: #1e40af;
         }
         .device-time {
             font-size: 10px; color: var(--text-secondary); opacity: 0.7;
@@ -5298,8 +5298,8 @@ HTML_TEMPLATE = '''
             color: white; font-size: 13px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,0.3); animation: slideInRight 0.4s ease; display: flex; align-items: center;
             gap: 10px;
         }
-            .alert-banner.danger { background: linear-gradient(135deg, #ef4444, #dc2626); }
-            .alert-banner.warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
+            .alert-banner.danger { background: linear-gradient(135deg, #1e40af, #1d4ed8); }
+            .alert-banner.warning { background: linear-gradient(135deg, #0ea5e9, #0284c7); }
             .alert-banner .alert-close { background: none; border: none; color: white; cursor: pointer; font-size: 16px; margin-left: auto; opacity: 0.8; }
             .alert-banner .alert-close:hover { opacity: 1; }
         @keyframes slideInRight {
@@ -5345,10 +5345,10 @@ HTML_TEMPLATE = '''
             Smart Room
         </div>
         <!-- Role badge -->
-        <div id="role-badge" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.25);">
-            <i class="fas fa-user-circle" style="color:#6366f1;font-size:16px;"></i>
+        <div id="role-badge" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 10px;border-radius:8px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.25);">
+            <i class="fas fa-user-circle" style="color:#2563eb;font-size:16px;"></i>
             <span id="role-username" style="color:var(--text-primary);font-size:13px;font-weight:600;">-</span>
-            <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
+            <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#2563eb;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
         </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
             <i class="fas fa-snowflake"></i>
@@ -5411,7 +5411,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-ac" class="page active">
             <div class="header">
                 <h1>AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostics</button></p>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #0ea5e9; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostics</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -5432,21 +5432,21 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- DIAGNOSTIC PANEL -->
-            <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #f59e0b; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
+            <div id="diag-panel" style="background: var(--card-bg); border: 2px solid #0ea5e9; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;">
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
-                    <div style="font-size: 18px; color: #f59e0b; font-weight: 800;">D</div>
-                    <strong style="color: #f59e0b;">Diagnostic Mode</strong>
+                    <div style="font-size: 18px; color: #0ea5e9; font-weight: 800;">D</div>
+                    <strong style="color: #0ea5e9;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
                 <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Click the button below to diagnose...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
+                    <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px; border-radius: 8px;">
                         Test Frontend (Inject Dummy Data)
                     </button>
                     <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
                         Test MQTT Broker (Self-Test)
                     </button>
-                    <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #8b5cf6; border: none; color: white; border-radius: 8px;">
+                    <button onclick="runMqttReconnect()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
                         Reconnect MQTT
                     </button>
                     <button onclick="checkMqttStatus(true)" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #6b7280; border: none; color: white; border-radius: 8px;">
@@ -5459,7 +5459,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Room Temperature</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">
+                        <div class="stat-icon" style="background: rgba(30, 64, 175, 0.2); color: #1e40af;">
                             T
                         </div>
                     </div>
@@ -5468,9 +5468,9 @@ HTML_TEMPLATE = '''
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Near)</small>: <strong id="dash-temp1">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Mid)</small>: <strong id="dash-temp2">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Far)</small>: <strong id="dash-temp3">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(30,64,175,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Near)</small>: <strong id="dash-temp1">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(30,64,175,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Mid)</small>: <strong id="dash-temp2">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(30,64,175,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Far)</small>: <strong id="dash-temp3">0</strong>°C</span>
                     </div>
                 </div>
 
@@ -5495,7 +5495,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Heat Index</span>
-                        <div class="stat-icon" style="background: rgba(249, 115, 22, 0.2); color: #f97316;">
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">
                             HI
                         </div>
                     </div>
@@ -5508,7 +5508,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">ESP32 Signal</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">
                             dB
                         </div>
                     </div>
@@ -5521,9 +5521,9 @@ HTML_TEMPLATE = '''
                 <!-- AC Status - Full Width Detailed Panel -->
                 <div class="stat-card" id="ac-status-panel" style="grid-column: 1 / -1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0; overflow: hidden;">
                     <!-- Header Bar -->
-                    <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
+                    <div id="ac-panel-header" style="padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(79, 70, 229, 0.08)); border-bottom: 1px solid var(--border);">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #6366f1; font-size: 14px;">
+                            <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(37, 99, 235, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #2563eb; font-size: 14px;">
                                 AC
                             </div>
                             <div>
@@ -5532,8 +5532,8 @@ HTML_TEMPLATE = '''
                             </div>
                         </div>
                         <div id="ac-panel-power" style="display: flex; align-items: center; gap: 8px;">
-                            <div id="ac-panel-dot" style="width: 12px; height: 12px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);"></div>
-                            <span id="dash-ac-state" style="font-size: 16px; font-weight: 800; color: #ef4444;">OFF</span>
+                            <div id="ac-panel-dot" style="width: 12px; height: 12px; border-radius: 50%; background: #1e40af; box-shadow: 0 0 8px rgba(30, 64, 175, 0.5);"></div>
+                            <span id="dash-ac-state" style="font-size: 16px; font-weight: 800; color: #1e40af;">OFF</span>
                         </div>
                     </div>
                     <!-- Body Grid -->
@@ -5547,11 +5547,11 @@ HTML_TEMPLATE = '''
                             <div style="font-size: 12px; color: var(--text-secondary);">°C</div>
                         </div>
                         <!-- Fan Speed -->
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(139, 92, 246, 0.06); border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.15);">
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
                                 Fan Speed
                             </div>
-                            <div style="font-size: 28px; font-weight: 800; color: #8b5cf6;" id="dash-ac-fan">1</div>
+                            <div style="font-size: 28px; font-weight: 800; color: #3b82f6;" id="dash-ac-fan">1</div>
                             <div style="font-size: 12px; color: var(--text-secondary);" id="dash-ac-fan-label">Low</div>
                         </div>
                         <!-- AC Mode (COOL/HEAT/DRY/FAN/AUTO) -->
@@ -5563,12 +5563,12 @@ HTML_TEMPLATE = '''
                             <div style="font-size: 14px; font-weight: 700; color: #0ea5e9; margin-top: 2px;" id="dash-ac-mode">COOL</div>
                         </div>
                         <!-- Operating Mode (ADAPTIVE/MANUAL) -->
-                        <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
+                        <div style="text-align: center; padding: 14px 8px; background: rgba(59, 130, 246, 0.06); border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
                                 Control
                             </div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon">A</div>
-                            <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
+                            <div style="font-size: 22px; font-weight: 800; color: #3b82f6;" id="dash-ac-ctrl-icon">A</div>
+                            <div style="font-size: 14px; font-weight: 700; color: #3b82f6; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
                         </div>
                     </div>
                     <!-- Footer: Room Environment + extra info -->
@@ -5580,7 +5580,7 @@ HTML_TEMPLATE = '''
                             <span style="font-size: 11px; color: var(--text-secondary);">S3(Far): <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
                             <span>Hum: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
-                        <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
+                        <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(59, 130, 246, 0.12); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.25);">
                             AI Controlled
                         </div>
                     </div>
@@ -5588,8 +5588,8 @@ HTML_TEMPLATE = '''
 
                 <!-- Fan & Mode Decision Range Table -->
                 <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
-                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(234, 179, 8, 0.08)); border-bottom: 1px solid var(--border);">
-                        <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 13px;">
+                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(234, 179, 8, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(14, 165, 233, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #0ea5e9; font-size: 13px;">
                             &#9881;
                         </div>
                         <div>
@@ -5600,7 +5600,7 @@ HTML_TEMPLATE = '''
                     <div style="padding: 16px 20px; overflow-x: auto;">
                         <table style="width: 100%; border-collapse: collapse; font-size: 12px; color: var(--text);">
                             <thead>
-                                <tr style="background: rgba(245, 158, 11, 0.06); border-bottom: 2px solid var(--border);">
+                                <tr style="background: rgba(14, 165, 233, 0.06); border-bottom: 2px solid var(--border);">
                                     <th style="padding: 10px 12px; text-align: left; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Kondisi</th>
                                     <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Set Temp</th>
                                     <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Fan Speed</th>
@@ -5611,43 +5611,43 @@ HTML_TEMPLATE = '''
                                 <tr style="border-bottom: 1px solid var(--border);">
                                     <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">Tier 0</span> — No person</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">27–29°C</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(16,185,129,0.12); color: #10b981; font-weight: 600;">1 (Low)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(59,130,246,0.12); color: #3b82f6; font-weight: 600;">1 (Low)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL / FAN</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
                                     <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH ≤ 65%</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">24–26°C</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">1–2 (Adaptif)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">1–2 (Adaptif)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
                                     <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH &gt; 65%</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22–24°C</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">2–3</span></td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">2–3</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(37,99,235,0.12); color: #2563eb; font-weight: 600;">DRY</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">Tier 2</span> — 3–5 persons</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #0ea5e9; font-weight: 600;">Tier 2</span> — 3–5 persons</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22°C</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">3 (High)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(30,64,175,0.12); color: #1e40af; font-weight: 600;">3 (High)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
                                 </tr>
                                 <tr style="border-bottom: 1px solid var(--border);">
-                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">Tier 3</span> — &gt;5 persons</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #1e40af; font-weight: 600;">Tier 3</span> — &gt;5 persons</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">16°C (Min)</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">4 (Max)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(30,64,175,0.12); color: #1e40af; font-weight: 600;">4 (Max)</span></td>
                                     <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
                                 </tr>
                                 <tr>
-                                    <td style="padding: 10px 12px;"><span style="color: #a855f7; font-weight: 600;">Override</span> — RH &gt; 65% (all tiers)</td>
+                                    <td style="padding: 10px 12px;"><span style="color: #2563eb; font-weight: 600;">Override</span> — RH &gt; 65% (all tiers)</td>
                                     <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #6b7280;">−2°C offset</td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">+1 boost</span></td>
-                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(37,99,235,0.12); color: #2563eb; font-weight: 600;">+1 boost</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(37,99,235,0.12); color: #2563eb; font-weight: 600;">DRY</span></td>
                                 </tr>
                             </tbody>
                         </table>
-                        <div style="margin-top: 12px; padding: 8px 14px; border-radius: 8px; background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.15); font-size: 11px; color: var(--text-secondary);">
-                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization automatically determines the optimal combination based on room conditions, number of people, and temperature trends. The table above is a general guide.
+                        <div style="margin-top: 12px; padding: 8px 14px; border-radius: 8px; background: rgba(14, 165, 233, 0.06); border: 1px solid rgba(14, 165, 233, 0.15); font-size: 11px; color: var(--text-secondary);">
+                            <strong style="color: #0ea5e9;">&#9432;</strong> GA Optimization automatically determines the optimal combination based on room conditions, number of people, and temperature trends. The table above is a general guide.
                         </div>
                     </div>
                 </div>
@@ -5719,7 +5719,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Sensor 1 — Lux</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">
                             S1
                         </div>
                     </div>
@@ -5733,7 +5733,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Sensor 2 — Lux</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">
+                        <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">
                             S2
                         </div>
                     </div>
@@ -5747,7 +5747,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Sensor 3 — Lux</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">
                             S3
                         </div>
                     </div>
@@ -5761,7 +5761,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Average Lux (3 Sensors)</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">
                             AVG
                         </div>
                     </div>
@@ -5803,7 +5803,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Motion Detection</span>
-                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">
                             PIR
                         </div>
                     </div>
@@ -5817,14 +5817,14 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp Control</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">
                             PSO
                         </div>
                     </div>
                     <div class="stat-value" style="font-size: 24px;"><span>0.00</span></div>
                     <div class="stat-change" style="display: flex; flex-direction: column; gap: 4px;">
                         <span>Fitness Score</span>
-                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
+                        <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #0ea5e9; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
                 <!-- ===== PANEL EXPORT LUX & BRIGHTNESS FROM DATABASE ===== -->
@@ -5949,9 +5949,9 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- AC Energy Usage Section -->
-            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(16,185,129,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
                     <div>
                         <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Consumption</div>
                         <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
@@ -5969,17 +5969,17 @@ HTML_TEMPLATE = '''
                     <canvas id="acEnergyKwhChart" height="90"></canvas>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
-                        <div id="ac-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                        <div id="ac-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
                     </div>
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
-                        <div id="ac-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                        <div id="ac-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
                     </div>
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
-                        <div id="ac-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                        <div id="ac-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
                     </div>
                 </div>
             </div>
@@ -6033,9 +6033,9 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- Lamp Energy Usage Section -->
-            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(37,99,235,0.25);background:linear-gradient(160deg,rgba(37,99,235,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(168,85,247,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#128161;</div>
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(37,99,235,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#128161;</div>
                     <div>
                         <div style="font-size:16px;font-weight:700;color:var(--text);">Lamp Energy Usage</div>
                         <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
@@ -6053,17 +6053,17 @@ HTML_TEMPLATE = '''
                     <canvas id="lampEnergyKwhChart" height="90"></canvas>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
-                        <div id="lamp-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                        <div id="lamp-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#2563eb;">--</div>
                     </div>
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
-                        <div id="lamp-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                        <div id="lamp-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#2563eb;">--</div>
                     </div>
-                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.18);text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
-                        <div id="lamp-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                        <div id="lamp-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#2563eb;">--</div>
                     </div>
                 </div>
             </div>
@@ -6126,10 +6126,10 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
-                    <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
+                    <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; transition: all 0.3s;">
                         <span id="camera-toggle-text">Camera ON</span>
                     </button>
-                    <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; transition: all 0.3s;">
+                    <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; transition: all 0.3s;">
                         <span id="sound-toggle-text">Sound ON</span>
                     </button>
                     <button class="btn btn-success" onclick="retryCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600;">
@@ -6139,41 +6139,41 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- ===== PANEL OCCUPANCY HARIAN ===== -->
-            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(37,99,235,0.25);background:linear-gradient(160deg,rgba(37,99,235,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Daily Occupancy Chart</h2>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#2563eb;margin-right:8px;"></i>Daily Occupancy Chart</h2>
                         <p style="font-size:12px;color:var(--text-secondary);margin:0;">Persons detected per hour (auto-recorded every hour) &mdash; max 24 data/day</p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
-                        <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
-                        <button onclick="dbExportCSV('occupancy')" title="Export from InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
-                        <button onclick="occExportRange()" title="Export date range" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
+                        <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.15);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
+                        <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="dbExportCSV('occupancy')" title="Export from InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
+                        <button onclick="occExportRange()" title="Export date range" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(37,99,235,0.35);background:rgba(37,99,235,0.10);color:#2563eb;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
                         <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
                     </div>
                 </div>
                 <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
-                    <span style="color:var(--text-secondary);">Data shown: <strong id="occ-count" style="color:#a855f7;">0</strong> hrs</span>
+                    <span style="color:var(--text-secondary);">Data shown: <strong id="occ-count" style="color:#2563eb;">0</strong> hrs</span>
                     <span style="color:var(--text-secondary);">Next: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> persons</span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#3b82f6;">0</strong> persons</span>
                 </div>
                 <!-- Range filter occupancy -->
                 <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Today</button>
-                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Days</button>
-                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Days</button>
-                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">All</button>
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff;box-shadow:0 1px 4px rgba(37,99,235,0.3);">Today</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">7 Days</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">30 Days</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">All</button>
                 </div>
                 <!-- DB Export date range for occupancy -->
-                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);">
-                    <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#6366f1;margin-right:4px;"></i>DB Export:</span>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(37,99,235,0.04);border:1px solid rgba(37,99,235,0.12);">
+                    <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#2563eb;margin-right:4px;"></i>DB Export:</span>
                     <input type="date" id="db-occupancy-from" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
                     <span style="font-size:11px;color:var(--text-secondary);">to</span>
                     <input type="date" id="db-occupancy-to" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
-                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Today</button>
-                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Days</button>
-                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Days</button>
+                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">Today</button>
+                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">7 Days</button>
+                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">30 Days</button>
                 </div>
                 <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
                     <canvas id="occChart"></canvas>
@@ -6181,11 +6181,11 @@ HTML_TEMPLATE = '''
                 <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
-                            <tr style="background:rgba(168,85,247,0.08);">
+                            <tr style="background:rgba(37,99,235,0.08);">
                                 <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>
                                 <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Hour</th>
-                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Person Count</th>
-                                <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
+                                <th style="padding:8px 12px;text-align:right;color:#2563eb;font-weight:600;">Person Count</th>
+                                <th style="padding:8px 12px;text-align:right;color:#0ea5e9;font-weight:600;">Confidence (%)</th>
                             </tr>
                         </thead>
                         <tbody id="occ-preview-body">
@@ -6204,11 +6204,11 @@ HTML_TEMPLATE = '''
             </div>
 
             <!-- ===== LIVE ENERGY MONITOR ===== -->
-            <div style="background:var(--bg-card);border-radius:18px;border:1px solid rgba(99,102,241,0.2);overflow:hidden;margin-bottom:22px;box-shadow:0 4px 24px rgba(0,0,0,0.07);">
+            <div style="background:var(--bg-card);border-radius:18px;border:1px solid rgba(37,99,235,0.2);overflow:hidden;margin-bottom:22px;box-shadow:0 4px 24px rgba(0,0,0,0.07);">
                 <!-- Header -->
-                <div style="padding:14px 20px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,rgba(99,102,241,0.10),rgba(79,70,229,0.06));border-bottom:1px solid rgba(99,102,241,0.15);">
+                <div style="padding:14px 20px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,rgba(37,99,235,0.10),rgba(79,70,229,0.06));border-bottom:1px solid rgba(37,99,235,0.15);">
                     <div style="display:flex;align-items:center;gap:10px;">
-                        <div style="width:38px;height:38px;border-radius:10px;background:rgba(99,102,241,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
+                        <div style="width:38px;height:38px;border-radius:10px;background:rgba(37,99,235,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
                         <div>
                             <div style="font-size:15px;font-weight:700;color:var(--text);">Live Energy Monitor</div>
                             <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; updates every 5 seconds</div>
@@ -6225,55 +6225,55 @@ HTML_TEMPLATE = '''
                 <!-- AC + Lamp columns -->
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
                     <!-- ── AC ── -->
-                    <div style="padding:18px 20px;border-right:1px solid rgba(239,68,68,0.15);">
+                    <div style="padding:18px 20px;border-right:1px solid rgba(30,64,175,0.15);">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                            <div style="font-size:13px;font-weight:700;color:#ef4444;"><i class="fas fa-snowflake" style="margin-right:6px;"></i>AC (id_kwh=1)</div>
-                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">Live</div>
+                            <div style="font-size:13px;font-weight:700;color:#1e40af;"><i class="fas fa-snowflake" style="margin-right:6px;"></i>AC (id_kwh=1)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(30,64,175,0.1);color:#1e40af;border:1px solid rgba(30,64,175,0.2);">Live</div>
                         </div>
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
-                            <div style="font-size:48px;font-weight:800;color:#ef4444;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
+                            <div style="font-size:48px;font-weight:800;color:#1e40af;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
                             <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
-                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
-                                <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(30,64,175,0.12);overflow:hidden;">
+                                <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#1e40af,#93c5fd);width:0%;transition:width 0.6s ease;"></div>
                             </div>
                             <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 3.0 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-voltage">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">V</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Current</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
-                                <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-reactive">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-apparent">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">VA</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-freq">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
                             </div>
                         </div>
                         <!-- PF -->
-                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(239,68,68,0.04);border:1px solid rgba(239,68,68,0.1);">
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(30,64,175,0.04);border:1px solid rgba(30,64,175,0.1);">
                             <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
                             <div style="display:flex;align-items:center;gap:8px;">
                                 <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-ac-pf">--</span>
@@ -6310,9 +6310,9 @@ HTML_TEMPLATE = '''
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
-                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
                                 <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
-                                <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
@@ -6344,18 +6344,18 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <!-- Total footer row -->
-                <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(99,102,241,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(99,102,241,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
+                <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(37,99,235,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(37,99,235,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Power</div>
-                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
+                        <div style="font-size:20px;font-weight:800;color:#2563eb;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
                     </div>
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Current</div>
-                        <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
+                        <div style="font-size:20px;font-weight:800;color:#2563eb;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
                     </div>
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energy</div>
-                        <div style="font-size:20px;font-weight:800;color:#10b981;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
+                        <div style="font-size:20px;font-weight:800;color:#3b82f6;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
                     </div>
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frequency</div>
@@ -6363,24 +6363,24 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="text-align:center;">
                         <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Cost</div>
-                        <div style="font-size:17px;font-weight:800;color:#f59e0b;">Rp <span id="daily-cost">--</span></div>
+                        <div style="font-size:17px;font-weight:800;color:#0ea5e9;">Rp <span id="daily-cost">--</span></div>
                         <div style="font-size:9px;color:var(--text-secondary);">@ Rp 1.500/kWh</div>
                     </div>
                 </div>
             </div>
 
             <!-- ===== REAL-TIME CHARTS (last 30 points) ===== -->
-            <div style="background:var(--bg-card);border-radius:16px;border:1px solid rgba(99,102,241,0.18);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
-                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-chart-line" style="margin-right:8px;color:#6366f1;"></i>Real-time Charts &mdash; Last 30 Points</h2>
+            <div style="background:var(--bg-card);border-radius:16px;border:1px solid rgba(37,99,235,0.18);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-chart-line" style="margin-right:8px;color:#2563eb;"></i>Real-time Charts &mdash; Last 30 Points</h2>
                 <div class="chart-container" style="margin-bottom:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Frequency <span style="color:#f59e0b;">&#9632;</span> (Hz)</div>
+                        <div class="chart-title">Frequency <span style="color:#0ea5e9;">&#9632;</span> (Hz)</div>
                     </div>
                     <canvas id="mysqlVoltFreqChart" height="80"></canvas>
                 </div>
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title">Current &mdash; AC <span style="color:#f59e0b;">&#9632;</span> &amp; Lamp <span style="color:#06b6d4;">&#9632;</span> (A)</div>
+                        <div class="chart-title">Current &mdash; AC <span style="color:#0ea5e9;">&#9632;</span> &amp; Lamp <span style="color:#0ea5e9;">&#9632;</span> (A)</div>
                     </div>
                     <canvas id="mysqlCurrentChart" height="80"></canvas>
                 </div>
@@ -6388,12 +6388,12 @@ HTML_TEMPLATE = '''
 
             <!-- ===== GRAFIK HISTORIS (InfluxDB) ===== -->
             <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
-                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-history" style="margin-right:8px;color:#10b981;"></i>Historical Data (InfluxDB)</h2>
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-history" style="margin-right:8px;color:#3b82f6;"></i>Historical Data (InfluxDB)</h2>
 
                 <!-- Power -->
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title">Active Power &mdash; AC <span style="color:#ef4444;">&#9632;</span> &amp; Lamp <span style="color:#10b981;">&#9632;</span> (kW)</div>
+                        <div class="chart-title">Active Power &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Lamp <span style="color:#3b82f6;">&#9632;</span> (kW)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
@@ -6406,12 +6406,12 @@ HTML_TEMPLATE = '''
                     </div>
                     <canvas id="energyPowerChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
-                        <span style="color:#ef4444;font-weight:600;">AC</span>
+                        <span style="color:#1e40af;font-weight:600;">AC</span>
                         <span style="color:var(--text-secondary);">Latest: <strong id="energy-power-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text);">--</strong></span>
-                        <span style="color:#10b981;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:#3b82f6;font-weight:600;margin-left:10px;">Lamp</span>
                         <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text);">--</strong></span>
                     </div>
@@ -6439,7 +6439,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="chart-container">
                         <div class="chart-header">
-                            <div class="chart-title">Current &mdash; AC <span style="color:#f59e0b;">&#9632;</span> &amp; Lamp <span style="color:#06b6d4;">&#9632;</span> (A)</div>
+                            <div class="chart-title">Current &mdash; AC <span style="color:#0ea5e9;">&#9632;</span> &amp; Lamp <span style="color:#0ea5e9;">&#9632;</span> (A)</div>
                             <div class="chart-options">
                                 <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
                                 <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
@@ -6449,10 +6449,10 @@ HTML_TEMPLATE = '''
                         </div>
                         <canvas id="energyCurrentChart" height="100"></canvas>
                         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;">
-                            <span style="color:#f59e0b;font-weight:600;">AC</span>
+                            <span style="color:#0ea5e9;font-weight:600;">AC</span>
                             <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text);">--</strong></span>
                             <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text);">--</strong></span>
-                            <span style="color:#06b6d4;font-weight:600;margin-left:8px;">Lamp</span>
+                            <span style="color:#0ea5e9;font-weight:600;margin-left:8px;">Lamp</span>
                             <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text);">--</strong></span>
                             <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text);">--</strong></span>
                         </div>
@@ -6462,7 +6462,7 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#3b82f6;">&#9632;</span> &amp; Lamp <span style="color:#2563eb;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
@@ -6473,10 +6473,10 @@ HTML_TEMPLATE = '''
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
-                        <span style="color:#10b981;font-weight:600;">AC</span>
+                        <span style="color:#3b82f6;font-weight:600;">AC</span>
                         <span style="color:var(--text-secondary);">Last Interval: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
-                        <span style="color:#a855f7;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:#2563eb;font-weight:600;margin-left:10px;">Lamp</span>
                         <span style="color:var(--text-secondary);">Last Interval: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
                     </div>
@@ -6486,25 +6486,25 @@ HTML_TEMPLATE = '''
 
 
             <!-- ===== DAILY SUMMARY ===== -->
-            <div id="daily-summary-section" style="margin-top: 28px; padding: 22px; border-radius: 18px; border: 1px solid rgba(16,185,129,0.2); background: linear-gradient(160deg, rgba(16,185,129,0.06), rgba(241,245,249,0.94)); box-shadow: 0 8px 28px rgba(15,23,42,0.08);">
+            <div id="daily-summary-section" style="margin-top: 28px; padding: 22px; border-radius: 18px; border: 1px solid rgba(59,130,246,0.2); background: linear-gradient(160deg, rgba(59,130,246,0.06), rgba(241,245,249,0.94)); box-shadow: 0 8px 28px rgba(15,23,42,0.08);">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:10px;">
                     <div>
                         <h2 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Daily Summary</h2>
                         <p style="color:var(--text-secondary); font-size:12px; margin:0;">Today's energy statistics — <span id="daily-summary-date">--</span></p>
                     </div>
-                    <button onclick="loadDailySummary()" style="padding:7px 16px; border-radius:8px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.1); color:#10b981; font-size:12px; cursor:pointer;">↻ Refresh</button>
+                    <button onclick="loadDailySummary()" style="padding:7px 16px; border-radius:8px; border:1px solid rgba(59,130,246,0.4); background:rgba(59,130,246,0.1); color:#3b82f6; font-size:12px; cursor:pointer;">↻ Refresh</button>
                 </div>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:14px;">
                     <!-- AC kWh -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.07); border:1px solid rgba(30,64,175,0.18); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Energy</div>
-                        <div style="font-size:22px; font-weight:700; color:#ef4444;"><span id="ds-ac-kwh">--</span></div>
+                        <div style="font-size:22px; font-weight:700; color:#1e40af;"><span id="ds-ac-kwh">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
                     </div>
                     <!-- Lamp kWh -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.07); border:1px solid rgba(16,185,129,0.18); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.07); border:1px solid rgba(59,130,246,0.18); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Energy</div>
-                        <div style="font-size:22px; font-weight:700; color:#10b981;"><span id="ds-lamp-kwh">--</span></div>
+                        <div style="font-size:22px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-kwh">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
                     </div>
                     <!-- Total kWh -->
@@ -6514,46 +6514,46 @@ HTML_TEMPLATE = '''
                         <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
                     </div>
                     <!-- Estimated Cost -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(245,158,11,0.07); border:1px solid rgba(245,158,11,0.18); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(14,165,233,0.07); border:1px solid rgba(14,165,233,0.18); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Est. Cost</div>
-                        <div style="font-size:18px; font-weight:700; color:#f59e0b;">Rp<span id="ds-cost">--</span></div>
+                        <div style="font-size:18px; font-weight:700; color:#0ea5e9;">Rp<span id="ds-cost">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">@ Rp 1,500/kWh</div>
                     </div>
                     <!-- AC Peak Power -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.12); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.05); border:1px solid rgba(30,64,175,0.12); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Peak Power</div>
-                        <div style="font-size:20px; font-weight:700; color:#ef4444;"><span id="ds-ac-peak">--</span></div>
+                        <div style="font-size:20px; font-weight:700; color:#1e40af;"><span id="ds-ac-peak">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">W</div>
                     </div>
                     <!-- Lamp Peak Power -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.12); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.05); border:1px solid rgba(59,130,246,0.12); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Peak Power</div>
-                        <div style="font-size:20px; font-weight:700; color:#10b981;"><span id="ds-lamp-peak">--</span></div>
+                        <div style="font-size:20px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-peak">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">W</div>
                     </div>
                     <!-- AC Runtime -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.12); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.05); border:1px solid rgba(30,64,175,0.12); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Runtime</div>
-                        <div style="font-size:20px; font-weight:700; color:#ef4444;"><span id="ds-ac-runtime">--</span></div>
+                        <div style="font-size:20px; font-weight:700; color:#1e40af;"><span id="ds-ac-runtime">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">hours</div>
                     </div>
                     <!-- Lamp Runtime -->
-                    <div style="padding:14px; border-radius:12px; background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.12); text-align:center;">
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.05); border:1px solid rgba(59,130,246,0.12); text-align:center;">
                         <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Runtime</div>
-                        <div style="font-size:20px; font-weight:700; color:#10b981;"><span id="ds-lamp-runtime">--</span></div>
+                        <div style="font-size:20px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-runtime">--</span></div>
                         <div style="font-size:11px; color:var(--text-secondary);">hours</div>
                     </div>
                 </div>
             </div>
 
             <!-- ===== PANEL EXPORT ENERGY FROM DATABASE ===== -->
-            <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+            <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Energy Data from Database</h2>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Energy Data from Database</h2>
                         <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch energy data directly from InfluxDB — select date range &amp; device, export to CSV</p>
                     </div>
-                    <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
+                    <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.12);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">
                         <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                     </div>
                 </div>
@@ -6569,7 +6569,7 @@ HTML_TEMPLATE = '''
                         <input type="date" id="db-energy-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
                     <button onclick="dbExportCSV('energy_ac')"
-                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#1e40af,#1d4ed8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
                         <i class="fas fa-download"></i> Export AC
                     </button>
                     <button onclick="dbExportCSV('energy_lamp')"
@@ -6577,20 +6577,20 @@ HTML_TEMPLATE = '''
                         <i class="fas fa-download"></i> Export Lamp
                     </button>
                     <button onclick="dbExportSetToday('energy')"
-                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
                         Today
                     </button>
                     <button onclick="dbExportSet7d('energy')"
-                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
                         7 Days
                     </button>
                     <button onclick="dbExportSet30d('energy')"
-                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
                         30 Days
                     </button>
                 </div>
-                <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(16,185,129,0.05);border-radius:8px;border:1px solid rgba(16,185,129,0.12);">
-                    <i class="fas fa-info-circle" style="color:#10b981;margin-right:6px;"></i>
+                <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
+                    <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
                     Data fetched directly from InfluxDB — columns: <strong>Time, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
                 </div>
             </div>
@@ -6610,7 +6610,7 @@ HTML_TEMPLATE = '''
                     Control Mode
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                    <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #10b981; background: linear-gradient(135deg, #10b981, #059669); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                    <button id="btn-mode-adaptive" onclick="setACMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #3b82f6; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
                         <span style="font-size: 24px; font-weight: 800;">A</span>
                         <span>ADAPTIVE</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically</span>
@@ -6622,37 +6622,37 @@ HTML_TEMPLATE = '''
                     </button>
                 </div>
                 <!-- Current mode indicator -->
-                <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
+                <div id="ac-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(59, 130, 246, 0.1); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3);">
                     Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization
                 </div>
             </div>
 
             <!-- ========== ADAPTIVE INFO BANNER (shown when ADAPTIVE) ========== -->
-            <div id="adaptive-info-banner" style="margin-bottom: 20px; padding: 20px; border-radius: 14px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(5, 150, 105, 0.12)); border: 2px solid rgba(16, 185, 129, 0.3);">
+            <div id="adaptive-info-banner" style="margin-bottom: 20px; padding: 20px; border-radius: 14px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(37, 99, 235, 0.12)); border: 2px solid rgba(59, 130, 246, 0.3);">
                 <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
-                    <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #10b981, #059669); display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; font-weight: 800;">
+                    <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #3b82f6, #2563eb); display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; font-weight: 800;">
                         GA
                     </div>
                     <div>
-                        <div style="font-size: 16px; font-weight: 700; color: #10b981;">Adaptive Mode Active</div>
+                        <div style="font-size: 16px; font-weight: 700; color: #3b82f6;">Adaptive Mode Active</div>
                         <div style="font-size: 12px; color: var(--text-secondary);">GA Optimization controls temperature & fan speed</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 13px;">
-                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                    <div style="padding: 10px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="color: var(--text-secondary); font-size: 11px;">Temp</div>
-                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-temp">--</div>
+                        <div style="font-weight: 700; color: #3b82f6; font-size: 18px;" id="adaptive-ga-temp">--</div>
                     </div>
-                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                    <div style="padding: 10px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="color: var(--text-secondary); font-size: 11px;">Fan</div>
-                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fan">--</div>
+                        <div style="font-weight: 700; color: #3b82f6; font-size: 18px;" id="adaptive-ga-fan">--</div>
                     </div>
-                    <div style="padding: 10px; background: rgba(16, 185, 129, 0.1); border-radius: 8px; text-align: center;">
+                    <div style="padding: 10px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; text-align: center;">
                         <div style="color: var(--text-secondary); font-size: 11px;">Fitness</div>
-                        <div style="font-weight: 700; color: #10b981; font-size: 18px;" id="adaptive-ga-fitness">--</div>
+                        <div style="font-weight: 700; color: #3b82f6; font-size: 18px;" id="adaptive-ga-fitness">--</div>
                     </div>
                 </div>
-                <div style="margin-top: 12px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 12px; color: #f59e0b; text-align: center;">
+                <div style="margin-top: 12px; padding: 10px; background: rgba(14, 165, 233, 0.1); border-radius: 8px; border: 1px solid rgba(14, 165, 233, 0.3); font-size: 12px; color: #0ea5e9; text-align: center;">
                     Manual control disabled in Adaptive mode. Switch to Manual to control AC.
                 </div>
             </div>
@@ -6673,9 +6673,9 @@ HTML_TEMPLATE = '''
                 </div>
                 
                 <!-- AC Realtime Status Bar -->
-                <div id="ac-live-status" style="margin-top: 12px; padding: 12px 16px; background: rgba(99, 102, 241, 0.08); border: 1px solid var(--border); border-radius: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                <div id="ac-live-status" style="margin-top: 12px; padding: 12px 16px; background: rgba(37, 99, 235, 0.08); border: 1px solid var(--border); border-radius: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
                     <div style="display: flex; align-items: center; gap: 8px;">
-                        <div id="ac-live-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #ef4444;"></div>
+                        <div id="ac-live-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #1e40af;"></div>
                         <span style="font-weight: 600; color: var(--text);">AC <span id="ac-live-state">OFF</span></span>
                     </div>
                     <div style="display: flex; gap: 16px; color: var(--text-secondary);">
@@ -6712,13 +6712,13 @@ HTML_TEMPLATE = '''
                         <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white;" onclick="sendACMode('MODE_COOL', this)">
                             Cool
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #ef4444; color: white;" onclick="sendACMode('MODE_HEAT', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #1e40af; color: white;" onclick="sendACMode('MODE_HEAT', this)">
                             Heat
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #8b5cf6; color: white;" onclick="sendACMode('MODE_FAN', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #3b82f6; color: white;" onclick="sendACMode('MODE_FAN', this)">
                             Fan
                         </button>
-                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #f97316; color: white;" onclick="sendACMode('MODE_DRY', this)">
+                        <button class="btn ac-mode-btn" style="padding: 15px 10px; font-size: 13px; border-radius: 12px; background: #0ea5e9; color: white;" onclick="sendACMode('MODE_DRY', this)">
                             Dry
                         </button>
                     </div>
@@ -6749,7 +6749,7 @@ HTML_TEMPLATE = '''
                 </div>
 
                 <!-- AC Temperature & Fan Speed Sliders -->
-                <div style="margin-top: 20px; padding: 20px; background: rgba(99, 102, 241, 0.05); border-radius: 12px; border: 1px solid var(--border);">
+                <div style="margin-top: 20px; padding: 20px; background: rgba(37, 99, 235, 0.05); border-radius: 12px; border: 1px solid var(--border);">
                     <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 15px; font-weight: 600;">
                         AC Settings (Direct MQTT)
                     </div>
@@ -6818,7 +6818,7 @@ HTML_TEMPLATE = '''
                     Lamp Control Mode
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                    <button id="btn-lamp-adaptive" onclick="setLampMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #f59e0b; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+                    <button id="btn-lamp-adaptive" onclick="setLampMode('ADAPTIVE')" style="padding: 18px 16px; border-radius: 14px; border: 3px solid #0ea5e9; background: linear-gradient(135deg, #0ea5e9, #0284c7); color: white; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; flex-direction: column; align-items: center; gap: 6px;">
                         <span style="font-size: 24px; font-weight: 800;">A</span>
                         <span>ADAPTIVE</span>
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">PSO controls lamps automatically</span>
@@ -6829,7 +6829,7 @@ HTML_TEMPLATE = '''
                         <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">Control lamps manually</span>
                     </button>
                 </div>
-                <div id="lamp-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);">
+                <div id="lamp-mode-indicator" style="margin-top: 14px; padding: 10px 16px; border-radius: 10px; text-align: center; font-size: 13px; font-weight: 600; background: rgba(14, 165, 233, 0.1); color: #0ea5e9; border: 1px solid rgba(14, 165, 233, 0.3);">
                     Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization
                 </div>
             </div>
@@ -6843,19 +6843,19 @@ HTML_TEMPLATE = '''
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px; padding: 12px; background: var(--bg-elevated); border-radius: 10px; border: 1px solid var(--border);">
                     <div style="flex: 1; min-width: 80px; text-align: center;">
                         <div style="font-size: 11px; color: var(--text-secondary);">Sensor 1</div>
-                        <div style="font-size: 18px; font-weight: 700; color: #f59e0b;"><span id="ctrl-lux1">0</span> lx</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #0ea5e9;"><span id="ctrl-lux1">0</span> lx</div>
                     </div>
                     <div style="flex: 1; min-width: 80px; text-align: center;">
                         <div style="font-size: 11px; color: var(--text-secondary);">Sensor 2</div>
-                        <div style="font-size: 18px; font-weight: 700; color: #10b981;"><span id="ctrl-lux2">0</span> lx</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #3b82f6;"><span id="ctrl-lux2">0</span> lx</div>
                     </div>
                     <div style="flex: 1; min-width: 80px; text-align: center;">
                         <div style="font-size: 11px; color: var(--text-secondary);">Sensor 3</div>
-                        <div style="font-size: 18px; font-weight: 700; color: #6366f1;"><span id="ctrl-lux3">0</span> lx</div>
+                        <div style="font-size: 18px; font-weight: 700; color: #2563eb;"><span id="ctrl-lux3">0</span> lx</div>
                     </div>
                     <div style="flex: 1; min-width: 80px; text-align: center;">
                         <div style="font-size: 11px; color: var(--text-secondary);">Motion</div>
-                        <div style="font-size: 18px; font-weight: 700;" id="ctrl-motion-status"><span style="color: #ef4444;">IDLE</span></div>
+                        <div style="font-size: 18px; font-weight: 700;" id="ctrl-motion-status"><span style="color: #1e40af;">IDLE</span></div>
                     </div>
                 </div>
 
@@ -6900,38 +6900,38 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">GA -> AC</span>
-                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">GA</div>
+                        <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">GA</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #10b981;">0.00</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #3b82f6;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimized Temp</span>
-                        <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
+                        <div class="stat-icon" style="background: rgba(30, 64, 175, 0.2); color: #1e40af;">T</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #1e40af;">--</span>°C</div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#1e40af;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PSO -> Lamp</span>
-                        <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">PSO</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #0ea5e9;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
                     <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">PWM Optimal</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">PWM</div>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">PWM</div>
                     </div>
                     <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
-                        PWM1: <span id="ml-pso-pwm1" style="color: #6366f1; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
-                        PWM2: <span id="ml-pso-pwm2" style="color: #a855f7; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
+                        PWM1: <span id="ml-pso-pwm1" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
+                        PWM2: <span id="ml-pso-pwm2" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
                     </div>
                     <div class="stat-change">
                         Lux1: <span id="ml-pso-lux1" style="color:#22d3ee;font-weight:600;">--</span>
@@ -6943,7 +6943,7 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Current Conditions</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">DB</div>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">DB</div>
                     </div>
                     <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
                         Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
@@ -6955,9 +6955,9 @@ HTML_TEMPLATE = '''
                 <div class="stat-card">
                     <div class="stat-header">
                         <span class="stat-title">Optimization Runs</span>
-                        <div class="stat-icon" style="background: rgba(168, 85, 247, 0.2); color: #a855f7;">#</div>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">#</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #a855f7;">0</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #2563eb;">0</span></div>
                     <div class="stat-change"><span>Total Cycles</span></div>
                 </div>
             </div>
@@ -6987,16 +6987,16 @@ HTML_TEMPLATE = '''
                 <div id="pso-iter-table-wrap" style="overflow-x:auto;margin-bottom:8px;display:none;">
                     <table style="width:100%;border-collapse:collapse;font-size:12px;">
                         <thead>
-                            <tr style="background:rgba(245,158,11,0.15);">
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Iteration</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 1</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 2</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 1</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 2</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 3</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux Avg</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Fitness (%)</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Status</th>
+                            <tr style="background:rgba(14,165,233,0.15);">
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Iteration</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 3</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux Avg</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Fitness (%)</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Status</th>
                             </tr>
                         </thead>
                         <tbody id="pso-iter-tbody"></tbody>
@@ -7256,7 +7256,7 @@ HTML_TEMPLATE = '''
             if (uEl) uEl.textContent = username || role;
             if (lEl) {
                 lEl.textContent = role === 'admin' ? 'ADMIN' : 'USER';
-                lEl.style.background = role === 'admin' ? '#6366f1' : '#10b981';
+                lEl.style.background = role === 'admin' ? '#2563eb' : '#3b82f6';
             }
             if (role !== 'admin') {
                 document.body.classList.add('role-user');
@@ -7370,8 +7370,8 @@ HTML_TEMPLATE = '''
                         tooltip: {
                             enabled: true,
                             backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                            titleColor: '#f8fafc',
-                            bodyColor: '#e2e8f0',
+                            titleColor: '#f0f7ff',
+                            bodyColor: '#bfdbfe',
                             borderColor: 'rgba(148,163,184,0.35)',
                             borderWidth: 1,
                             displayColors: true,
@@ -7395,7 +7395,7 @@ HTML_TEMPLATE = '''
 
             charts.temp = new Chart(document.getElementById('tempChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Temperature (\u00b0C)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Temperature (\u00b0C)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.hum = new Chart(document.getElementById('humChart'), {
@@ -7405,32 +7405,32 @@ HTML_TEMPLATE = '''
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Set Temperature (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Set Temperature (\u00b0C)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.acHum = new Chart(document.getElementById('acHumChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Set RH (%)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Set RH (%)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Light Intensity (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Light Intensity (lux)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampBright = new Chart(document.getElementById('lampBrightChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Brightness (%)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.acPower = new Chart(document.getElementById('acPowerChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'AC Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
+                data: { labels: [], datasets: [{ label: 'AC Power (W)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
             });
 
             charts.lampPower = new Chart(document.getElementById('lampPowerChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Lamp Power (W)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
+                data: { labels: [], datasets: [{ label: 'Lamp Power (W)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
             });
 
             // AC & Lamp individual energy kWh charts (analytics pages)
@@ -7442,8 +7442,8 @@ HTML_TEMPLATE = '''
                     plugins: {
                         legend: { display: false },
                         tooltip: {
-                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
-                            bodyColor: '#e2e8f0', borderColor: 'rgba(16,185,129,0.4)', borderWidth: 1,
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff',
+                            bodyColor: '#bfdbfe', borderColor: 'rgba(59,130,246,0.4)', borderWidth: 1,
                             displayColors: false,
                             callbacks: {
                                 label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
@@ -7452,19 +7452,19 @@ HTML_TEMPLATE = '''
                     },
                     scales: {
                         x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
-                        y: { beginAtZero: true, grid: { color: 'rgba(16,185,129,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                        y: { beginAtZero: true, grid: { color: 'rgba(59,130,246,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
                     }
                 },
                 data: { labels: [], datasets: [{
                     label: 'AC Energy (kWh)', data: [],
-                    borderColor: '#10b981', borderWidth: 2, tension: 0.3,
+                    borderColor: '#3b82f6', borderWidth: 2, tension: 0.3,
                     backgroundColor: function(ctx) {
-                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(16,185,129,0.1)';
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(59,130,246,0.1)';
                         var g = c.createLinearGradient(0, a.top, 0, a.bottom);
-                        g.addColorStop(0, 'rgba(16,185,129,0.25)'); g.addColorStop(1, 'rgba(16,185,129,0.02)'); return g;
+                        g.addColorStop(0, 'rgba(59,130,246,0.25)'); g.addColorStop(1, 'rgba(59,130,246,0.02)'); return g;
                     },
                     fill: true, pointRadius: 2, pointHoverRadius: 6,
-                    pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2
+                    pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2
                 }] }
             });
 
@@ -7476,8 +7476,8 @@ HTML_TEMPLATE = '''
                     plugins: {
                         legend: { display: false },
                         tooltip: {
-                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
-                            bodyColor: '#e2e8f0', borderColor: 'rgba(168,85,247,0.4)', borderWidth: 1,
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff',
+                            bodyColor: '#bfdbfe', borderColor: 'rgba(37,99,235,0.4)', borderWidth: 1,
                             displayColors: false,
                             callbacks: {
                                 label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
@@ -7486,27 +7486,27 @@ HTML_TEMPLATE = '''
                     },
                     scales: {
                         x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
-                        y: { beginAtZero: true, grid: { color: 'rgba(168,85,247,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                        y: { beginAtZero: true, grid: { color: 'rgba(37,99,235,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
                     }
                 },
                 data: { labels: [], datasets: [{
                     label: 'Lamp Energy (kWh)', data: [],
-                    borderColor: '#a855f7', borderWidth: 2, tension: 0.3,
+                    borderColor: '#2563eb', borderWidth: 2, tension: 0.3,
                     backgroundColor: function(ctx) {
-                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(168,85,247,0.1)';
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(37,99,235,0.1)';
                         var g = c.createLinearGradient(0, a.top, 0, a.bottom);
-                        g.addColorStop(0, 'rgba(168,85,247,0.25)'); g.addColorStop(1, 'rgba(168,85,247,0.02)'); return g;
+                        g.addColorStop(0, 'rgba(37,99,235,0.25)'); g.addColorStop(1, 'rgba(37,99,235,0.02)'); return g;
                     },
                     fill: true, pointRadius: 2, pointHoverRadius: 6,
-                    pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2
+                    pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2
                 }] }
             });
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Power (W)', data: [], borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#ef4444', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Power (W)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Power (W)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Power (W)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
             });
 
@@ -7520,16 +7520,16 @@ HTML_TEMPLATE = '''
             charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
                 type: 'line', options: makeEnergyOpts('A'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Current (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Current (A)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Current (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Current (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
                 ]}
             });
 
@@ -7539,7 +7539,7 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'Frequency (Hz)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.12)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
+                        { label: 'Frequency (Hz)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.12)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
                     ]
                 },
                 options: {
@@ -7557,8 +7557,8 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'AC (A)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true },
-                        { label: 'Lamp (A)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
+                        { label: 'AC (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true },
+                        { label: 'Lamp (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
                     ]
                 },
                 options: {
@@ -7587,42 +7587,42 @@ HTML_TEMPLATE = '''
 
             charts.energyCompareBefore = new Chart(document.getElementById('energyCompareBeforeChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'Before — Power', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before — Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareAfter = new Chart(document.getElementById('energyCompareAfterChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'After — Power', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After — Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareKwhBefore = new Chart(document.getElementById('energyCompareKwhBeforeChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'Before — Energy', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before — Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareKwhAfter = new Chart(document.getElementById('energyCompareKwhAfterChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'After — Energy', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After — Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             // Lamp Comparison Charts
             charts.lampCompareBefore = new Chart(document.getElementById('lampCompareBeforeChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'Before — Lamp Power', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before — Lamp Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareAfter = new Chart(document.getElementById('lampCompareAfterChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'After — Lamp Power', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After — Lamp Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareKwhBefore = new Chart(document.getElementById('lampCompareKwhBeforeChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'Before — Lamp Energy', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#f59e0b', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before — Lamp Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareKwhAfter = new Chart(document.getElementById('lampCompareKwhAfterChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'After — Lamp Energy', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After — Lamp Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#06b6d4', backgroundColor: 'rgba(6,182,212,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#06b6d4', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
@@ -7650,7 +7650,7 @@ HTML_TEMPLATE = '''
 
             charts.gaFitness = new Chart(document.getElementById('gaFitnessChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
+                data: { labels: [], datasets: [{ label: 'GA Best Fitness', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
             });
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
@@ -7658,9 +7658,9 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'PWM 1 (0-255)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
-                        { label: 'PWM 2 (0-255)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
-                        { label: 'Lux Avg (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.3, fill: true, pointRadius: 4, yAxisID: 'yLux', borderDash: [4,2] },
+                        { label: 'PWM 1 (0-255)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'PWM 2 (0-255)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'Lux Avg (lux)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.3, fill: true, pointRadius: 4, yAxisID: 'yLux', borderDash: [4,2] },
                     ]
                 },
                 options: {
@@ -7675,8 +7675,8 @@ HTML_TEMPLATE = '''
                     },
                     scales: {
                         x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                        yPWM: { type: 'linear', position: 'left', min: 0, max: 255, ticks: { color: '#6366f1', font: { size: 10 } }, title: { display: true, text: 'PWM', color: '#6366f1', font: { size: 10 } }, grid: { color: 'rgba(99,102,241,0.08)' } },
-                        yLux: { type: 'linear', position: 'right', min: 0, ticks: { color: '#f59e0b', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+                        yPWM: { type: 'linear', position: 'left', min: 0, max: 255, ticks: { color: '#2563eb', font: { size: 10 } }, title: { display: true, text: 'PWM', color: '#2563eb', font: { size: 10 } }, grid: { color: 'rgba(37,99,235,0.08)' } },
+                        yLux: { type: 'linear', position: 'right', min: 0, ticks: { color: '#0ea5e9', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#0ea5e9', font: { size: 10 } }, grid: { drawOnChartArea: false } },
                     }
                 }
             });
@@ -7686,8 +7686,8 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'GA (AC)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3 },
-                        { label: 'PSO (Lamp)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: false, pointRadius: 3 }
+                        { label: 'GA (AC)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: false, pointRadius: 3 },
+                        { label: 'PSO (Lamp)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: false, pointRadius: 3 }
                     ]
                 }
             });
@@ -7812,10 +7812,10 @@ HTML_TEMPLATE = '''
         };
 
         var energyColorMap = {
-            'power': '#ef4444',
+            'power': '#1e40af',
             'voltage': '#3b82f6',
-            'current': '#f59e0b',
-            'energy_kwh': '#10b981'
+            'current': '#0ea5e9',
+            'energy_kwh': '#3b82f6'
         };
 
         function updateEnergyStats(field, values) {
@@ -7887,10 +7887,10 @@ HTML_TEMPLATE = '''
             const plotW = width - padX * 2;
             const plotH = height - padY * 2;
 
-            ctx.strokeStyle = energyColorMap[field] || '#a855f7';
+            ctx.strokeStyle = energyColorMap[field] || '#2563eb';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            const dotColor = energyColorMap[field] || '#a855f7';
+            const dotColor = energyColorMap[field] || '#2563eb';
             values.forEach((v, i) => {
                 const x = padX + (i / Math.max(1, values.length - 1)) * plotW;
                 const y = padY + (1 - ((v - minV) / (maxV - minV))) * plotH;
@@ -8010,7 +8010,7 @@ HTML_TEMPLATE = '''
                                         plugins: Object.assign({}, makeEnergyOpts('kWh').plugins, {
                                             legend: { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } },
                                             tooltip: { mode: 'index', intersect: false,
-                                                backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc', bodyColor: '#e2e8f0',
+                                                backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff', bodyColor: '#bfdbfe',
                                                 borderColor: 'rgba(148,163,184,0.35)', borderWidth: 1, displayColors: true,
                                                 callbacks: { title: function(){return '';}, label: function(){return '';} }
                                             }
@@ -8022,16 +8022,16 @@ HTML_TEMPLATE = '''
                                         }
                                     }),
                                     data: { labels: [], datasets: [
-                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(16,185,129,0.6)', borderColor: '#10b981', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 },
-                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(168,85,247,0.6)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 }
+                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(59,130,246,0.6)', borderColor: '#3b82f6', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 },
+                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(37,99,235,0.6)', borderColor: '#2563eb', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 }
                                     ]}
                                 });
                             } else {
                                 chart = new Chart(canvas, {
                                     type: 'line', options: makeEnergyOpts('kWh'),
                                     data: { labels: [], datasets: [
-                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
                                     ]}
                                 });
                             }
@@ -8219,7 +8219,7 @@ HTML_TEMPLATE = '''
                         if (!banner) {
                             banner = document.createElement('div');
                             banner.id = 'tz-warning-banner';
-                            banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#1e293b;padding:8px 20px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;gap:12px;';
+                            banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#0ea5e9;color:#1e293b;padding:8px 20px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;gap:12px;';
                             banner.innerHTML = '<span>⚠ Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.remove()" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;">✕</button>';
                             document.body.prepend(banner);
                         }
@@ -8273,17 +8273,17 @@ HTML_TEMPLATE = '''
                 var btnEl = document.getElementById('btn-record-' + phase);
                 if (!statusEl || !btnEl) return;
 
-                var baseColor = phase === 'before' ? '#f59e0b' : '#10b981';
-                var darkColor = phase === 'before' ? '#d97706' : '#059669';
+                var baseColor = phase === 'before' ? '#0ea5e9' : '#3b82f6';
+                var darkColor = phase === 'before' ? '#0284c7' : '#2563eb';
 
                 if (r.active) {
                     var start = new Date(r.start + 'Z');
                     var elapsed = Math.round((Date.now() - start.getTime()) / 3600000);
                     var days = Math.floor(elapsed / 24);
                     var hours = elapsed % 24;
-                    statusEl.innerHTML = '<i class="fas fa-circle" style="color: #ef4444; font-size: 8px; animation: blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleDateString() + ' ' + start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '<br>Duration: ' + days + 'd ' + hours + 'h';
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color: #1e40af; font-size: 8px; animation: blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleDateString() + ' ' + start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + '<br>Duration: ' + days + 'd ' + hours + 'h';
                     btnEl.innerHTML = 'STOP RECORDING';
-                    btnEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                    btnEl.style.background = 'linear-gradient(135deg, #1e40af, #1d4ed8)';
                 } else if (r.start && r.end) {
                     var start = new Date(r.start + 'Z');
                     var end = new Date(r.end + 'Z');
@@ -8347,9 +8347,9 @@ HTML_TEMPLATE = '''
                         var savingsEl = document.getElementById('compare-savings');
                         savingsEl.textContent = summary.savings_percent || '--';
                         if (summary.savings_percent > 0) {
-                            savingsEl.style.color = '#10b981';
+                            savingsEl.style.color = '#3b82f6';
                         } else if (summary.savings_percent < 0) {
-                            savingsEl.style.color = '#ef4444';
+                            savingsEl.style.color = '#1e40af';
                         }
                     }
 
@@ -8412,15 +8412,15 @@ HTML_TEMPLATE = '''
                 var btnEl = document.getElementById('lamp-btn-record-' + phase);
                 if (!statusEl || !btnEl) return;
 
-                var baseColor = phase === 'before' ? '#f59e0b' : '#10b981';
-                var darkColor = phase === 'before' ? '#d97706' : '#059669';
+                var baseColor = phase === 'before' ? '#0ea5e9' : '#3b82f6';
+                var darkColor = phase === 'before' ? '#0284c7' : '#2563eb';
 
                 if (r.active) {
                     var start = new Date(r.start + 'Z');
                     var elapsed = Math.round((Date.now() - start.getTime()) / 3600000);
-                    statusEl.innerHTML = '<i class="fas fa-circle" style="color:#ef4444;font-size:8px;animation:blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + '<br>Duration: ' + Math.floor(elapsed/24) + 'd ' + (elapsed%24) + 'h';
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color:#1e40af;font-size:8px;animation:blink 1s infinite;"></i> <strong>Recording</strong> since ' + start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + '<br>Duration: ' + Math.floor(elapsed/24) + 'd ' + (elapsed%24) + 'h';
                     btnEl.textContent = 'STOP RECORDING';
-                    btnEl.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)';
+                    btnEl.style.background = 'linear-gradient(135deg,#1e40af,#1d4ed8)';
                 } else if (r.start && r.end) {
                     var start = new Date(r.start + 'Z');
                     var end = new Date(r.end + 'Z');
@@ -8478,7 +8478,7 @@ HTML_TEMPLATE = '''
                         el = document.getElementById('lamp-compare-savings');
                         if (el) {
                             el.textContent = summary.savings_percent || '--';
-                            el.style.color = summary.savings_percent > 0 ? '#10b981' : (summary.savings_percent < 0 ? '#ef4444' : '');
+                            el.style.color = summary.savings_percent > 0 ? '#3b82f6' : (summary.savings_percent < 0 ? '#1e40af' : '');
                         }
                     }
                     if (result.recording) updateLampRecordingUI(result.recording);
@@ -8770,18 +8770,18 @@ HTML_TEMPLATE = '''
             wrap.style.display = 'block';
             tbody.innerHTML = iterLog.map(d => {
                 const inRange     = d.lux_avg >= 315 && d.lux_avg <= 385;
-                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusColor = inRange ? '#3b82f6' : '#0ea5e9';
                 const statusText  = inRange ? '✓ Target' : '✗ Not yet';
                 const fitPct      = Math.max(0, 100.0 - (d.fitness / 122500.0) * 100.0).toFixed(1);
                 return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#2563eb;">${d.pwm1}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#2563eb;">${d.pwm2}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:#0ea5e9;font-weight:600;">${d.lux_avg}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#3b82f6;font-weight:600;">${fitPct}%</td>
                     <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
                 </tr>`;
             }).join('');
@@ -8811,17 +8811,17 @@ HTML_TEMPLATE = '''
                 if (!tbody) return;
                 wrap.style.display = 'block';
                 const inRange     = (d.lux_avg || 0) >= 315 && (d.lux_avg || 0) <= 385;
-                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusColor = inRange ? '#3b82f6' : '#0ea5e9';
                 const statusText  = inRange ? '✓ Target' : '✗ Not yet';
                 const newRow = `<tr data-iter="${d.iter}" style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2 != null ? d.pwm2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#2563eb;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#2563eb;">${d.pwm2 != null ? d.pwm2 : '--'}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
                     <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg != null ? d.lux_avg : '--'}</td>
-                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:#0ea5e9;font-weight:600;">${d.lux_avg != null ? d.lux_avg : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#3b82f6;font-weight:600;">${fitPct}%</td>
                     <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
                 </tr>`;
                 const existingRow = tbody.querySelector('tr[data-iter="' + d.iter + '"]');
@@ -8856,8 +8856,8 @@ HTML_TEMPLATE = '''
                 tbody.insertAdjacentHTML('beforeend',
                     '<tr data-iter="' + d.iter + '" style="border-bottom:1px solid rgba(255,255,255,0.05);opacity:0.6;">' +
                         '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + d.iter + '</td>' +
-                        '<td style="padding:4px 8px;text-align:center;color:#6366f1;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
-                        '<td style="padding:4px 8px;text-align:center;color:#a855f7;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#2563eb;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#2563eb;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
                         '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Reading sensors...</td>' +
                     '</tr>');
 
@@ -9230,10 +9230,10 @@ HTML_TEMPLATE = '''
             const text = document.getElementById('camera-toggle-text');
             if (!btn) return;
             if (cameraEnabled) {
-                btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                btn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
                 text.textContent = 'Camera ON';
             } else {
-                btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                btn.style.background = 'linear-gradient(135deg, #1e40af, #1d4ed8)';
                 text.textContent = 'Camera OFF';
             }
         }
@@ -9267,17 +9267,17 @@ HTML_TEMPLATE = '''
                     const statusEl = document.getElementById('cam-status');
                     if (data.status === 'active') {
                         statusEl.textContent = 'Active';
-                        statusEl.style.color = '#10b981';
+                        statusEl.style.color = '#3b82f6';
                         document.getElementById('cam-resolution').textContent = data.width + ' x ' + data.height;
                         document.getElementById('cam-fps').textContent = data.fps + ' FPS';
                     } else {
                         statusEl.textContent = 'Inactive';
-                        statusEl.style.color = '#ef4444';
+                        statusEl.style.color = '#1e40af';
                     }
                 })
                 .catch(e => {
                     document.getElementById('cam-status').textContent = 'Error';
-                    document.getElementById('cam-status').style.color = '#ef4444';
+                    document.getElementById('cam-status').style.color = '#1e40af';
                 });
         }
 
@@ -9345,8 +9345,8 @@ HTML_TEMPLATE = '''
             if (!ac) return;
             var features = [
                 {id: 'btn-swing', statusId: 'swing-status', key: 'swing', color: '#0ea5e9'},
-                {id: 'btn-turbo', statusId: 'turbo-status', key: 'turbo', color: '#ef4444'},
-                {id: 'btn-econo', statusId: 'econo-status', key: 'econo', color: '#10b981'}
+                {id: 'btn-turbo', statusId: 'turbo-status', key: 'turbo', color: '#1e40af'},
+                {id: 'btn-econo', statusId: 'econo-status', key: 'econo', color: '#3b82f6'}
             ];
             features.forEach(function(f) {
                 var btn = document.getElementById(f.id);
@@ -9492,15 +9492,15 @@ HTML_TEMPLATE = '''
                 if (banner) banner.style.display = 'block';
                 // Indicator
                 if (indicator) {
-                    indicator.style.background = 'rgba(16, 185, 129, 0.1)';
-                    indicator.style.color = '#10b981';
-                    indicator.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    indicator.style.background = 'rgba(59, 130, 246, 0.1)';
+                    indicator.style.color = '#3b82f6';
+                    indicator.style.borderColor = 'rgba(59, 130, 246, 0.3)';
                     indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization';
                 }
                 // Button styles
                 if (btnAdaptive) {
-                    btnAdaptive.style.background = 'linear-gradient(135deg, #10b981, #059669)';
-                    btnAdaptive.style.borderColor = '#10b981';
+                    btnAdaptive.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
+                    btnAdaptive.style.borderColor = '#3b82f6';
                     btnAdaptive.style.color = 'white';
                     btnAdaptive.style.opacity = '1';
                 }
@@ -9516,15 +9516,15 @@ HTML_TEMPLATE = '''
                 if (banner) banner.style.display = 'none';
                 // Indicator
                 if (indicator) {
-                    indicator.style.background = 'rgba(245, 158, 11, 0.1)';
-                    indicator.style.color = '#f59e0b';
-                    indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                    indicator.style.background = 'rgba(14, 165, 233, 0.1)';
+                    indicator.style.color = '#0ea5e9';
+                    indicator.style.borderColor = 'rgba(14, 165, 233, 0.3)';
                     indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
-                    btnManual.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-                    btnManual.style.borderColor = '#f59e0b';
+                    btnManual.style.background = 'linear-gradient(135deg, #0ea5e9, #0284c7)';
+                    btnManual.style.borderColor = '#0ea5e9';
                     btnManual.style.color = 'white';
                     btnManual.style.opacity = '1';
                 }
@@ -9583,14 +9583,14 @@ HTML_TEMPLATE = '''
             if (mode === 'ADAPTIVE') {
                 if (overlay) overlay.style.display = 'flex';
                 if (indicator) {
-                    indicator.style.background = 'rgba(245, 158, 11, 0.1)';
-                    indicator.style.color = '#f59e0b';
-                    indicator.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                    indicator.style.background = 'rgba(14, 165, 233, 0.1)';
+                    indicator.style.color = '#0ea5e9';
+                    indicator.style.borderColor = 'rgba(14, 165, 233, 0.3)';
                     indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization';
                 }
                 if (btnAdaptive) {
-                    btnAdaptive.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-                    btnAdaptive.style.borderColor = '#f59e0b';
+                    btnAdaptive.style.background = 'linear-gradient(135deg, #0ea5e9, #0284c7)';
+                    btnAdaptive.style.borderColor = '#0ea5e9';
                     btnAdaptive.style.color = 'white';
                     btnAdaptive.style.opacity = '1';
                 }
@@ -9603,14 +9603,14 @@ HTML_TEMPLATE = '''
             } else {
                 if (overlay) overlay.style.display = 'none';
                 if (indicator) {
-                    indicator.style.background = 'rgba(99, 102, 241, 0.1)';
-                    indicator.style.color = '#6366f1';
-                    indicator.style.borderColor = 'rgba(99, 102, 241, 0.3)';
+                    indicator.style.background = 'rgba(37, 99, 235, 0.1)';
+                    indicator.style.color = '#2563eb';
+                    indicator.style.borderColor = 'rgba(37, 99, 235, 0.3)';
                     indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control lamps manually using sliders below';
                 }
                 if (btnManual) {
-                    btnManual.style.background = 'linear-gradient(135deg, #6366f1, #4f46e5)';
-                    btnManual.style.borderColor = '#6366f1';
+                    btnManual.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
+                    btnManual.style.borderColor = '#2563eb';
                     btnManual.style.color = 'white';
                     btnManual.style.opacity = '1';
                 }
@@ -9645,7 +9645,7 @@ HTML_TEMPLATE = '''
             
             if (statusElement) {
                 statusElement.textContent = 'Ready! Press remote...';
-                statusElement.style.color = '#f59e0b';
+                statusElement.style.color = '#0ea5e9';
             }
             
             fetch('/api/ir/learn', {
@@ -9680,7 +9680,7 @@ HTML_TEMPLATE = '''
                                 
                                 if (statusElement) {
                                     statusElement.textContent = 'Learned OK';
-                                    statusElement.style.color = '#10b981';
+                                    statusElement.style.color = '#3b82f6';
                                 }
                                 
                                 showToast('IR Code learned: ' + buttonName, 'success');
@@ -9693,7 +9693,7 @@ HTML_TEMPLATE = '''
                                 if (buttonElement) buttonElement.classList.remove('learning');
                                 if (statusElement) {
                                     statusElement.textContent = 'Timeout';
-                                    statusElement.style.color = '#ef4444';
+                                    statusElement.style.color = '#1e40af';
                                 }
                                 showToast('Learning timeout - no signal', 'error');
                                 currentLearningButton = null;
@@ -9706,7 +9706,7 @@ HTML_TEMPLATE = '''
                 if (buttonElement) buttonElement.classList.remove('learning'); 
                 if (statusElement) {
                     statusElement.textContent = 'Error';
-                    statusElement.style.color = '#ef4444';
+                    statusElement.style.color = '#1e40af';
                 }
                 showToast('Error: ' + e, 'error'); 
             });
@@ -9765,7 +9765,7 @@ HTML_TEMPLATE = '''
                         });
                         if (btnElement) {
                             btnElement.style.transform = 'scale(1.05)';
-                            btnElement.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.5)';
+                            btnElement.style.boxShadow = '0 0 15px rgba(37, 99, 235, 0.5)';
                         }
                     }, 300);
                 })
@@ -9790,7 +9790,7 @@ HTML_TEMPLATE = '''
                     const summaryEl = document.getElementById('ir-total-learned');
                     if (summaryEl) {
                         summaryEl.textContent = codeCount;
-                        summaryEl.style.color = codeCount > 0 ? '#10b981' : '#ef4444';
+                        summaryEl.style.color = codeCount > 0 ? '#3b82f6' : '#1e40af';
                     }
                     
                     // Update button status
@@ -9800,7 +9800,7 @@ HTML_TEMPLATE = '''
                         if (buttonElement && statusElement) {
                             buttonElement.classList.add('learned');
                             statusElement.textContent = 'Learned [OK]';
-                            statusElement.style.color = '#10b981';
+                            statusElement.style.color = '#3b82f6';
                         }
                     });
                     
@@ -9845,7 +9845,7 @@ HTML_TEMPLATE = '''
             const summaryEl = document.getElementById('ir-total-learned');
             if (summaryEl) {
                 summaryEl.textContent = '0';
-                summaryEl.style.color = '#ef4444';
+                summaryEl.style.color = '#1e40af';
             }
             
             learnedCodes = {};
@@ -9997,10 +9997,10 @@ HTML_TEMPLATE = '''
             const text = document.getElementById('sound-toggle-text');
             if (!btn) return;
             if (detectionSoundEnabled) {
-                btn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                btn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
                 if (text) text.textContent = 'Sound ON';
             } else {
-                btn.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                btn.style.background = 'linear-gradient(135deg, #1e40af, #1d4ed8)';
                 if (text) text.textContent = 'Sound OFF';
             }
         }
@@ -10271,9 +10271,9 @@ HTML_TEMPLATE = '''
                     
                     if (acStateEl) {
                         if (acState === 'ON') {
-                            acStateEl.style.color = '#10b981'; // Green
+                            acStateEl.style.color = '#3b82f6'; // Green
                         } else {
-                            acStateEl.style.color = '#ef4444'; // Red
+                            acStateEl.style.color = '#1e40af'; // Red
                         }
                         acStateEl.textContent = acState;
                     }
@@ -10281,8 +10281,8 @@ HTML_TEMPLATE = '''
                     // AC panel power dot
                     const panelDot = document.getElementById('ac-panel-dot');
                     if (panelDot) {
-                        panelDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
-                        panelDot.style.boxShadow = acState === 'ON' ? '0 0 8px rgba(16,185,129,0.5)' : '0 0 8px rgba(239,68,68,0.5)';
+                        panelDot.style.background = acState === 'ON' ? '#3b82f6' : '#1e40af';
+                        panelDot.style.boxShadow = acState === 'ON' ? '0 0 8px rgba(59,130,246,0.5)' : '0 0 8px rgba(30,64,175,0.5)';
                     }
                     
                     // Set Temperature
@@ -10305,10 +10305,10 @@ HTML_TEMPLATE = '''
                     const modeTextEl = document.getElementById('dash-ac-mode');
                     const modeIcons = {
                         'COOL': {text: 'COOL', color: '#0ea5e9'},
-                        'HEAT': {text: 'HEAT', color: '#f97316'},
-                        'DRY':  {text: 'DRY', color: '#a855f7'},
-                        'FAN':  {text: 'FAN', color: '#8b5cf6'},
-                        'AUTO': {text: 'AUTO', color: '#6366f1'}
+                        'HEAT': {text: 'HEAT', color: '#0ea5e9'},
+                        'DRY':  {text: 'DRY', color: '#2563eb'},
+                        'FAN':  {text: 'FAN', color: '#3b82f6'},
+                        'AUTO': {text: 'AUTO', color: '#2563eb'}
                     };
                     const modeInfo = modeIcons[acMode] || modeIcons['COOL'];
                     if (modeIconEl) {
@@ -10324,14 +10324,14 @@ HTML_TEMPLATE = '''
                     if (ctrlIcon && ctrlText) {
                         if (ctrlMode === 'ADAPTIVE') {
                             ctrlIcon.textContent = 'A';
-                            ctrlIcon.style.color = '#10b981';
+                            ctrlIcon.style.color = '#3b82f6';
                             ctrlText.textContent = 'ADAPTIVE';
-                            ctrlText.style.color = '#10b981';
+                            ctrlText.style.color = '#3b82f6';
                         } else {
                             ctrlIcon.textContent = 'M';
-                            ctrlIcon.style.color = '#f59e0b';
+                            ctrlIcon.style.color = '#0ea5e9';
                             ctrlText.textContent = 'MANUAL';
-                            ctrlText.style.color = '#f59e0b';
+                            ctrlText.style.color = '#0ea5e9';
                         }
                     }
                     
@@ -10340,14 +10340,14 @@ HTML_TEMPLATE = '''
                     if (srcBadge) {
                         if (ctrlMode === 'ADAPTIVE') {
                             srcBadge.textContent = 'AI Controlled';
-                            srcBadge.style.background = 'rgba(16, 185, 129, 0.12)';
-                            srcBadge.style.color = '#10b981';
-                            srcBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
+                            srcBadge.style.background = 'rgba(59, 130, 246, 0.12)';
+                            srcBadge.style.color = '#3b82f6';
+                            srcBadge.style.borderColor = 'rgba(59, 130, 246, 0.25)';
                         } else {
                             srcBadge.textContent = 'Manual Control';
-                            srcBadge.style.background = 'rgba(245, 158, 11, 0.12)';
-                            srcBadge.style.color = '#f59e0b';
-                            srcBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                            srcBadge.style.background = 'rgba(14, 165, 233, 0.12)';
+                            srcBadge.style.color = '#0ea5e9';
+                            srcBadge.style.borderColor = 'rgba(14, 165, 233, 0.25)';
                         }
                     }
                     
@@ -10369,7 +10369,7 @@ HTML_TEMPLATE = '''
                     const liveState = document.getElementById('ac-live-state');
                     if (liveDot && liveState) {
                         liveState.textContent = acState;
-                        liveDot.style.background = acState === 'ON' ? '#10b981' : '#ef4444';
+                        liveDot.style.background = acState === 'ON' ? '#3b82f6' : '#1e40af';
                         setText('ac-live-temp', acTemp);
                         setText('ac-live-fan', fanSpeed);
                         setText('ac-live-mode', acMode);
@@ -10387,7 +10387,7 @@ HTML_TEMPLATE = '''
                     setText('ctrl-lux2', num(lamp.lux2).toFixed(0));
                     setText('ctrl-lux3', num(lamp.lux3).toFixed(0));
                     const ctrlMotion = document.getElementById('ctrl-motion-status');
-                    if (ctrlMotion) ctrlMotion.innerHTML = lamp.motion ? '<span style="color:#10b981">MOTION</span>' : '<span style="color:#ef4444">IDLE</span>';
+                    if (ctrlMotion) ctrlMotion.innerHTML = lamp.motion ? '<span style="color:#3b82f6">MOTION</span>' : '<span style="color:#1e40af">IDLE</span>';
                     // Sync lamp mode buttons
                     applyLampModeUI(lamp.mode || 'ADAPTIVE');
                     
@@ -10398,19 +10398,19 @@ HTML_TEMPLATE = '''
                     const camPersonEl = document.getElementById('cam-person');
                     if (camPersonEl) {
                         camPersonEl.textContent = personDetected ? 'Yes' : 'No';
-                        camPersonEl.style.color = personDetected ? '#10b981' : '#ef4444';
+                        camPersonEl.style.color = personDetected ? '#3b82f6' : '#1e40af';
                     }
                     
                     const camCountEl = document.getElementById('cam-count');
                     if (camCountEl) {
                         camCountEl.textContent = personCount;
-                        camCountEl.style.color = personCount > 0 ? '#10b981' : '#94a3b8';
+                        camCountEl.style.color = personCount > 0 ? '#3b82f6' : '#94a3b8';
                     }
                     
                     const camConfEl = document.getElementById('cam-confidence');
                     if (camConfEl) {
                         camConfEl.textContent = confidence + '%';
-                        camConfEl.style.color = confidence > 70 ? '#10b981' : (confidence > 50 ? '#f59e0b' : '#ef4444');
+                        camConfEl.style.color = confidence > 70 ? '#3b82f6' : (confidence > 50 ? '#0ea5e9' : '#1e40af');
                     }
                     
                     // Person detection status badge
@@ -10418,14 +10418,14 @@ HTML_TEMPLATE = '''
                     if (camBadge) {
                         if (personCount > 0) {
                             camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> ' + personCount + ' Person Detected';
-                            camBadge.style.background = 'rgba(16, 185, 129, 0.12)';
-                            camBadge.style.color = '#10b981';
-                            camBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                            camBadge.style.background = 'rgba(59, 130, 246, 0.12)';
+                            camBadge.style.color = '#3b82f6';
+                            camBadge.style.borderColor = 'rgba(59, 130, 246, 0.3)';
                         } else {
                             camBadge.innerHTML = '<i class="fas fa-circle" style="font-size: 7px; vertical-align: middle;"></i> No Person';
-                            camBadge.style.background = 'rgba(239, 68, 68, 0.12)';
-                            camBadge.style.color = '#ef4444';
-                            camBadge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                            camBadge.style.background = 'rgba(30, 64, 175, 0.12)';
+                            camBadge.style.color = '#1e40af';
+                            camBadge.style.borderColor = 'rgba(30, 64, 175, 0.3)';
                         }
                     }
 
@@ -10448,11 +10448,11 @@ HTML_TEMPLATE = '''
                     
                     if (gaEl) {
                         gaEl.textContent = gaFitness.toFixed(2);
-                        gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
+                        gaEl.style.color = gaFitness > 0 ? '#3b82f6' : '#94a3b8';
                     }
                     if (psoEl) {
                         psoEl.textContent = psoFitness.toFixed(2);
-                        psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
+                        psoEl.style.color = psoFitness > 0 ? '#3b82f6' : '#94a3b8';
                     }
                     
                     // PSO Brightness — pso-brightness element not on main page (only on ML page)
@@ -10659,7 +10659,7 @@ HTML_TEMPLATE = '''
             if (!bar) return;
             var html = '';
             var statusIcon = {ok: '&#x25CF;', warn: '&#x25CF;', fault: '&#x25CF;'};
-            var statusColor = {ok: '#22c55e', warn: '#f59e0b', fault: '#ef4444'};
+            var statusColor = {ok: '#60a5fa', warn: '#0ea5e9', fault: '#1e40af'};
             var statusText  = {ok: 'Online', warn: 'Stale', fault: 'Offline'};
             for (var dev in health) {
                 var h = health[dev];
@@ -10699,7 +10699,7 @@ HTML_TEMPLATE = '''
             var badge = document.getElementById('mysql-energy-badge');
             if (badge) {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
-                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+                badge.style.cssText = 'padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(37,99,235,0.15);color:#2563eb;border:1px solid rgba(37,99,235,0.3);';
             }
             s('mysql-ac-voltage', f(ac.voltage));       s('mysql-ac-current', f(ac.current, 2));
             s('mysql-ac-power',   f(ac.power));         s('mysql-ac-kwh',     fkwh(ac.energy));
@@ -10714,7 +10714,7 @@ HTML_TEMPLATE = '''
             var liveBadge = document.getElementById('mysql-live-badge');
             if (liveBadge) {
                 liveBadge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Live';
-                liveBadge.style.cssText = 'padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);';
+                liveBadge.style.cssText = 'padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(37,99,235,0.15);color:#2563eb;border:1px solid rgba(37,99,235,0.3);';
             }
             s('eu-ac-voltage', f(ac.voltage));       s('eu-ac-current', f(ac.current, 2));
             s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     fkwh(ac.energy));
@@ -10732,9 +10732,9 @@ HTML_TEMPLATE = '''
             s('eu-lamp-apparent', f(lamp.apparent_power, 1));
             var _pfBadge = function(pf) {
                 var v = parseFloat(pf||0);
-                if (v >= 0.95) return {t:'Baik',  bg:'rgba(16,185,129,0.15)', c:'#10b981'};
-                if (v >= 0.85) return {t:'Cukup', bg:'rgba(245,158,11,0.15)', c:'#f59e0b'};
-                if (v >  0)    return {t:'Buruk', bg:'rgba(239,68,68,0.15)',  c:'#ef4444'};
+                if (v >= 0.95) return {t:'Baik',  bg:'rgba(59,130,246,0.15)', c:'#3b82f6'};
+                if (v >= 0.85) return {t:'Cukup', bg:'rgba(14,165,233,0.15)', c:'#0ea5e9'};
+                if (v >  0)    return {t:'Buruk', bg:'rgba(30,64,175,0.15)',  c:'#1e40af'};
                 return {t:'--', bg:'rgba(107,114,128,0.15)', c:'#6b7280'};
             };
             var _applyBadge = function(id, pf) {
@@ -10867,7 +10867,7 @@ HTML_TEMPLATE = '''
                     if (badge) {
                         if (st.energy) {
                             badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
-                            badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                            badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(14,165,233,0.15);color:#0ea5e9;border:1px solid rgba(14,165,233,0.4);';
                         } else { _recUpdateBadge(); }
                     }
                 }
@@ -10875,14 +10875,14 @@ HTML_TEMPLATE = '''
                     var tb = document.getElementById('temp-rec-badge');
                     if (tb && st.temp) {
                         tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
-                        tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                        tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(14,165,233,0.15);color:#0ea5e9;border:1px solid rgba(14,165,233,0.4);';
                     } else if (tb && !st.temp) { _tempUpdateBadge(); }
                 }
                 if (!_luxActive) {
                     var lb = document.getElementById('lux-rec-badge');
                     if (lb && st.lux) {
                         lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
-                        lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
+                        lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(14,165,233,0.15);color:#0ea5e9;border:1px solid rgba(14,165,233,0.4);';
                     } else if (lb && !st.lux) { _luxUpdateBadge(); }
                 }
             }).catch(function(){});
@@ -10905,7 +10905,7 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify({rows: _recRows})
             }).then(function(r){ return r.json(); }).then(function(d){
                 var b = document.getElementById('rec-sync-badge');
-                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#10b981'; b.style.borderColor='rgba(16,185,129,0.3)'; }
+                if (b) { b.innerHTML = '<i class="fas fa-cloud-upload-alt" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#3b82f6'; b.style.borderColor='rgba(59,130,246,0.3)'; }
             }).catch(function(){});
         }
         function _recServerFetch() {
@@ -10918,7 +10918,7 @@ HTML_TEMPLATE = '''
                     _recRows = d.rows; _ssSave('_recRows', _recRows); _recUpdatePreview();
                 }
                 var b = document.getElementById('rec-sync-badge');
-                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#6366f1'; }
+                if (b) { b.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>' + d.count + ' baris'; b.style.color='#2563eb'; }
             }).catch(function(){});
         }
         function _recServerDelete() { fetch('/api/rec/data?type=energy', {method:'DELETE'}).catch(function(){}); }
@@ -10930,7 +10930,7 @@ HTML_TEMPLATE = '''
             var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lamp:'rec-tab-lamp'};
             Object.keys(map).forEach(function(k) {
                 var el = document.getElementById(map[k]); if (!el) return;
-                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lamp'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
+                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#1e40af':k==='Lamp'?'#eab308':'#2563eb'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
                 else { el.style.background='transparent'; el.style.fontWeight='600'; el.style.color='var(--text-secondary)'; el.style.boxShadow='none'; }
             });
             _recUpdatePreview();
@@ -10941,7 +10941,7 @@ HTML_TEMPLATE = '''
             if (!badge) return;
             if (_recActive) {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording';
-                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
+                badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;border:1px solid rgba(30,64,175,0.4);';
             } else {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
                 badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);';
@@ -10969,11 +10969,11 @@ HTML_TEMPLATE = '''
             tbody.innerHTML = shown.map(function(r) {
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
-                    '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;color:#6366f1;font-weight:600;">' + r.voltage + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;color:#f59e0b;font-weight:600;">' + r.arus + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;color:#ef4444;font-weight:600;">' + r.daya + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;color:#10b981;font-weight:600;">' + r.energi + '</td>' +
+                    '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#1e40af':'#eab308') + ';">' + r.device + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#2563eb;font-weight:600;">' + r.voltage + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#0ea5e9;font-weight:600;">' + r.arus + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#1e40af;font-weight:600;">' + r.daya + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#3b82f6;font-weight:600;">' + r.energi + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.reaktif + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.semu + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text-secondary);">' + r.freq + '</td>' +
@@ -11069,7 +11069,7 @@ HTML_TEMPLATE = '''
             if (btnE2) { btnE2.disabled = true; btnE2.style.opacity = '0.5'; }
             _recUpdateBadge();
             _recUpdatePreview();
-            var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
+            var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#2563eb'; sb.style.borderColor='rgba(37,99,235,0.2)'; }
             showToast('Recording data cleared', 'info');
         }
 
@@ -11164,8 +11164,8 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('temp-rec-badge');
             if (!b) return;
             if (_tempActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
-                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#1e40af;animation:pulse 1s infinite;"></i> Recording...';
+                b.style.background = 'rgba(30,64,175,0.12)'; b.style.color = '#1e40af'; b.style.borderColor = 'rgba(30,64,175,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
                 b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
@@ -11186,7 +11186,7 @@ HTML_TEMPLATE = '''
                 var bg = i % 2 === 0 ? 'background:rgba(59,130,246,0.03);' : '';
                 return '<tr style="' + bg + '"><td style="padding:6px 10px;color:var(--text-secondary);white-space:nowrap;">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#3b82f6;">' + r.temp + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#06b6d4;">' + r.hum + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#0ea5e9;">' + r.hum + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t1 + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t2 + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:var(--text);">' + r.t3 + '</td></tr>';
@@ -11297,8 +11297,8 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('lux-rec-badge');
             if (!b) return;
             if (_luxActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
-                b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#1e40af;animation:pulse 1s infinite;"></i> Recording...';
+                b.style.background = 'rgba(30,64,175,0.12)'; b.style.color = '#1e40af'; b.style.borderColor = 'rgba(30,64,175,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
                 b.style.background = 'rgba(107,114,128,0.15)'; b.style.color = '#6b7280'; b.style.borderColor = 'rgba(107,114,128,0.3)';
@@ -11321,7 +11321,7 @@ HTML_TEMPLATE = '''
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux1 + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux2 + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#eab308;">' + r.lux3 + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#f59e0b;">' + r.avg + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#0ea5e9;">' + r.avg + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b1 + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;font-weight:700;color:#fbbf24;">' + r.b2 + '</td></tr>';
             }).join('');
@@ -11398,8 +11398,8 @@ HTML_TEMPLATE = '''
                     datasets: [{
                         label: 'Person Count',
                         data: new Array(24).fill(null),
-                        backgroundColor: 'rgba(168,85,247,0.5)',
-                        borderColor: '#a855f7',
+                        backgroundColor: 'rgba(37,99,235,0.5)',
+                        borderColor: '#2563eb',
                         borderWidth: 1,
                         borderRadius: 5,
                     }]
@@ -11413,7 +11413,7 @@ HTML_TEMPLATE = '''
                     scales: {
                         x: { ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', maxRotation: 0 } },
                         y: { beginAtZero: true, ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', stepSize: 1 },
-                             title: { display: true, text: 'Person Count', font: {size:10}, color: '#a855f7' } }
+                             title: { display: true, text: 'Person Count', font: {size:10}, color: '#2563eb' } }
                     }
                 }
             });
@@ -11441,11 +11441,11 @@ HTML_TEMPLATE = '''
                 var btn = document.getElementById('occ-tab-' + t);
                 if (!btn) return;
                 if (t === r) {
-                    btn.style.background = '#a855f7'; btn.style.color = '#fff'; btn.style.border = 'none';
-                    btn.style.boxShadow = '0 1px 4px rgba(168,85,247,0.3)'; btn.style.fontWeight = '700';
+                    btn.style.background = '#2563eb'; btn.style.color = '#fff'; btn.style.border = 'none';
+                    btn.style.boxShadow = '0 1px 4px rgba(37,99,235,0.3)'; btn.style.fontWeight = '700';
                 } else {
-                    btn.style.background = 'rgba(168,85,247,0.12)'; btn.style.color = '#a855f7';
-                    btn.style.border = '1px solid rgba(168,85,247,0.25)'; btn.style.boxShadow = ''; btn.style.fontWeight = '600';
+                    btn.style.background = 'rgba(37,99,235,0.12)'; btn.style.color = '#2563eb';
+                    btn.style.border = '1px solid rgba(37,99,235,0.25)'; btn.style.boxShadow = ''; btn.style.fontWeight = '600';
                 }
             });
             _occRefreshChart();
@@ -11486,8 +11486,8 @@ HTML_TEMPLATE = '''
             tbody.innerHTML = filtered.slice().reverse().map(function(r) {
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 12px;color:var(--text-secondary);">' + r.ts + '</td>' +
-                    '<td style="padding:6px 12px;text-align:center;font-weight:700;color:#a855f7;">' + String(r.hour).padStart(2,'0') + ':00</td>' +
-                    '<td style="padding:6px 12px;text-align:right;font-weight:700;color:#10b981;">' + r.count + '</td>' +
+                    '<td style="padding:6px 12px;text-align:center;font-weight:700;color:#2563eb;">' + String(r.hour).padStart(2,'0') + ':00</td>' +
+                    '<td style="padding:6px 12px;text-align:right;font-weight:700;color:#3b82f6;">' + r.count + '</td>' +
                     '<td style="padding:6px 12px;text-align:right;color:var(--text-secondary);">' + r.conf + '</td>' +
                 '</tr>';
             }).join('');
@@ -11647,8 +11647,8 @@ HTML_TEMPLATE = '''
                 const gaEl = document.getElementById('ga-fitness');
                 if (gaEl) {
                     gaEl.textContent = gaFitness.toFixed(2);
-                    gaEl.style.color = gaFitness > 0 ? '#10b981' : '#94a3b8';
-                    if (gaFitness > 0) gaEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                    gaEl.style.color = gaFitness > 0 ? '#3b82f6' : '#94a3b8';
+                    if (gaFitness > 0) gaEl.style.textShadow = '0 0 10px rgba(59, 130, 246, 0.5)';
                 }
                 
                 // Update GA solution details (AC settings)
@@ -11661,8 +11661,8 @@ HTML_TEMPLATE = '''
                 const psoEl = document.getElementById('pso-fitness');
                 if (psoEl) {
                     psoEl.textContent = psoFitness.toFixed(2);
-                    psoEl.style.color = psoFitness > 0 ? '#f59e0b' : '#94a3b8';
-                    if (psoFitness > 0) psoEl.style.textShadow = '0 0 10px rgba(245, 158, 11, 0.5)';
+                    psoEl.style.color = psoFitness > 0 ? '#0ea5e9' : '#94a3b8';
+                    if (psoFitness > 0) psoEl.style.textShadow = '0 0 10px rgba(14, 165, 233, 0.5)';
                 }
                 
                 console.log('[ML] Optimization Update:', {
@@ -11710,8 +11710,8 @@ HTML_TEMPLATE = '''
                 if (countEl) {
                     countEl.textContent = personCount;
                     if (personCount > 0) {
-                        countEl.style.color = '#10b981';
-                        countEl.style.textShadow = '0 0 10px rgba(16, 185, 129, 0.5)';
+                        countEl.style.color = '#3b82f6';
+                        countEl.style.textShadow = '0 0 10px rgba(59, 130, 246, 0.5)';
                     } else {
                         countEl.style.color = '#94a3b8';
                         countEl.style.textShadow = 'none';
@@ -11719,10 +11719,10 @@ HTML_TEMPLATE = '''
                 }
                 if (countDisplayEl) {
                     countDisplayEl.textContent = personCount;
-                    countDisplayEl.style.color = personCount > 0 ? '#10b981' : '#94a3b8';
+                    countDisplayEl.style.color = personCount > 0 ? '#3b82f6' : '#94a3b8';
                     if (personCount > 0) {
-                        countDisplayEl.parentElement.style.background = 'rgba(16, 185, 129, 0.1)';
-                        countDisplayEl.parentElement.style.borderColor = '#10b981';
+                        countDisplayEl.parentElement.style.background = 'rgba(59, 130, 246, 0.1)';
+                        countDisplayEl.parentElement.style.borderColor = '#3b82f6';
                     } else {
                         countDisplayEl.parentElement.style.background = '';
                         countDisplayEl.parentElement.style.borderColor = 'var(--border)';
@@ -11738,18 +11738,18 @@ HTML_TEMPLATE = '''
                     if (el) {
                         el.textContent = confText;
                         if (confidence > 70) {
-                            el.style.color = '#10b981';
+                            el.style.color = '#3b82f6';
                         } else if (confidence > 50) {
-                            el.style.color = '#f59e0b';
+                            el.style.color = '#0ea5e9';
                         } else {
-                            el.style.color = '#ef4444';
+                            el.style.color = '#1e40af';
                         }
                     }
                 });
                 
                 if (confDisplayEl && personCount > 0) {
-                    confDisplayEl.parentElement.style.background = 'rgba(16, 185, 129, 0.1)';
-                    confDisplayEl.parentElement.style.borderColor = '#10b981';
+                    confDisplayEl.parentElement.style.background = 'rgba(59, 130, 246, 0.1)';
+                    confDisplayEl.parentElement.style.borderColor = '#3b82f6';
                 } else if (confDisplayEl) {
                     confDisplayEl.parentElement.style.background = '';
                     confDisplayEl.parentElement.style.borderColor = 'var(--border)';
@@ -11760,12 +11760,12 @@ HTML_TEMPLATE = '''
                 const personCard = document.getElementById('person-detected-card');
                 if (personEl) {
                     personEl.textContent = personDetected ? 'Yes' : 'No';
-                    personEl.style.color = personDetected ? '#10b981' : '#ef4444';
+                    personEl.style.color = personDetected ? '#3b82f6' : '#1e40af';
                 }
                 if (personCard) {
                     if (personDetected) {
-                        personCard.style.background = 'rgba(16, 185, 129, 0.1)';
-                        personCard.style.borderColor = '#10b981';
+                        personCard.style.background = 'rgba(59, 130, 246, 0.1)';
+                        personCard.style.borderColor = '#3b82f6';
                     } else {
                         personCard.style.background = '';
                         personCard.style.borderColor = 'var(--border)';
@@ -11796,13 +11796,13 @@ HTML_TEMPLATE = '''
                 if (lastSeenEl) {
                     if (personDetected && personCount > 0) {
                         lastSeenEl.textContent = 'Sekarang';
-                        lastSeenEl.style.color = '#10b981';
+                        lastSeenEl.style.color = '#3b82f6';
                         if (lastSeenLabel) lastSeenLabel.textContent = 'Person currently detected';
                     } else if (lastSeenAgo !== undefined && lastSeenAgo >= 0) {
                         const mins = Math.floor(lastSeenAgo / 60);
                         const secs = lastSeenAgo % 60;
                         lastSeenEl.textContent = mins > 0 ? (mins + 'm ' + secs + 's lalu') : (secs + 's lalu');
-                        lastSeenEl.style.color = lastSeenAgo > 300 ? '#ef4444' : '#6366f1';
+                        lastSeenEl.style.color = lastSeenAgo > 300 ? '#1e40af' : '#2563eb';
                         if (lastSeenLabel) lastSeenLabel.textContent = 'Since last detection';
                     } else {
                         lastSeenEl.textContent = '--';
@@ -11819,17 +11819,17 @@ HTML_TEMPLATE = '''
                 if (autoOffEl) {
                     if (autoOffTriggered) {
                         autoOffEl.textContent = 'OFF';
-                        autoOffEl.style.color = '#ef4444';
+                        autoOffEl.style.color = '#1e40af';
                         if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
                         const offMins = Math.floor(autoOffIn / 60);
                         const offSecs = autoOffIn % 60;
                         autoOffEl.textContent = offMins + 'm ' + offSecs + 's';
-                        autoOffEl.style.color = autoOffIn < 120 ? '#ef4444' : '#f59e0b';
+                        autoOffEl.style.color = autoOffIn < 120 ? '#1e40af' : '#0ea5e9';
                         if (autoOffLabel) autoOffLabel.textContent = 'Countdown auto-OFF AC';
                     } else {
                         autoOffEl.textContent = '--';
-                        autoOffEl.style.color = '#10b981';
+                        autoOffEl.style.color = '#3b82f6';
                         if (autoOffLabel) autoOffLabel.textContent = 'Person detected, AC safe';
                     }
                 }
@@ -11920,7 +11920,7 @@ HTML_TEMPLATE = '''
                 if (buttonElement) buttonElement.classList.remove('learning');
                 if (statusElement) {
                     statusElement.textContent = 'Failed';
-                    statusElement.style.color = '#ef4444';
+                    statusElement.style.color = '#1e40af';
                 }
                 return;
             }
@@ -11933,7 +11933,7 @@ HTML_TEMPLATE = '''
             
             if (statusElement) {
                 statusElement.textContent = 'Learned [OK]';
-                statusElement.style.color = '#10b981';
+                statusElement.style.color = '#3b82f6';
             }
             
             let message = 'IR Code learned: ' + buttonName;
@@ -12304,7 +12304,7 @@ HTML_TEMPLATE = '''
                 <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">All</button>
             </div>
             <div style="display:flex;gap:10px;">
-                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Export CSV</button>
+                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Export CSV</button>
                 <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Cancel</button>
             </div>
         </div>
