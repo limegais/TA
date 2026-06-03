@@ -38,7 +38,7 @@ device_last_seen = {
 alert_rules = {
     'high_temp': {'threshold': 35, 'enabled': True, 'triggered': False},
     'high_humidity': {'threshold': 80, 'enabled': True, 'triggered': False},
-    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 20, 'enabled': True, 'last_person_seen': None}
+    'no_person_timeout': {'ac_timeout_minutes': 5, 'lamp_timeout_minutes': 5, 'enabled': True, 'last_person_seen': None}
 }
 active_alerts = deque(maxlen=50)
 
@@ -83,9 +83,9 @@ lamp_recording = {
 }
 
 # Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)
-LAMP_RATED_WATT = 30.0   # Total watt kedua lampu at 100% brightness (2 × 15W LED)
-LAMP_VOLTAGE = 220.0     # Tegangan nominal Indonesia
-_lamp_energy_kwh = 0.0   # Akumulator kWh estimasi lampu
+LAMP_RATED_WATT = 30.0   # Total watts of both lamps at 100% brightness (2 × 15W LED)
+LAMP_VOLTAGE = 220.0     # Voltage nominal Indonesia
+_lamp_energy_kwh = 0.0   # kWh accumulator for lamp estimation
 _lamp_energy_last_ts = 0.0
 
 # Lock for all recording-state globals (energy_phase, energy_recording, lamp_phase, lamp_recording, _lamp_energy_kwh)
@@ -210,6 +210,7 @@ load_energy_recording()
 OPT_TEMP_MIN, OPT_TEMP_MAX = 16.0, 30.0
 OPT_FAN_MIN, OPT_FAN_MAX = 1, 4  # ESP32 AC supports fan speed 1-4
 OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX = 0, 255  # PWM range 0-255 sesuai spesifikasi
+OPT_RH_MIN, OPT_RH_MAX = 30, 80  # Set RH range 30-80%
 
 # AC mode gene: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
 OPT_MODE_MIN, OPT_MODE_MAX = 0, 3
@@ -227,8 +228,8 @@ opt_sensor_data = {
 }
 
 # Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
-AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC — selaras dengan AC_ADAPTIVE_DEBOUNCE agar setiap run GA bisa apply
-AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — selaras dengan LAMP_ADAPTIVE_DEBOUNCE agar setiap run bisa apply
+AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC — aligned with AC_ADAPTIVE_DEBOUNCE so every GA run can apply
+AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — aligned with LAMP_ADAPTIVE_DEBOUNCE so every run can apply
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
@@ -237,7 +238,7 @@ last_opt_results = {
 }
 
 ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
-pso_params = {'swarm_size': 20, 'iterations': 50, 'w': 0.9, 'c1': 1.5, 'c2': 1.5}  # w=inertia max (decays to 0.4)
+pso_params = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # w=0.5 konstan (sesuai spesifikasi)
 
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
@@ -254,13 +255,14 @@ def _get_temp_uniformity():
     if len(temps) < 2: return 1.0
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
-def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
+def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
+    Genes: [temp, fan_speed, mode_idx, set_rh]
     Crowd-based tier:
-      Tier 0 — 0 orang     : energy saving (27-29°C, fan 1)
-      Tier 1 — 1-2 orang   : suhu standar per waktu (24-26°C, fan adaptive)
-      Tier 2 — 3-5 orang   : pendinginan menengah (22°C, fan 3)
-      Tier 3 — >5 orang    : AC sedingin mungkin (16°C, fan 4 max)
+      Tier 0 — 0 persons  : energy saving (27-29°C, fan 1)
+      Tier 1 — 1-2 persons: standard temp by time (24-26°C, fan adaptive)
+      Tier 2 — 3-5 persons: medium cooling (22°C, fan 3)
+      Tier 3 — >5 persons : AC as cold as possible (16°C, fan 4 max)
     """
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
@@ -270,36 +272,36 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    # ── Crowd-based temperature & fan tier ───────────────────────────────────
-    ideal_fan_crowd = None  # None = hitung dari temp_gap (hanya untuk tier 1)
+    # ── Crowd-based temperature & fan tier ───────────────────────────────────────
+    ideal_fan_crowd = None  # None = calculated from temp_gap (only for tier 1)
     if not person_detected:
-        # Tier 0: tidak ada orang — mode hemat energi
+        # Tier 0: no persons — energy saving mode
         target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
         sigma_map   = {'morning': 3.0,  'afternoon': 2.5,  'evening': 3.0,  'night': 3.5}
         target_temp = target_map.get(time_period, 28.0)
         sigma = sigma_map.get(time_period, 3.0)
         ideal_fan_crowd = 1.0
     elif person_count > 5:
-        # Tier 3: >5 orang — AC sedingin mungkin, fan maksimum
+        # Tier 3: >5 persons — AC as cold as possible, max fan
         target_temp = OPT_TEMP_MIN   # 16°C (batas bawah GA)
-        sigma = 0.8                  # band sangat ketat — GA harus pilih suhu minimum
+        sigma = 0.8                  # very tight band — GA must choose minimum temperature
         ideal_fan_crowd = float(OPT_FAN_MAX)  # fan 4
     elif person_count >= 3:
-        # Tier 2: 3-5 orang — pendinginan menengah
+        # Tier 2: 3-5 persons — medium cooling
         target_temp = 22.0
         sigma = 1.5
         ideal_fan_crowd = 3.0
     else:
-        # Tier 1: 1-2 orang — suhu standar per waktu
+        # Tier 1: 1-2 persons — standard temp by time
         std_target = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
         std_sigma  = {'morning': 2.0,  'afternoon': 1.5,  'evening': 2.0,  'night': 2.5}
         target_temp = std_target.get(time_period, 25.0)
         if person_count == 2:
-            target_temp = max(target_temp - 0.5, 22.0)  # sedikit lebih dingin untuk 2 orang
+            target_temp = max(target_temp - 0.5, 22.0)  # slightly cooler for 2 persons
         sigma = std_sigma.get(time_period, 2.0)
-        # ideal_fan_crowd = None → akan dihitung dari temp_gap di bawah
-    # Trend offset: jika suhu ruangan naik cepat, turunkan target; jika turun, naikkan
-    # Untuk tier >5, trend offset tetap diterapkan tapi target sudah di minimum
+        # ideal_fan_crowd = None → will be calculated from temp_gap below
+    # Trend offset: if room temp rises fast, lower target; if falls, raise target
+    # For tier >5, trend offset still applied but target is already at minimum
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
     adjusted_target = max(OPT_TEMP_MIN, target_temp + trend_offset) if person_count > 5 \
                       else target_temp + trend_offset
@@ -314,13 +316,13 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     else:
         fitness += 15.0 * _gaussian_score(humidity, 50.0, 10.0, 1.0)
     temp_gap = abs(temp_room - temp_set)
-    # Ideal fan: tier 2 & 3 sudah ditetapkan di atas; tier 1 hitung dari temp_gap
+    # Ideal fan: tier 2 & 3 already set above; tier 1 calculated from temp_gap
     if ideal_fan_crowd is not None:
         ideal_fan = ideal_fan_crowd
     else:
         ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    # ── Energy efficiency ─────────────────────────────────────────────────────
+    # ── Energy efficiency ─────────────────────────────────────────────────────────
     # Use real PZEM watt data when available; fall back to COP-based model.
     # COP model: efficiency drops exponentially as setpoint moves further below room temp.
     # Fan also consumes power — penalise high fan speed when gap is small.
@@ -333,7 +335,7 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
         fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
         energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
-    # >5 orang: kenyamanan & pendinginan lebih prioritas dari efisiensi energi
+    # >5 people: comfort & cooling takes priority over energy efficiency
     if person_count > 5:
         energy_weight = 4.0
     elif person_detected:
@@ -354,20 +356,20 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
         fitness += _gaussian_score(temp_set, target_temp, 2.0, 4.0)
     if not person_detected and temp_set < 24:
         fitness -= (24.0 - temp_set) * 3.0
-    # Suhu < 18 dengan fan mid: penalti hanya jika bukan tier >5 (tier >5 justru inginkan ini)
+    # Temperature < 18 with mid fan: penalty only if not tier >5 (tier >5 wants this)
     if temp_set < 18 and fan_speed == 3 and person_count <= 5:
         fitness -= 10.0
-    # Overcooling: penalti HANYA untuk tier 1-2 (tier >5 memang inginkan suhu minimum)
+    # Overcooling: penalty ONLY for tier 1-2 (tier >5 wants minimum temperature)
     if person_detected and person_count <= 5 and temp_set < target_temp - 1.5:
         fitness -= (target_temp - 1.5 - temp_set) * 5.0
-    # Unnecessary high fan: penalti hanya untuk crowd kecil
+    # Unnecessary high fan: penalty only for small crowd
     if fan_speed >= 3 and abs(temp_room - target_temp) <= 1.0 and person_count < 3:
         fitness -= (fan_speed - 2) * 4.0
-    # Bonus: reward fan maksimum saat crowd >5 (kenyamanan pendinginan maksimal)
+    # Bonus: reward maximum fan when crowd >5 (maximum cooling comfort)
     if person_count > 5 and fan_speed == OPT_FAN_MAX:
         fitness += 12.0
 
-    # ── Mode bonus / penalty (max ±10 pts) ──────────────────────────────────
+    # ── Mode bonus / penalty (max ±10 pts) ────────────────────────────────────
     # COOL (0): best for cooling — reward when room is warm and cooling needed
     # DRY  (1): dehumidification — reward when humidity > 65%
     # FAN  (2): no cooling, just air circulation — penalise when hot, reward when mild
@@ -388,42 +390,102 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0):
     elif mode_idx == 3:  # AUTO
         fitness += 3.0  # small neutral bonus
 
+    # ── Set RH fitness (max ±15 pts) ───────────────────────────────────────
+    # Target RH for comfort: 45-55% (ideal 50%)
+    # High humidity (>65%): reward low set_rh + DRY mode → dehumidify
+    # Low humidity (<45%):  reward high set_rh → don't over-dry
+    # Normal (45-55%):      reward set_rh near 50% (comfort zone)
+    if humidity > 65:
+        # High humidity — prefer low RH setpoint to dehumidify
+        ideal_rh = max(OPT_RH_MIN, 30 + int((humidity - 65) / 5) * -2)  # lower as humidity rises
+        ideal_rh = max(OPT_RH_MIN, min(45, 50 - int((humidity - 65) * 0.5)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Strong bonus for DRY mode when humidity is high
+        if mode_idx == 1:  # DRY
+            fitness += min(8.0, (humidity - 65) * 0.5)
+    elif humidity < 45:
+        # Low humidity — prefer higher RH setpoint
+        ideal_rh = min(OPT_RH_MAX, max(55, 50 + int((45 - humidity) * 0.8)))
+        fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
+        # Penalize DRY mode when humidity is already low
+        if mode_idx == 1:
+            fitness -= 5.0
+    else:
+        # Normal humidity — reward set_rh near 50%
+        fitness += _gaussian_score(set_rh, 50, 8.0, 10.0)
+
     return max(0.0, round(fitness, 2))
 
 def calculate_lamp_fitness_2d(pwm1, pwm2):
     """PSO fitness function — MINIMIZE (smaller = better).
-    Rumus: Fitness = (Lux_rata_rata - 350)^2
-    Lux_rata_rata = rata-rata estimasi L1, L2, L3 pada kandidat PWM.
-    Toleransi ±10%: jika 315 ≤ Lux_rata_rata ≤ 385, fitness = 0 (sudah cukup).
+
+    Goal:
+    1. Lux_avg near 350 lux (main target)
+    2. Balanced distribution between sensors — no sensor should be much
+       brighter or darker than the others
+    3. Each sensor at least 200 lux (no completely dark corners)
+
+    Fitness formula:
+        error_avg     = (Lux_avg - 350)^2              → pursue average target
+        error_balance = variance(L1, L2, L3)            → penalize uneven distribution
+        error_min     = penalty if any sensor < 200     → penalize dark corners
+        Fitness = error_avg + w_bal * error_balance + w_min * error_min
+
+    Estimasi lux per sensor menggunakan model proporsional berbasis gain aktual.
     """
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
     lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
     lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
-    TARGET_LUX = 350.0 if person_detected else 0.0
-    TOLERANCE = TARGET_LUX * 0.10  # ±10% = ±35 lux
+    TARGET_LUX  = 350.0 if person_detected else 0.0
+    MIN_LUX     = 200.0  # minimum accepted lux per sensor
+    W_BALANCE   = 0.5    # bobot penalty distribusi
+    W_MIN       = 1.5    # bobot penalty sensor di bawah minimum (lebih ketat)
 
-    # Konversi brightness saat ini (0-100%) ke PWM (0-255)
-    curr_pwm1 = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
-    curr_pwm2 = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
+    # Current average PWM (0-255)
+    b1_pct  = float(opt_sensor_data.get('curr_brightness1', 0))
+    b2_pct  = float(opt_sensor_data.get('curr_brightness2', 0))
+    pwm_now = ((b1_pct + b2_pct) / 2.0) * 255.0 / 100.0
 
-    # Delta lux: gunakan gain yang sudah dikalibrasi (mulai ~1.57, update EMA setelah tiap apply)
-    delta1 = (pwm1 - curr_pwm1) * _gain_per_pwm
-    delta2 = (pwm2 - curr_pwm2) * _gain_per_pwm
+    # Candidate average PWM
+    pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
 
-    # Zone model: lamp1 -> sensor1/2, lamp2 -> sensor2/3
-    est_lux1 = max(0.0, lux1 + delta1 * 0.8 + delta2 * 0.2)
-    est_lux2 = max(0.0, lux2 + delta1 * 0.5 + delta2 * 0.5)
-    est_lux3 = max(0.0, lux3 + delta1 * 0.2 + delta2 * 0.8)
+    # Estimated lux per sensor for candidate PWM
+    lux_now = (lux1 + lux2 + lux3) / 3.0
+    if pwm_now > 5:
+        ratio    = pwm_cand / pwm_now
+        est_lux1 = max(0.0, lux1 * ratio)
+        est_lux2 = max(0.0, lux2 * ratio)
+        est_lux3 = max(0.0, lux3 * ratio)
+    else:
+        GAIN_DEFAULT = 1.57
+        est_lux1 = pwm_cand * GAIN_DEFAULT
+        est_lux2 = pwm_cand * GAIN_DEFAULT
+        est_lux3 = pwm_cand * GAIN_DEFAULT
 
-    # Rumus: Fitness = (Lux_rata_rata - TARGET)^2
-    avg_est = (est_lux1 + est_lux2 + est_lux3) / 3.0
+    lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
 
-    # Toleransi ±10%: jika sudah dalam range target, fitness = 0
-    if abs(avg_est - TARGET_LUX) <= TOLERANCE:
+    # 1. Average error relative to target
+    error_avg = (lux_est_avg - TARGET_LUX) ** 2
+
+    # 2. Distribution penalty: variance between sensors (balanced = small variance)
+    mean_e = lux_est_avg
+    variance = ((est_lux1 - mean_e)**2 + (est_lux2 - mean_e)**2 + (est_lux3 - mean_e)**2) / 3.0
+    error_balance = variance
+
+    # 3. Penalty for sensor below minimum 200 lux
+    error_min = 0.0
+    for est in [est_lux1, est_lux2, est_lux3]:
+        if est < MIN_LUX:
+            error_min += (MIN_LUX - est) ** 2
+
+    # Tolerance: fitness = 0 if avg 315-385 AND all sensors >= 200
+    if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
+            and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
         return 0.0
 
-    return round((avg_est - TARGET_LUX) ** 2, 4)
+    fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min
+    return round(fitness, 4)
 
 def update_opt_sensor_data(**kwargs):
     for k, v in kwargs.items():
@@ -463,17 +525,17 @@ def _fetch_mysql_power():
         with _ureq.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode('utf-8'))
         ac_data        = data.get('ac') or {}
-        active_power   = float(ac_data.get('active_power')   or ac_data.get('daya_aktif') or 0)
+        active_power   = float(ac_data.get('active_power')   or ac_data.get('active_power') or 0)
         apparent_power = float(ac_data.get('apparent_power') or 0)
-        voltage        = float(ac_data.get('tegangan')  or 0)
-        current        = float(ac_data.get('arus')       or 0)
-        frequency      = float(ac_data.get('frekuensi')  or 0)
-        energy_wh      = float(ac_data.get('total_energy') or 0)   # Wh dari PHP
+        voltage        = float(ac_data.get('voltage')  or 0)
+        current        = float(ac_data.get('current')       or 0)
+        frequency      = float(ac_data.get('frequency')  or 0)
+        energy_wh      = float(ac_data.get('total_energy') or 0)   # Wh from PHP
         pf = round(active_power / apparent_power, 3) if apparent_power > 0.001 else 1.0
         opt_sensor_data['actual_watt']   = active_power
         opt_sensor_data['power_factor']  = pf
         print(f"[OPT] MySQL power: {active_power:.1f}W {voltage:.0f}V {current:.2f}A PF={pf:.2f}")
-        # Tulis semua field ke InfluxDB — agar export CSV energy lengkap
+        # Write all fields to InfluxDB — for complete energy CSV export
         try:
             write_to_influxdb('energy_monitor', {
                 'voltage':      voltage,
@@ -492,28 +554,30 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     # Fetch real power from MySQL energy meter first
     _fetch_mysql_power()
 
-    # --- Prioritas 1: gunakan data MQTT real-time jika tersedia (paling segar) ---
-    # lux dan brightness sudah di-sync ke opt_sensor_data setiap pesan ESP32 masuk
-    # via update_opt_sensor_data() di MQTT callback. Hanya fallback ke InfluxDB
-    # jika ESP32 belum terhubung sama sekali (semua nilai nol).
-    mqtt_lux1 = mqtt_data['lamp'].get('lux1', 0)
-    mqtt_lux2 = mqtt_data['lamp'].get('lux2', 0)
-    mqtt_lux3 = mqtt_data['lamp'].get('lux3', 0)
-    # Gunakan timestamp MQTT, bukan cek lux > 0, agar lux=0 (ruangan gelap) tetap dipakai
-    mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh jika < 2 menit
+    # --- Priority 1: use real-time MQTT data if available (freshest) ---
+    # lux di mqtt_data['lamp'] is already filtered by _filter_lux di MQTT callback.
+    # Only falls back to InfluxDB if ESP32 not connected (MQTT timeout > 2 minutes).
+    mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh if < 2 minutes
     if mqtt_has_lux:
-        # Data MQTT sudah fresh — update opt_sensor_data langsung, skip lamp InfluxDB query
-        opt_sensor_data['lux1'] = round(float(mqtt_lux1), 1)
-        opt_sensor_data['lux2'] = round(float(mqtt_lux2), 1)
-        opt_sensor_data['lux3'] = round(float(mqtt_lux3), 1)
-        opt_sensor_data['lux']  = round((mqtt_lux1 + mqtt_lux2 + mqtt_lux3) / 3.0, 1)
+        # MQTT data is fresh — value in mqtt_data['lamp'] already passed _filter_lux
+        # in MQTT callback, so sync directly to opt_sensor_data without refiltering.
+        # opt_sensor_data lux is already updated in MQTT callback via update_opt_sensor_data,
+        # but we sync again here to ensure consistency when PSO reads it.
+        l1 = float(mqtt_data['lamp'].get('lux1', 0))
+        l2 = float(mqtt_data['lamp'].get('lux2', 0))
+        l3 = float(mqtt_data['lamp'].get('lux3', 0))
+        opt_sensor_data['lux1'] = round(l1, 1)
+        opt_sensor_data['lux2'] = round(l2, 1)
+        opt_sensor_data['lux3'] = round(l3, 1)
+        opt_sensor_data['lux']  = round((l1 + l2 + l3) / 3.0, 1)
         opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
         opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
-        print(f"[OPT] Lux dari MQTT: L1={opt_sensor_data['lux1']} L2={opt_sensor_data['lux2']} L3={opt_sensor_data['lux3']} B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
+        print(f"[OPT] Lux from MQTT (filtered): L1={l1} L2={l2} L3={l3} "
+              f"B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
 
     try:
         _, _, query_api = _get_influx_client()
-        # AC: pakai mean() — suhu berubah lambat, rata-rata masih relevan untuk GA
+        # AC: use mean() — temperature changes slowly, average is still relevant for GA
         ac_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                     f' |> range(start: -{time_range_minutes}m)'
                     f' |> filter(fn: (r) => r._measurement == "ac_sensor")'
@@ -526,11 +590,11 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                 elif rec.get_field() == 'humidity' and rec.get_value() is not None:
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
 
-        # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan
-        # Hanya query InfluxDB jika MQTT belum punya data (ESP32 belum terhubung)
-        # Batas stale: jika record InfluxDB lebih tua dari 10 menit, abaikan agar tidak
-        # menimpa opt_sensor_data dengan nilai lama (misal 350 dari sesi sebelumnya).
-        INFLUX_LAX_STALE_LIMIT_S = 600  # 10 menit
+        # Lux: use last() instead of mean() — light changes fast, latest value is relevant
+        # Only query InfluxDB if MQTT has no data yet (ESP32 not connected)
+        # Stale limit: if InfluxDB record older than 10 minutes, ignore to avoid
+        # overwriting opt_sensor_data with old values (e.g., 350 from previous session).
+        INFLUX_LAX_STALE_LIMIT_S = 600  # 10 minutes
         if not mqtt_has_lux:
             lamp_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                           f' |> range(start: -{time_range_minutes}m)'
@@ -546,7 +610,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     val = rec.get_value()
                     if val is None:
                         continue
-                    # Cek umur record — tolak jika terlalu lama (data stale)
+                    # Check record age — reject if too old (stale data)
                     rec_time = rec.get_time()
                     if rec_time is not None:
                         try:
@@ -557,21 +621,27 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                                 print(f"[OPT] InfluxDB {field} diabaikan — usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
                                 continue
                         except Exception:
-                            pass  # jika gagal parse waktu, tetap pakai data
+                            pass  # if time parse fails, still use data
                     if field == 'lux_avg':
                         opt_sensor_data['lux'] = round(float(val), 1)
                         influx_lux_used = True
                     elif field in ('lux1', 'lux2', 'lux3'):
-                        opt_sensor_data[field] = round(float(val), 1)
+                        # Skip _filter_lux so stale values from InfluxDB are also filtered
+                        # brightness=0 because this fallback only runs when MQTT is absent
+                        sensor_idx = {'lux1': 0, 'lux2': 1, 'lux3': 2}[field]
+                        filtered = _filter_lux(float(val), sensor_idx,
+                                               brightness1=opt_sensor_data.get('curr_brightness1', 0),
+                                               brightness2=opt_sensor_data.get('curr_brightness2', 0))
+                        opt_sensor_data[field] = filtered
                         influx_lux_used = True
                     elif field == 'brightness1':
                         opt_sensor_data['curr_brightness1'] = round(float(val), 1)
                     elif field == 'brightness2':
                         opt_sensor_data['curr_brightness2'] = round(float(val), 1)
             if influx_lux_used:
-                print(f"[OPT] Lux dari InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                print(f"[OPT] Lux from InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
             else:
-                print(f"[OPT] InfluxDB lux stale/kosong — pakai opt_sensor_data saat ini: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                print(f"[OPT] InfluxDB lux stale/empty — using current opt_sensor_data: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
 
         opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
@@ -588,21 +658,24 @@ def run_ga_optimization(verbose=False):
     seed_solutions = []
     if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
         seed_mode = last_opt_results['ga'].get('mode_idx', 0)
-        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode])
+        seed_rh = last_opt_results['ga'].get('set_rh', 50)
+        seed_solutions.append([last_opt_results['ga']['temp'], last_opt_results['ga']['fan'], seed_mode, seed_rh])
 
     def create_ind():
-        # ind = [temp, fan_speed, mode_idx]
+        # ind = [temp, fan_speed, mode_idx, set_rh]
         return [round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1),
                 random.randint(OPT_FAN_MIN, OPT_FAN_MAX),
-                random.randint(OPT_MODE_MIN, OPT_MODE_MAX)]
+                random.randint(OPT_MODE_MIN, OPT_MODE_MAX),
+                random.randint(OPT_RH_MIN, OPT_RH_MAX)]
 
     population = []
     for s in seed_solutions[:max(1, int(pop_size * 0.3))]:
-        population.append([float(s[0]), int(s[1]), int(s[2])])
+        population.append([float(s[0]), int(s[1]), int(s[2]), int(s[3])])
         if len(population) < pop_size:
             population.append([round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, s[0] + random.uniform(-1.5, 1.5))), 1),
                                max(OPT_FAN_MIN, min(OPT_FAN_MAX, s[1] + random.choice([-1, 0, 0, 1]))),
-                               int(s[2])])
+                               int(s[2]),
+                               max(OPT_RH_MIN, min(OPT_RH_MAX, int(s[3]) + random.choice([-5, 0, 0, 5])))])
     while len(population) < pop_size:
         population.append(create_ind())
     population = population[:pop_size]
@@ -613,7 +686,7 @@ def run_ga_optimization(verbose=False):
     prev_best = 0
 
     for gen in range(generations):
-        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+        scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
         paired = sorted(zip(population, scores), key=lambda x: x[1], reverse=True)
         population = [p[0] for p in paired]
         scores = [p[1] for p in paired]
@@ -628,7 +701,7 @@ def run_ga_optimization(verbose=False):
         if stagnation_counter >= stagnation_limit:
             for i in range(max(2, pop_size // 4)):
                 population[-(i + 1)] = create_ind()
-            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2]) for ind in population]
+            scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
             boost = True
             stagnation_counter = 0
         if stagnation_counter >= stagnation_limit * 2 and gen > generations // 2:
@@ -642,7 +715,7 @@ def run_ga_optimization(verbose=False):
             selected.append(population[best_idx][:])
         while len(next_pop) < pop_size:
             p1, p2 = random.sample(selected, 2)
-            # BLX-alpha crossover for temp; uniform for fan & mode
+            # BLX-alpha crossover for temp and RH; uniform for fan & mode
             if random.random() < crossover_rate:
                 alpha = 0.3
                 lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
@@ -653,7 +726,12 @@ def run_ga_optimization(verbose=False):
                 c2f = p2[1] if random.random() < 0.5 else p1[1]
                 c1m = p1[2] if random.random() < 0.5 else p2[2]
                 c2m = p2[2] if random.random() < 0.5 else p1[2]
-                child1, child2 = [c1t, c1f, c1m], [c2t, c2f, c2m]
+                # BLX-alpha crossover for set_rh
+                rh_lo, rh_hi = min(p1[3], p2[3]), max(p1[3], p2[3])
+                rh_span = rh_hi - rh_lo
+                c1r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                c2r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                child1, child2 = [c1t, c1f, c1m, c1r], [c2t, c2f, c2m, c2r]
             else:
                 child1, child2 = p1[:], p2[:]
             # mutate
@@ -668,141 +746,189 @@ def run_ga_optimization(verbose=False):
                     child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
                 if random.random() < adaptive_rate * 0.5:  # mode mutates less often
                     child[2] = random.randint(OPT_MODE_MIN, OPT_MODE_MAX)
+                if random.random() < adaptive_rate:
+                    rh_step = int((10.0 * (1 - progress) + 2.0) * (2.0 if boost else 1.0))
+                    child[3] = max(OPT_RH_MIN, min(OPT_RH_MAX, child[3] + random.randint(-rh_step, rh_step)))
             next_pop.append(child1)
             if len(next_pop) < pop_size:
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # brute-force validation (temp × fan × mode search)
+    # brute-force validation (temp × fan × mode × rh_samples search)
     bf_best_fit, bf_best_sol = -1, None
+    rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
         for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
             for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
-                fit = calculate_ac_fitness(t, f, m)
-                if fit > bf_best_fit:
-                    bf_best_fit, bf_best_sol = fit, [t, f, m]
+                for rh in rh_samples:
+                    fit = calculate_ac_fitness(t, f, m, rh)
+                    if fit > bf_best_fit:
+                        bf_best_fit, bf_best_sol = fit, [t, f, m, rh]
     if bf_best_fit > best_fitness:
-        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2]]
+        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2], bf_best_sol[3]]
         best_fitness = bf_best_fit
-    final = [int(round(best_solution[0])), best_solution[1], best_solution[2]]
+    final = [int(round(best_solution[0])), best_solution[1], best_solution[2], best_solution[3]]
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
 def run_pso_optimization(verbose=False):
-    """2D PSO: minimizes Error_lux = ((L1-350)^2 + (L2-350)^2 + (L3-350)^2) / 3
-    Sesuai spesifikasi. X = [PWM1, PWM2], range 0-255.
-    Persamaan update:
-        V_i(t+1) = w*V_i(t) + c1*r1*(Pbest_i - X_i(t)) + c2*r2*(Gbest - X_i(t))
-        X_i(t+1) = X_i(t) + V_i(t+1)
-    Output: list [pwm1, pwm2] dalam PWM 0-255 (konversi ke % dilakukan oleh caller).
+    """2D PSO with real lux read per iteration.
+
+    Alur per iterasi:
+        1. Update kecepatan & posisi semua partikel (di memori)
+        2. Tentukan Gbest terbaik dari seluruh swarm
+        3. Send Gbest ke lampu via MQTT
+        4. Wait for BH1750 sensor to stabilize (~2.5 seconds)
+        5. Baca lux nyata dari sensor
+        6. Hitung fitness berdasarkan lux nyata
+        7. Cek stop early: jika lux 315-385 → berhenti
+        8. Check timeout: if total > 60 seconds → use last Gbest
+
+    Lamp hanya berubah SEKALI per iterasi (bukan per partikel).
+
+    Return tambahan: iteration_log — list of dict per iterasi berisi
+        {iter, pwm1, pwm2, b1, b2, lux_avg, fitness}
+        to display on the dashboard chart.
     """
     swarm_size = pso_params['swarm_size']
-    iterations = pso_params['iterations']
-    w_start, c1, c2 = pso_params['w'], pso_params['c1'], pso_params['c2']
-    DIM = 2  # [PWM1, PWM2]
-    max_vel = 60  # proporsional dengan range 0-255
+    iterations = min(pso_params['iterations'], 10)
+    w  = pso_params['w']
+    c1 = pso_params['c1']
+    c2 = pso_params['c2']
+    DIM = 2
+    max_vel = 60
+    SENSOR_SETTLE_S = 5.0   # 5 seconds per iteration: PWM changes → lamp stabilizes → sensor reads
+    TIMEOUT_S = 60.0
 
-    # Inisialisasi posisi dan kecepatan secara acak
-    # X_i = random(0, 255)
-    positions = [
+    # ── Phase 3: Inisialisasi swarm ─────────────────────────────────────────
+    positions  = [
         [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
          for _ in range(DIM)]
         for _ in range(swarm_size)
     ]
-    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)] for _ in range(swarm_size)]
+    velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)]
+                  for _ in range(swarm_size)]
 
-    # Smart seeding 1: hasil PSO sebelumnya (brightness % -> PWM)
-    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
-    seed_b1 = last_opt_results['pso'].get('brightness1', 0)  # 0-100%
-    seed_b2 = last_opt_results['pso'].get('brightness2', 0)  # 0-100%
-    seed_pwm1 = int(seed_b1 * 255 / 100)
-    seed_pwm2 = int(seed_b2 * 255 / 100)
-    seed_is_dark = (seed_pwm1 <= 13 and seed_pwm2 <= 13)
-    if seed_pwm1 > 0 and not (person_now and seed_is_dark):
-        positions[0] = [seed_pwm1, seed_pwm2]
-        for j in range(1, min(5, swarm_size)):
-            positions[j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm1 + random.randint(-26, 26))),
-                            max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, seed_pwm2 + random.randint(-26, 26)))]
-    # Smart seeding 2: physics-based — estimasi PWM ideal dari model gain untuk capai 350 lux
-    _lux1_s = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
-    _lux2_s = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
-    _lux3_s = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
-    _avg_lux_s = (_lux1_s + _lux2_s + _lux3_s) / 3.0
-    _tgt_s = 350.0 if person_now else 0.0
-    _cpwm1_s = float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0
-    _cpwm2_s = float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0
-    _pwm_adj = (_tgt_s - _avg_lux_s) / max(0.01, _gain_per_pwm)
-    _phys1 = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(_cpwm1_s + _pwm_adj * 0.6)))
-    _phys2 = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, int(_cpwm2_s + _pwm_adj * 0.6)))
-    positions[min(5, swarm_size - 1)] = [_phys1, _phys2]
-    # perturb beberapa partikel di sekitar solusi fisika untuk variasi
-    for _j in range(min(6, swarm_size - 1), min(9, swarm_size)):
-        positions[_j] = [max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, _phys1 + random.randint(-20, 20))),
-                         max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, _phys2 + random.randint(-20, 20)))]
-
-    # Pbest = posisi terbaik tiap partikel (error terkecil)
+    # ── Phase 4: Fitness awal ───────────────────────────────────────────────
     pb_pos = [p[:] for p in positions]
-    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]  # error (minimize)
+    pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
+    g_idx  = pb_fit.index(min(pb_fit))
+    g_pos  = pb_pos[g_idx][:]
+    g_fit  = pb_fit[g_idx]
 
-    # Gbest = partikel dengan error terkecil di seluruh swarm
-    g_idx = pb_fit.index(min(pb_fit))
-    g_pos, g_fit = pb_pos[g_idx][:], pb_fit[g_idx]
+    fitness_history = []   # error per iteration (for convergence chart)
+    iteration_log   = []   # {iter, pwm1, pwm2, b1, b2, lux_avg, fitness} for detail chart
 
-    fitness_history = []
-    stagnation_counter = 0
-    stagnation_limit = max(8, iterations // 6)
-    prev_g_fit = float('inf')  # minimize: awal infinity
+    start_time = time.time()
 
-    w_end = 0.4   # inertia minimum (PSO konvergen lebih baik dengan inertia decay)
+    # ── Phase 5-7: Iteration loop with real lux reading ───────────────────────
     for it in range(iterations):
-        # Inertia weight decay: eksplorasi tinggi di awal, eksploitasi di akhir
-        w = w_start - (w_start - w_end) * it / max(1, iterations - 1)
+        # Timeout check
+        elapsed = time.time() - start_time
+        if elapsed >= TIMEOUT_S:
+            print(f"[PSO] Timeout {TIMEOUT_S:.0f}s di iterasi {it} — pakai Gbest terakhir")
+            break
+
+        # Update kecepatan dan posisi semua partikel (di memori)
         for i in range(swarm_size):
             for d in range(DIM):
                 r1, r2 = random.random(), random.random()
-                # Update kecepatan: V = w*V + c1*r1*(Pbest-X) + c2*r2*(Gbest-X)
                 velocities[i][d] = (w * velocities[i][d]
                     + c1 * r1 * (pb_pos[i][d] - positions[i][d])
-                    + c2 * r2 * (g_pos[d] - positions[i][d]))
+                    + c2 * r2 * (g_pos[d]      - positions[i][d]))
                 velocities[i][d] = max(-max_vel, min(max_vel, velocities[i][d]))
-                # Persamaan posisi (sesuai PDF)
-                positions[i][d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
-                                      int(round(positions[i][d] + velocities[i][d]))))
+                positions[i][d]  = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
+                                       int(round(positions[i][d] + velocities[i][d]))))
 
-            fit = calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
+        # Determine Gbest candidate from new position (estimation)
+        cand_fits      = [calculate_lamp_fitness_2d(positions[i][0], positions[i][1])
+                          for i in range(swarm_size)]
+        best_cand_idx  = cand_fits.index(min(cand_fits))
+        best_cand_pos  = positions[best_cand_idx][:]
 
-            # Update Pbest: Pbest_i = X_i jika Fitness(X_i) < Fitness(Pbest_i)
-            if fit < pb_fit[i]:
-                pb_fit[i], pb_pos[i] = fit, positions[i][:]
+        # Send only Gbest candidate to lamp — once per iteration
+        b1_send = round(best_cand_pos[0] * 100.0 / 255.0, 1)
+        b2_send = round(best_cand_pos[1] * 100.0 / 255.0, 1)
+        b1_send, b2_send = _safe_lamp_brightness(b1_send, b2_send)
+        mqtt_client.publish(
+            'smartroom/lamp/control',
+            json.dumps({'brightness1': b1_send, 'brightness2': b2_send, 'source': 'pso_iter'})
+        )
 
-            # Update Gbest: Gbest = min(Fitness(Pbest_i))
-            if fit < g_fit:
-                g_fit, g_pos = fit, positions[i][:]
+        # Emit iteration progress to dashboard in real-time
+        socketio.emit('pso_iter_progress', {
+            'iter': it + 1,
+            'pwm1': best_cand_pos[0], 'pwm2': best_cand_pos[1],
+            'b1': b1_send, 'b2': b2_send,
+            'status': 'waiting'
+        })
 
-        fitness_history.append(g_fit)
+        print(f"[PSO] Iteration {it+1}/{iterations} — B1={b1_send}% B2={b2_send}% "
+              f"(PWM1={best_cand_pos[0]} PWM2={best_cand_pos[1]}), tunggu sensor...")
 
-        # Stagnation: jika penurunan error < 0.1 selama beberapa iterasi
-        improvement = prev_g_fit - g_fit
-        stagnation_counter = stagnation_counter + 1 if improvement < 0.1 else 0
-        prev_g_fit = g_fit
+        # Tunggu sensor stabil
+        time.sleep(SENSOR_SETTLE_S)
 
-        if stagnation_counter >= stagnation_limit:
-            # Re-randomize partikel terburuk (error tertinggi)
-            re_count = max(2, swarm_size // 5)
-            worst_idx = sorted(range(swarm_size), key=lambda si: pb_fit[si], reverse=True)[:re_count]
-            for si in worst_idx:
-                positions[si] = [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
-                                 for _ in range(DIM)]
-                velocities[si] = [random.uniform(-max_vel, max_vel) for _ in range(DIM)]
-                new_fit = calculate_lamp_fitness_2d(positions[si][0], positions[si][1])
-                pb_pos[si] = positions[si][:]
-                pb_fit[si] = new_fit
-                if new_fit < g_fit:
-                    g_fit, g_pos = new_fit, positions[si][:]
-            stagnation_counter = 0
+        # Baca lux nyata
+        lux1_r = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+        lux2_r = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+        lux3_r = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
+        lux_real = round((lux1_r + lux2_r + lux3_r) / 3.0, 1)
 
-    # Kembalikan Gbest dalam PWM (0-255) langsung — konversi ke % dilakukan oleh caller
+        # Hitung fitness nyata
+        person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+        TARGET_LUX = 350.0 if person_now else 0.0
+        real_fit   = round((lux_real - TARGET_LUX) ** 2, 2)
+
+        print(f"[PSO] Lux nyata={lux_real} | fitness={real_fit} | target={TARGET_LUX:.0f}")
+
+        # Record iteration log for dashboard chart
+        log_entry = {
+            'iter':    it + 1,
+            'pwm1':    best_cand_pos[0],
+            'pwm2':    best_cand_pos[1],
+            'b1':      b1_send,
+            'b2':      b2_send,
+            'lux1':    round(lux1_r, 1),
+            'lux2':    round(lux2_r, 1),
+            'lux3':    round(lux3_r, 1),
+            'lux_avg': lux_real,
+            'fitness': real_fit,
+        }
+        iteration_log.append(log_entry)
+        fitness_history.append(real_fit)
+
+        # Emit iteration result to dashboard (update live chart)
+        socketio.emit('pso_iter_progress', {**log_entry, 'status': 'done'})
+
+        # Update Pbest
+        if real_fit < pb_fit[best_cand_idx]:
+            pb_fit[best_cand_idx] = real_fit
+            pb_pos[best_cand_idx] = best_cand_pos[:]
+
+        # Update Gbest
+        if real_fit < g_fit:
+            g_fit = real_fit
+            g_pos = best_cand_pos[:]
+        elif abs(real_fit - g_fit) < 1.0:
+            if (best_cand_pos[0] + best_cand_pos[1]) < (g_pos[0] + g_pos[1]):
+                g_pos = best_cand_pos[:]
+
+        # Stop early: lux avg dalam toleransi DAN semua sensor >= 200 lux
+        if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0:
+            if lux1_r >= 200.0 and lux2_r >= 200.0 and lux3_r >= 200.0:
+                print(f"[PSO] Stop early iterasi {it+1} — lux {lux_real} dalam 315-385, "
+                      f"L1={lux1_r} L2={lux2_r} L3={lux3_r} semua ≥200")
+                break
+            else:
+                print(f"[PSO] Lux avg={lux_real} in target but some sensor < 200 "
+                      f"(L1={lux1_r} L2={lux2_r} L3={lux3_r}) — lanjut iterasi")
+
+    elapsed_total = time.time() - start_time
+    print(f"[PSO] Selesai {len(fitness_history)} iterasi dalam {elapsed_total:.1f}s | "
+          f"Gbest: PWM1={g_pos[0]} PWM2={g_pos[1]} | fitness={g_fit:.2f}")
+
     initial_error = fitness_history[0] if fitness_history else g_fit
-    return list(g_pos), g_fit, fitness_history, initial_error
+    return list(g_pos), g_fit, fitness_history, initial_error, iteration_log
 
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
@@ -815,9 +941,11 @@ def run_optimization_cycle(algo='both'):
         if algo in ('ga', 'both'):
             sol, fit, hist, bf = run_ga_optimization()
             mode_idx = sol[2] if len(sol) > 2 else 0
+            opt_set_rh = sol[3] if len(sol) > 3 else 50
             last_opt_results['ga'] = {
                 'fitness': fit, 'temp': sol[0], 'fan': sol[1],
                 'mode_idx': mode_idx, 'mode': AC_MODE_NAMES.get(mode_idx, 'COOL'),
+                'set_rh': opt_set_rh,
                 'stats': hist, 'brute_force': bf,
                 'initial_fitness': round(hist[0], 2) if hist else 0,
                 'final_fitness': round(fit, 2),
@@ -837,14 +965,14 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} fitness={fit:.2f}")
+            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
-            sol, fit, hist, initial_err = run_pso_optimization()
-            # sol adalah PWM 0-255 langsung dari algoritma
+            sol, fit, hist, initial_err, iter_log = run_pso_optimization()
+            # sol is PWM 0-255 directly from algorithm
             pwm1_val = int(round(min(255, max(0, sol[0]))))
             pwm2_val = int(round(min(255, max(0, sol[1]))))
-            # Konversi ke brightness % untuk MQTT/ESP32
+            # Convert to brightness % for MQTT/ESP32
             b1 = round(pwm1_val * 100 / 255)
             b2 = round(pwm2_val * 100 / 255)
             # Estimate achieved lux from optimal brightness
@@ -853,13 +981,13 @@ def run_optimization_cycle(algo='both'):
             lux1 = opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0))
             lux2 = opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0))
             lux3 = opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0))
-            # lux_achieved: rata-rata SENSOR NYATA L1+L2+L3 (bukan estimasi model)
+            # lux_achieved: average REAL SENSOR L1+L2+L3 (not model estimation)
             lux_achieved = round((lux1 + lux2 + lux3) / 3.0, 1)
             last_opt_results['pso'] = {
                 'fitness': fit,
-                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # nilai PWM asli 0-255 dari algoritma
-                'brightness': int((b1 + b2) / 2),           # rata-rata brightness % untuk referensi
-                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 untuk MQTT/ESP32
+                'pwm1': pwm1_val, 'pwm2': pwm2_val,        # raw PWM value 0-255 from algorithm
+                'brightness': int((b1 + b2) / 2),           # average brightness % for reference
+                'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 for MQTT/ESP32
                 'stats': hist,
                 'initial_error': round(initial_err, 2),
                 'final_error': round(fit, 2),
@@ -885,6 +1013,7 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
+            'ga_set_rh': last_opt_results['ga'].get('set_rh', 50),
             'pso_pwm1': last_opt_results['pso'].get('pwm1', 0),
             'pso_pwm2': last_opt_results['pso'].get('pwm2', 0),
             'pso_brightness': last_opt_results['pso']['brightness'],
@@ -901,13 +1030,14 @@ def run_optimization_cycle(algo='both'):
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
             'ga_mode_idx': float(last_opt_results['ga'].get('mode_idx', 0)),
+            'ga_set_rh': float(last_opt_results['ga'].get('set_rh', 50)),
             'pso_pwm1': float(last_opt_results['pso'].get('pwm1', 0)),
             'pso_pwm2': float(last_opt_results['pso'].get('pwm2', 0)),
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
             'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
-            # combined_fitness: GA maximize, PSO minimize — PSO fitness sudah dalam % (0-100)
+            # combined_fitness: GA maximize, PSO minimize — PSO fitness is already in % (0-100)
             'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
                                 + max(0.0, 100.0 - float(last_opt_results['pso']['fitness'])) * 0.5
         })
@@ -917,6 +1047,7 @@ def run_optimization_cycle(algo='both'):
             opt_temp = last_opt_results['ga']['temp']
             opt_fan  = last_opt_results['ga']['fan']
             opt_mode = last_opt_results['ga'].get('mode', 'COOL')
+            opt_rh   = last_opt_results['ga'].get('set_rh', 50)
             if 16 <= opt_temp <= 30 and opt_fan >= 1:
                 now = time.time()
                 temp_changed = abs(int(opt_temp) - _last_sent_ac_temp) >= AC_CHANGE_THRESHOLD_TEMP
@@ -925,32 +1056,16 @@ def run_optimization_cycle(algo='both'):
                     _last_adaptive_ac_apply = now
                     _last_sent_ac_temp = int(opt_temp)
                     _last_sent_ac_fan  = int(opt_fan)
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-        # Auto-apply Lamp — only when PSO produced fresh results this cycle
-        # NOTE: 'both' is no longer used by optimization_auto_loop, but guard kept for safety
-        if algo in ('pso', 'both') and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE':
-            person_present = _person_present_recently_lamp()
-            raw_b1 = last_opt_results['pso'].get('brightness1', 0)
-            raw_b2 = last_opt_results['pso'].get('brightness2', 0)
-            if person_present:
-                # Person detected: apply with safety floor
-                opt_b1, opt_b2 = _safe_lamp_brightness(raw_b1, raw_b2)
-                if (opt_b1 > 0 or opt_b2 > 0) and _should_apply_lamp(opt_b1, opt_b2):
-                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                    mqtt_data['lamp']['brightness1'] = opt_b1
-                    mqtt_data['lamp']['brightness2'] = opt_b2
-                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                    _record_lamp_apply(opt_b1, opt_b2)
-            else:
-                # No person: PSO recommends brightness=0, allow sending 0 to turn off lamp
-                opt_b1, opt_b2 = int(raw_b1), int(raw_b2)
-                if _should_apply_lamp(opt_b1, opt_b2):
-                    mqtt_client.publish('smartroom/lamp/control', json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive'}))
-                    mqtt_data['lamp']['brightness1'] = opt_b1
-                    mqtt_data['lamp']['brightness2'] = opt_b2
-                    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
-                    _record_lamp_apply(opt_b1, opt_b2)
+                    # Update local state
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    mqtt_data['ac']['ac_fan_mode'] = opt_mode
+                    print(f"  [GA→AC] Applied: {int(opt_temp)}°C Fan={int(opt_fan)} Mode={opt_mode} RH={int(opt_rh)}%")
+        # Note: Auto-apply lamp PSO is NOT done here.
+        # Apply lamp PWM controlled fully by _pso_lamp_cycle()
+        # agar urutan Baca→Hitung→Send→Tunggu→Baca tetap terjaga.
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
@@ -965,7 +1080,8 @@ def run_optimization_cycle(algo='both'):
                 'temperature': last_opt_results['ga']['temp'],
                 'fan_speed': last_opt_results['ga']['fan'],
                 'mode': last_opt_results['ga'].get('mode', 'COOL'),
-                'mode_idx': last_opt_results['ga'].get('mode_idx', 0)
+                'mode_idx': last_opt_results['ga'].get('mode_idx', 0),
+                'set_rh': last_opt_results['ga'].get('set_rh', 50)
             }
         if algo in ('pso', 'both'):
             status_payload['pso_solution'] = {'brightness': last_opt_results['pso']['brightness'], 'brightness1': last_opt_results['pso'].get('brightness1', 0), 'brightness2': last_opt_results['pso'].get('brightness2', 0), 'pwm1': last_opt_results['pso'].get('pwm1', 0), 'pwm2': last_opt_results['pso'].get('pwm2', 0)}
@@ -981,9 +1097,102 @@ def run_optimization_cycle(algo='both'):
 
 # ==================== PERSIST & RESTORE OPT RESULTS ====================
 OPT_PERSIST_MEASUREMENT = 'opt_results'  # InfluxDB measurement name
+OPT_RESULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'opt_results.json')
+
+def save_opt_results_file():
+    """Save last_opt_results (including stats/history arrays) to JSON file.
+    This supplements InfluxDB persistence which cannot store arrays.
+    Called after every GA or PSO completion."""
+    try:
+        ga = last_opt_results.get('ga', {})
+        pso = last_opt_results.get('pso', {})
+        payload = {
+            'ga': {
+                'fitness':         ga.get('fitness', 0),
+                'temp':            ga.get('temp', 0),
+                'fan':             ga.get('fan', 0),
+                'mode_idx':        ga.get('mode_idx', 0),
+                'mode':            ga.get('mode', 'COOL'),
+                'initial_fitness': ga.get('initial_fitness', 0),
+                'final_fitness':   ga.get('final_fitness', 0),
+                'run_time':        ga.get('run_time', ''),
+                'stats':           ga.get('stats', []),
+                'params':          ga.get('params', {}),
+                'sensor_snapshot': ga.get('sensor_snapshot', {}),
+            },
+            'pso': {
+                'fitness':       pso.get('fitness', 0),
+                'pwm1':          pso.get('pwm1', 0),
+                'pwm2':          pso.get('pwm2', 0),
+                'brightness':    pso.get('brightness', 0),
+                'brightness1':   pso.get('brightness1', 0),
+                'brightness2':   pso.get('brightness2', 0),
+                'initial_error': pso.get('initial_error', 0),
+                'final_error':   pso.get('final_error', 0),
+                'lux_achieved':  pso.get('lux_achieved', 0),
+                'target_lux':    pso.get('target_lux', 350.0),
+                'run_time':      pso.get('run_time', ''),
+                'stats':         pso.get('stats', []),
+                'iteration_log': pso.get('iteration_log', []),
+                'params':        pso.get('params', {}),
+            },
+            'saved_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        dir_path = os.path.dirname(OPT_RESULTS_FILE)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as fh:
+                json.dump(payload, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+        os.replace(tmp_path, OPT_RESULTS_FILE)
+    except Exception as e:
+        print(f"[PERSIST] save_opt_results_file failed: {e}")
+
+def load_opt_results_file():
+    """Load last_opt_results from JSON file on startup.
+    Restores stats/history arrays that InfluxDB cannot store."""
+    if not os.path.exists(OPT_RESULTS_FILE):
+        return False
+    try:
+        with open(OPT_RESULTS_FILE, 'r') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        ga_data  = data.get('ga', {})
+        pso_data = data.get('pso', {})
+        if ga_data and ga_data.get('fitness', 0) > 0:
+            last_opt_results['ga'].update(ga_data)
+            mqtt_data['system']['ga_fitness']  = ga_data.get('fitness', 0)
+            mqtt_data['system']['ga_temp']     = ga_data.get('temp', 0)
+            mqtt_data['system']['ga_fan']      = ga_data.get('fan', 0)
+            mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
+            mqtt_data['system']['ga_set_rh']   = ga_data.get('set_rh', 50)
+            mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
+            print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
+                  f"fitness={ga_data.get('fitness',0):.2f} stats={len(ga_data.get('stats',[]))} pts")
+        if pso_data and (pso_data.get('brightness1', 0) > 0 or pso_data.get('fitness', 0) > 0):
+            last_opt_results['pso'].update(pso_data)
+            mqtt_data['system']['pso_fitness']     = pso_data.get('fitness', 0)
+            mqtt_data['system']['pso_pwm1']        = pso_data.get('pwm1', 0)
+            mqtt_data['system']['pso_pwm2']        = pso_data.get('pwm2', 0)
+            mqtt_data['system']['pso_brightness']   = pso_data.get('brightness', 0)
+            mqtt_data['system']['pso_brightness1']  = pso_data.get('brightness1', 0)
+            mqtt_data['system']['pso_brightness2']  = pso_data.get('brightness2', 0)
+            mqtt_data['system']['pso_history']      = pso_data.get('stats', [])
+            print(f"  [RESTORE-FILE] PSO: PWM1={pso_data.get('pwm1')}/255 PWM2={pso_data.get('pwm2')}/255 "
+                  f"stats={len(pso_data.get('stats',[]))} pts iter_log={len(pso_data.get('iteration_log',[]))} entries")
+        return True
+    except Exception as e:
+        print(f"  [RESTORE-FILE] load_opt_results_file failed: {e}")
+        return False
 
 def persist_opt_results(algo):
-    """Write current GA or PSO results to InfluxDB so they survive restarts."""
+    """Write current GA or PSO results to InfluxDB so they survive restarts.
+    Also saves full results (including stats arrays) to JSON file."""
     try:
         if algo == 'ga':
             ga = last_opt_results['ga']
@@ -994,9 +1203,11 @@ def persist_opt_results(algo):
                 'temp':             float(ga.get('temp', 0)),
                 'fan':              float(ga.get('fan', 0)),
                 'mode_idx':         float(ga.get('mode_idx', 0)),
+                'set_rh':           float(ga.get('set_rh', 50)),
                 'initial_fitness':  float(ga.get('initial_fitness', 0)),
                 'final_fitness':    float(ga.get('final_fitness', ga['fitness'])),
                 'run_time':         str(ga.get('run_time', '')),
+                'ga_stats_json':    json.dumps(ga.get('stats', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'ga', 'version': '1'})
@@ -1016,14 +1227,20 @@ def persist_opt_results(algo):
                 'lux_achieved':   float(pso.get('lux_achieved', 0)),
                 'target_lux':     float(pso.get('target_lux', 350.0)),
                 'run_time':       str(pso.get('run_time', '')),
+                'pso_stats_json':    json.dumps(pso.get('stats', [])),
+                'pso_iterlog_json':  json.dumps(pso.get('iteration_log', [])),
             }
             write_to_influxdb(OPT_PERSIST_MEASUREMENT, fields,
                               tags={'algo': 'pso', 'version': '1'})
+        # Also save full results (with stats arrays) to JSON file
+        save_opt_results_file()
     except Exception as e:
         print(f"[PERSIST] Error saving {algo} results: {e}")
 
 def restore_opt_results():
-    """Read the latest GA and PSO results from InfluxDB on startup."""
+    """Read the latest GA and PSO results from InfluxDB on startup.
+    NOTE: InfluxDB does not store stats/history arrays. If load_opt_results_file()
+    already loaded stats from JSON, we preserve them here (don't overwrite with [])."""
     try:
         _, _, query_api = _get_influx_client()
         for algo in ('ga', 'pso'):
@@ -1038,25 +1255,58 @@ def restore_opt_results():
             if not rec_map:
                 continue
             if algo == 'ga' and rec_map.get('fitness', 0) > 0:
+                # Try to restore stats from InfluxDB JSON field
+                restored_stats = []
+                if rec_map.get('ga_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['ga_stats_json'])
+                    except Exception:
+                        pass
+                # Preserve stats already loaded from JSON file, or use InfluxDB stats
+                existing_stats = last_opt_results['ga'].get('stats', [])
                 last_opt_results['ga'].update({
                     'fitness':          float(rec_map.get('fitness', 0)),
                     'temp':             int(rec_map.get('temp', 0)),
                     'fan':              int(rec_map.get('fan', 0)),
                     'mode_idx':         int(rec_map.get('mode_idx', 0)),
                     'mode':             AC_MODE_NAMES.get(int(rec_map.get('mode_idx', 0)), 'COOL'),
+                    'set_rh':           int(rec_map.get('set_rh', 50)),
                     'initial_fitness':  float(rec_map.get('initial_fitness', 0)),
                     'final_fitness':    float(rec_map.get('final_fitness', 0)),
                     'run_time':         str(rec_map.get('run_time', '')),
-                    'stats':            [],  # history not stored (too large)
                 })
-                mqtt_data['system']['ga_fitness'] = last_opt_results['ga']['fitness']
-                mqtt_data['system']['ga_temp']    = last_opt_results['ga']['temp']
-                mqtt_data['system']['ga_fan']     = last_opt_results['ga']['fan']
-                mqtt_data['system']['ga_mode']    = last_opt_results['ga']['mode']
-                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} fitness={last_opt_results['ga']['fitness']:.2f}")
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['ga']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['ga']['stats'] = restored_stats
+                else:
+                    last_opt_results['ga']['stats'] = []
+                mqtt_data['system']['ga_fitness']  = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_temp']     = last_opt_results['ga']['temp']
+                mqtt_data['system']['ga_fan']      = last_opt_results['ga']['fan']
+                mqtt_data['system']['ga_mode']     = last_opt_results['ga']['mode']
+                mqtt_data['system']['ga_set_rh']   = last_opt_results['ga'].get('set_rh', 50)
+                mqtt_data['system']['ga_history']  = last_opt_results['ga'].get('stats', [])
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} Mode={last_opt_results['ga']['mode']} RH={last_opt_results['ga'].get('set_rh',50)}% fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
+                # Try to restore stats from InfluxDB JSON fields
+                restored_stats = []
+                restored_iter_log = []
+                if rec_map.get('pso_stats_json'):
+                    try:
+                        restored_stats = json.loads(rec_map['pso_stats_json'])
+                    except Exception:
+                        pass
+                if rec_map.get('pso_iterlog_json'):
+                    try:
+                        restored_iter_log = json.loads(rec_map['pso_iterlog_json'])
+                    except Exception:
+                        pass
+                existing_stats = last_opt_results['pso'].get('stats', [])
+                existing_iter_log = last_opt_results['pso'].get('iteration_log', [])
                 last_opt_results['pso'].update({
                     'fitness':       float(rec_map.get('fitness', 0)),
                     'pwm1':          int(rec_map.get('pwm1', round(b1_restored * 255 / 100))),
@@ -1069,15 +1319,28 @@ def restore_opt_results():
                     'lux_achieved':  float(rec_map.get('lux_achieved', 0)),
                     'target_lux':    float(rec_map.get('target_lux', 350.0)),
                     'run_time':      str(rec_map.get('run_time', '')),
-                    'stats':         [],
                 })
+                # Use existing stats from file, or restored from InfluxDB, or empty
+                if existing_stats:
+                    last_opt_results['pso']['stats'] = existing_stats
+                elif restored_stats:
+                    last_opt_results['pso']['stats'] = restored_stats
+                else:
+                    last_opt_results['pso']['stats'] = []
+                if existing_iter_log:
+                    last_opt_results['pso']['iteration_log'] = existing_iter_log
+                elif restored_iter_log:
+                    last_opt_results['pso']['iteration_log'] = restored_iter_log
+                else:
+                    last_opt_results['pso']['iteration_log'] = []
                 mqtt_data['system']['pso_fitness']    = last_opt_results['pso']['fitness']
                 mqtt_data['system']['pso_pwm1']       = last_opt_results['pso']['pwm1']
                 mqtt_data['system']['pso_pwm2']       = last_opt_results['pso']['pwm2']
                 mqtt_data['system']['pso_brightness']  = last_opt_results['pso']['brightness']
                 mqtt_data['system']['pso_brightness1'] = last_opt_results['pso']['brightness1']
                 mqtt_data['system']['pso_brightness2'] = last_opt_results['pso']['brightness2']
-                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f}")
+                mqtt_data['system']['pso_history']     = last_opt_results['pso'].get('stats', [])
+                print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f} stats={len(last_opt_results['pso']['stats'])} pts")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
 
@@ -1121,7 +1384,7 @@ def sensor_fault_loop():
                 # Only emit alert once per transition to avoid spam
                 prev = _fault_last_emit.get(dev_id, 'ok')
                 if lvl != 'ok' and prev == 'ok':
-                    msg = f'[SENSOR FAULT] {dev_label} tidak ada data ({age_str})'
+                    msg = f'[SENSOR FAULT] {dev_label} no data ({age_str})'
                     level = 'danger' if lvl == 'fault' else 'warning'
                     socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': lvl, 'age': age_str})
                     socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
@@ -1129,7 +1392,7 @@ def sensor_fault_loop():
                     print(msg)
                 elif lvl == 'ok' and prev != 'ok':
                     # Recovery
-                    msg = f'[SENSOR OK] {dev_label} kembali online'
+                    msg = f'[SENSOR OK] {dev_label} back online'
                     socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': 'ok', 'age': age_str})
                     socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
@@ -1142,31 +1405,213 @@ def sensor_fault_loop():
             print(f"[FAULT] sensor_fault_loop error: {e}")
         time.sleep(60)
 
+def _pso_lamp_cycle():
+    """One full lamp PSO cycle with sequence:
+        1. Baca lux sekarang
+        2. PSO hitung PWM baru
+        3. Send PWM ke lampu
+        4. Wait 5 minutes (timer managed by optimization_auto_loop)
+        5. Baca lux baru  → evaluasi → ulang dari langkah 2
+
+    Return: True jika siklus berjalan normal, False jika dilewati.
+    """
+    global _pso_locked, _pso_lock_pwm
+
+    # ── Step 1: Baca lux sekarang ─────────────────────────────────────────
+    # Force refresh opt_sensor_data from MQTT/InfluxDB before reading lux value
+    fetch_sensor_data_from_db()
+    lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+    lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+    lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
+    lux_avg = (lux1 + lux2 + lux3) / 3.0
+    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+    mode_now = mqtt_data['lamp'].get('mode', 'MANUAL')
+
+    print(f"[PSO] New cycle — Lux avg={lux_avg:.1f} | Person={'yes' if person_now else 'no'} | Mode={mode_now}")
+
+    # Hanya jalan di mode ADAPTIVE
+    if mode_now != 'ADAPTIVE':
+        print(f"[PSO] Mode {mode_now} — siklus dilewati")
+        return False
+
+    # PSO only runs if there are persons in the room
+    # If no persons: turn off lamps and stop
+    if not person_now:
+        b1_now = mqtt_data['lamp'].get('brightness1', 0)
+        b2_now = mqtt_data['lamp'].get('brightness2', 0)
+        if b1_now > 0 or b2_now > 0:
+            mqtt_client.publish('smartroom/lamp/control',
+                json.dumps({'brightness1': 0, 'brightness2': 0, 'source': 'adaptive_no_person'}))
+            mqtt_data['lamp']['brightness1'] = 0
+            mqtt_data['lamp']['brightness2'] = 0
+            mqtt_data['lamp']['brightness_avg'] = 0
+            socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+            _record_lamp_apply(0, 0)
+            print(f"[PSO] No persons — lamps turned off, PSO stopped")
+        else:
+            print(f"[PSO] No persons — lamps already off, PSO stopped")
+        return False
+
+    # ── Evaluate current lux against target ─────────────────────────────────
+    # Here person_now is definitely True (already checked above)
+    # Converged if: lux avg 315-385 AND all sensors >= 200 lux
+    lux_in_range = (315.0 <= lux_avg <= 385.0
+                    and lux1 >= 200.0 and lux2 >= 200.0 and lux3 >= 200.0)
+
+    if lux_in_range:
+        if not _pso_locked:
+            _pso_lock_pwm[0] = mqtt_data['lamp'].get('brightness1', 0)
+            _pso_lock_pwm[1] = mqtt_data['lamp'].get('brightness2', 0)
+            _pso_locked = True
+        print(f"[PSO] Lux {lux_avg:.1f} dalam toleransi — brightness dikunci "
+              f"(B1={_pso_lock_pwm[0]}% B2={_pso_lock_pwm[1]}%), no PWM change")
+        return False  # no need to proceed to steps 2-3
+
+    # Lux di luar target — buka kunci
+    _pso_locked = False
+    _pso_lock_pwm[0] = None
+    _pso_lock_pwm[1] = None
+    print(f"[PSO] Lux {lux_avg:.1f} outside 315-385 — proceeding to calculate PWM")
+
+    # ── Step 2: PSO — calculate PWM, send per iteration, stop if converged ──
+    g_pos, g_fit, fitness_history, initial_err, iteration_log = run_pso_optimization()
+    pwm1_val = int(g_pos[0])
+    pwm2_val = int(g_pos[1])
+    b1 = round(pwm1_val * 100.0 / 255.0, 1)
+    b2 = round(pwm2_val * 100.0 / 255.0, 1)
+    b_avg = round((b1 + b2) / 2.0, 1)
+    target_lux = 350.0 if person_now else 0.0
+
+    # Save PSO results including iteration_log for dashboard chart
+    last_opt_results['pso'].update({
+        'brightness': b_avg, 'brightness1': b1, 'brightness2': b2,
+        'pwm1': pwm1_val, 'pwm2': pwm2_val,
+        'fitness': round(g_fit, 4),
+        'stats': fitness_history[-20:] if len(fitness_history) >= 20 else fitness_history,
+        'iteration_log': iteration_log,
+        'initial_error': round(initial_err, 2),
+        'final_error': round(g_fit, 2),
+        'lux_achieved': lux_avg,
+        'target_lux': target_lux,
+        'run_time': datetime.now().strftime('%d %b %Y %H:%M'),
+        'params': {
+            'swarm_size': pso_params['swarm_size'], 'iterations': pso_params['iterations'],
+            'w': pso_params['w'], 'c1': pso_params['c1'], 'c2': pso_params['c2'],
+        },
+    })
+
+    # ── Step 3: Send final Gbest to lamp ────────────────────────────────
+    # PSO already sends Gbest in each iteration. This step ensures
+    # lamp is at the best Gbest position after all iterations complete.
+    opt_b1, opt_b2 = _safe_lamp_brightness(b1, b2)
+    mqtt_client.publish(
+        'smartroom/lamp/control',
+        json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive_final'})
+    )
+    # Sync mqtt_data['lamp'] directly — don't wait for MQTT back from ESP32
+    # agar Lamp Dashboard brightness terupdate segera
+    mqtt_data['lamp']['brightness1']    = opt_b1
+    mqtt_data['lamp']['brightness2']    = opt_b2
+    mqtt_data['lamp']['brightness_avg'] = round((opt_b1 + opt_b2) / 2.0, 1)
+    _record_lamp_apply(opt_b1, opt_b2)
+    # Emit to all clients so Lamp Dashboard and ML Optimization sync instantly
+    socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
+    print(f"[PSO] Gbest final dikirim — B1={opt_b1}% B2={opt_b2}% | fitness={g_fit:.2f}")
+
+    # Fitness dalam persen: 100% = lux tepat 350, turun seiring error membesar
+    # Skala: error=0 → 100%, error=350^2=122500 → 0%
+    fitness_pct = round(max(0.0, 100.0 - (g_fit / 122500.0) * 100.0), 1)
+
+    # Update dashboard & InfluxDB
+    persist_opt_results('pso')
+    mqtt_data['system'].update({
+        'pso_fitness': fitness_pct,
+        'pso_pwm1': pwm1_val, 'pso_pwm2': pwm2_val,
+        'pso_brightness': b_avg, 'pso_brightness1': b1, 'pso_brightness2': b2,
+        'pso_history': fitness_history,
+    })
+    socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
+    socketio.emit('ml_status', {
+        'status': 'completed', 'algorithm': 'pso',
+        'pso_fitness': fitness_pct,
+        'pso_history': fitness_history,
+        'pso_iteration_log': iteration_log,
+        'pso_solution': {
+            'brightness': b_avg, 'brightness1': b1, 'brightness2': b2,
+            'pwm1': pwm1_val, 'pwm2': pwm2_val,
+        }
+    })
+    write_to_influxdb('optimization_result', {
+        'pso_fitness': float(g_fit),
+        'pso_pwm1': float(pwm1_val), 'pso_pwm2': float(pwm2_val),
+        'pso_brightness': float(b_avg),
+        'pso_brightness1': float(b1), 'pso_brightness2': float(b2),
+        'pso_error': float(g_fit),
+    })
+
+    # ── Step 4 & 5: Wait 5 minutes then read new lux ────────────────────
+    # The 5 minute wait is controlled by optimization_auto_loop via last_pso_time.
+    # New lux reading automatically occurs when next cycle is called (Step 1).
+    print(f"[PSO] Done — waiting 5 minutes, new lux will be read in next cycle")
+
+    # Cek apakah PSO berhasil konvergen (lux akhir dalam toleransi)
+    lux1_f = float(opt_sensor_data.get('lux1', 0))
+    lux2_f = float(opt_sensor_data.get('lux2', 0))
+    lux3_f = float(opt_sensor_data.get('lux3', 0))
+    lux_final = (lux1_f + lux2_f + lux3_f) / 3.0
+    # Converged if: persons present + lux avg 315-385 + all sensors >= 200
+    converged = (315.0 <= lux_final <= 385.0
+                 and lux1_f >= 200.0 and lux2_f >= 200.0 and lux3_f >= 200.0)
+    print(f"[PSO] Lux akhir={lux_final:.1f} (L1={lux1_f} L2={lux2_f} L3={lux3_f}) "
+          f"— {'CONVERGED' if converged else 'NOT converged, will retry'}")
+    return converged
+
+
 def optimization_auto_loop():
-    """Background thread: GA (AC) and PSO (Lamp) always run in separate cycles.
-    CRITICAL: 'both' is NEVER used — GA and PSO must never coincide so that
-    an AC signal never causes a lamp brightness change at the same time."""
-    time.sleep(10)  # wait for Flask + MQTT to start
+    """Background thread: GA (AC) dan PSO (Lamp) berjalan di siklus terpisah.
+    PSO lamp:
+      - If lux is within 315-385: wait 5 minutes then check again
+      - If lux not at target: immediately retry PSO without waiting 5 minutes
+    GA and PSO never run simultaneously."""
+    time.sleep(10)
     print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
-    last_ga_time = 0
+    last_ga_time  = 0
     last_pso_time = 0
     while True:
         try:
-            now = time.time()
-            run_ga = (now - last_ga_time) >= AUTO_OPT_INTERVAL_AC
+            now     = time.time()
+            run_ga  = (now - last_ga_time)  >= AUTO_OPT_INTERVAL_AC
             run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
-            # GA and PSO are ALWAYS separate — one per check interval.
-            # If both timers are due simultaneously, GA (AC) runs first;
-            # PSO (Lamp) is deferred to the next check (~30s later).
+
             if run_ga:
                 run_optimization_cycle('ga')
                 last_ga_time = time.time()
             elif run_pso:
-                run_optimization_cycle('pso')
-                last_pso_time = time.time()
+                # Signal dashboard that a new PSO cycle has started
+                socketio.emit('pso_iter_progress', {'status': 'new_cycle'})
+                converged = _pso_lamp_cycle()
+                now_after = time.time()
+                if converged:
+                    # Lux within target — wait normal 5 minutes
+                    last_pso_time = now_after
+                    print(f"[PSO] Konvergen — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                else:
+                    # Lux not at target (or mode is not ADAPTIVE) —
+                    # check if it's because already at target (_pso_locked)
+                    # or because not converged
+                    if _pso_locked:
+                        # Already at target, lock active — wait normal
+                        last_pso_time = now_after
+                        print(f"[PSO] Lux dikunci dalam target — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                    else:
+                        # Not converged — immediately retry PSO without waiting 5 minutes
+                        # Give a short 10 second delay for sensor to stabilize
+                        print(f"[PSO] Not converged — retrying PSO in 10 seconds")
+                        last_pso_time = now_after - AUTO_OPT_INTERVAL_LAMP + 10
+
         except Exception as e:
             print(f"[OPT] Auto cycle error: {e}")
-        time.sleep(30)  # check every 30s
+        time.sleep(15)  # check timer more often (15 seconds) for fast re-run
 
 # InfluxDB Configuration
 INFLUX_URL = "http://localhost:8086"
@@ -1193,9 +1638,9 @@ _person_consecutive_frames = 0
 _no_person_start_time = None
 PERSON_CONFIRM_FRAMES = 3        # 3 frames with person -> auto ON (~2 seconds)
 PERSON_RECONFIRM_FRAMES = 15     # 15 frames (~10s) required to re-enable after auto-OFF
-NO_PERSON_TIMEOUT_SECONDS = 300  # 5 menit no person -> AC auto OFF
-NO_PERSON_LAMP_TIMEOUT = 1200    # 20 menit no person -> Lamp auto OFF
-AUTO_OFF_COOLDOWN = 120          # 2 menit cooldown: block auto-ON setelah auto-OFF
+NO_PERSON_TIMEOUT_SECONDS = 300  # 5 min no person -> AC auto OFF
+NO_PERSON_LAMP_TIMEOUT = 300     # 5 min no person -> Lamp auto OFF
+AUTO_OFF_COOLDOWN = 120          # 2 min cooldown: block auto-ON after auto-OFF
 _last_person_confirmed_time = 0.0  # Unix time when person last confirmed (0 = never since startup)
 _auto_off_triggered = False        # Prevents repeated POWER_OFF from firing
 _auto_off_time = 0.0               # Unix time when auto-OFF last fired (for cooldown)
@@ -1207,39 +1652,91 @@ _latest_frame_bytes = None
 _latest_frame_lock = threading.Lock()
 _detection_thread_running = False
 
-# ── Lamp gain auto-calibration (EMA) ─────────────────────────────────────────
-# gain_per_pwm: estimasi kenaikan lux per 1 unit PWM.
-# Nilai awal dari asumsi teoritis; di-update EMA setiap apply+feedback.
-_gain_per_pwm = 4.0 / 2.55          # ~1.57 lux/PWM (nilai awal)
-GAIN_EMA_ALPHA   = 0.2               # bobot data baru dalam EMA (0=tidak berubah, 1=replace langsung)
-GAIN_MIN, GAIN_MAX = 0.3, 6.0       # clamp: cegah gain outlier dari noise sensor
-# Closed-loop feedback: catat state sebelum apply agar bisa kalkulasi delta aktual
-_pending_calibration = None          # None | {'pwm1': x, 'pwm2': x, 'lux1': x, 'lux2': x, 'lux3': x, 'ts': t}
+# Lamp apply: no EMA gain calibration (according to specification doc)
+_pending_calibration = None  # not used, kept for reference compatibility
+
+# ── Filter BH1750: validasi + EMA smoothing ───────────────────────────────────
+# BH1750 sometimes produces high spikes (hundreds/thousands lux) in dark conditions
+# due to I2C noise or reading before conversion completes. This filter prevents
+# anomaly values from entering PSO and InfluxDB.
+LUX_MAX_PHYSICAL   = 65535.0  # batas hardware BH1750 (16-bit)
+LUX_SPIKE_RATIO    = 5.0      # bacaan > 5x EMA sebelumnya dianggap spike
+LUX_DARK_THRESHOLD = 10.0     # if brightness1=brightness2=0, lux should be < this
+LUX_EMA_ALPHA      = 0.3      # bobot data baru dalam smoothing (0=ignore, 1=raw)
+# EMA state per sensor (None = not initialized, use raw for first time)
+_lux_ema = [None, None, None]  # [L1_ema, L2_ema, L3_ema]
+
+# ── PWM lock: don't change brightness if lux already at target ────────────────
+_pso_locked = False   # True = lux in range, PWM locked, PSO does not apply
+_pso_lock_pwm = [None, None]  # [b1%, b2%] locked
+
+def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
+    """Validate BH1750 reading received from ESP32.
+
+    ESP32 sudah menjalankan: raw -> kalibrasi -> median filter (5 sampel).
+    Raspi DOES NOT apply EMA again to prevent double-smoothing that
+    menyebabkan nilai dashboard berbeda jauh dari Serial Monitor ESP32.
+
+    Raspi hanya melakukan:
+    1. Physical bounds: negative value or > 65535 -> use last valid value.
+    2. Ghost lux: lampu OFF tapi sensor baca tinggi -> kembalikan 0.
+       - Grace period 8 seconds after PSO sends brightness=0.
+    3. Spike detection: nilai > LUX_SPIKE_RATIO x referensi -> buang.
+       Referensi = nilai valid terakhir (bukan EMA).
+    """
+    global _lux_ema  # used as "last valid value", not EMA
+    raw = float(raw_val)
+
+    # 1. Batas fisik BH1750 (16-bit)
+    if raw < 0 or raw > LUX_MAX_PHYSICAL:
+        return round(_lux_ema[sensor_idx], 1) if _lux_ema[sensor_idx] is not None else 0.0
+
+    lamp_is_off = (brightness1 <= 0 and brightness2 <= 0)
+
+    # 2. Ghost lux when lamp is off
+    # IMPORTANT: lamp_is_off DOES NOT mean room is dark — there could be natural light (sunlight, etc.).
+    # We only suspect ghost lux if:
+    # - Value is MUCH higher than previous reference (large spike when lamp just turned off)
+    # - AND still within grace period (lamp just turned off)
+    if lamp_is_off:
+        time_since_apply = time.time() - _last_adaptive_lamp_apply
+        in_grace = time_since_apply < 8.0
+
+        if in_grace and raw > LUX_DARK_THRESHOLD:
+            # In grace period: sensor might still read residual lamp light
+            # Keep old reference until lamp is fully dark
+            if _lux_ema[sensor_idx] is not None:
+                return round(_lux_ema[sensor_idx], 1)
+            return round(raw, 1)
+        # After grace period: accept value as is — there might be natural light
+        # Do not reset to 0 automatically, let spike detection handle it
+
+    # 3. Spike detection: discard if far exceeds last reference
+    if _lux_ema[sensor_idx] is not None and _lux_ema[sensor_idx] > 5.0:
+        if raw > _lux_ema[sensor_idx] * LUX_SPIKE_RATIO:
+            print(f"[LUX_FILTER] L{sensor_idx+1}: spike {raw:.1f} lx "
+                  f"(ref={_lux_ema[sensor_idx]:.1f}) -> dibuang")
+            return round(_lux_ema[sensor_idx], 1)
+
+    # Passed all checks — save as last reference and return directly
+    _lux_ema[sensor_idx] = raw
+    return round(raw, 1)
 
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
 _last_adaptive_lamp_apply = 0
-_last_sent_ac_temp = 0          # last GA-recommended temp that was actually sent to AC
-_last_sent_ac_fan  = 0          # last GA-recommended fan speed that was actually sent to AC
-# Lamp adaptive: track last sent brightness AND lux snapshot to prevent PSO stochastic noise
+_last_sent_ac_temp = 0
+_last_sent_ac_fan  = 0
 _last_sent_lamp_b1 = -1
 _last_sent_lamp_b2 = -1
-_last_apply_lux1 = -1.0   # lux readings captured at last lamp apply (lux stability gate)
-_last_apply_lux2 = -1.0
-_last_apply_lux3 = -1.0
 AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
-AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1°C vs last sent
+AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1 deg vs last sent
 AC_CHANGE_THRESHOLD_FAN = 1     # skip AC SET if fan speed unchanged vs last sent
-LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — PSO is stochastic, no need to apply every 3-min run
-LAMP_CHANGE_THRESHOLD = 8       # minimum 8% brightness change (PSO natural noise is ~5-7%)
-LUX_CHANGE_THRESHOLD = 30.0     # lux must change >30 before a new brightness is warranted
-LUX_FORCE_APPLY_TIMEOUT = 300   # 5 min — bypass lux gate if PSO hasn't applied in this long
-LUX_ERROR_FORCE_THRESHOLD = 40.0  # bypass lux/change gates when avg lux is this far from 350 target
-LAMP_MIN_BRIGHTNESS_PERSON = 20  # minimum brightness to send when person is present
+LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — sesuai interval PSO dokumen
 
 # Global data storage
 mqtt_data = {
-    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
+    'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'set_rh': 50, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
@@ -1268,12 +1765,12 @@ energy_runtime_history = deque(maxlen=5000)
 # Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
 lamp_runtime_history = deque(maxlen=5000)
 
-# InfluxDB write throttle — simpan setiap 6 menit agar database tidak terlalu penuh
-INFLUX_WRITE_INTERVAL = 360  # detik (6 menit)
-_last_sensor_influx_ts   = 0.0   # kapan terakhir ac_sensor ditulis ke InfluxDB
-_last_lamp_influx_ts     = 0.0   # kapan terakhir lamp_sensor ditulis ke InfluxDB
+# InfluxDB write throttle — save every 6 minutes so database does not fill up
+INFLUX_WRITE_INTERVAL = 360  # seconds (6 minutes)
+_last_sensor_influx_ts   = 0.0   # when last ac_sensor written to InfluxDB
+_last_lamp_influx_ts     = 0.0   # when last lamp_sensor written to InfluxDB
 _last_lamp_mqtt_ts       = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
-_last_ac_energy_influx_ts = 0.0  # kapan terakhir energy AC ditulis ke InfluxDB
+_last_ac_energy_influx_ts = 0.0  # when last AC energy written to InfluxDB
 
 # ==================== INFLUXDB SINGLETON ====================
 # One persistent client + write_api shared across all threads.
@@ -1348,7 +1845,7 @@ def save_sensor_data(temperature, humidity, heat_index,
     global _last_sensor_influx_ts
     now = time.time()
     if now - _last_sensor_influx_ts < INFLUX_WRITE_INTERVAL:
-        return  # throttle: belum 6 menit
+        return  # throttle: not yet 6 minutes
     _last_sensor_influx_ts = now
     try:
         write_to_influxdb('ac_sensor', {
@@ -1356,6 +1853,12 @@ def save_sensor_data(temperature, humidity, heat_index,
             'temp1': float(temp1), 'hum1': float(hum1),
             'temp2': float(temp2), 'hum2': float(hum2),
             'temp3': float(temp3), 'hum3': float(hum3),
+            'ac_temp': float(mqtt_data['ac'].get('ac_temp', 0)),
+            'fan_speed': int(mqtt_data['ac'].get('fan_speed', 0)),
+            'ac_fan_mode': str(mqtt_data['ac'].get('ac_fan_mode', '')),
+            'mode': str(mqtt_data['ac'].get('mode', '')),
+            'set_rh': int(mqtt_data['ac'].get('set_rh', 50)),
+            'ac_state': str(mqtt_data['ac'].get('ac_state', 'OFF')),
         }, tags={'device': 'esp32_ac', 'location': 'room'})
     except Exception as e:
         print(f'[ERROR] save_sensor_data: {e}')
@@ -1375,7 +1878,7 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
                 'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
                 'motion': bool(motion)
             }, tags={'device': 'esp32_lamp', 'location': 'room'})
-        # Estimasi energy lampu dari brightness (tidak ada PZEM di ESP32 Lamp)
+        # Estimate lamp energy from brightness (no PZEM on ESP32 Lamp)
         now_ts = time.time()
         lamp_power = round((bright_avg / 100.0) * LAMP_RATED_WATT, 2)
         lamp_current = round(lamp_power / LAMP_VOLTAGE, 3) if lamp_power > 0 else 0.0
@@ -1515,84 +2018,34 @@ def _person_present_recently_lamp():
     return time_confirmed or currently_detected
 
 def _safe_lamp_brightness(b1, b2):
-    """If person is present, clamp brightness to at least LAMP_MIN_BRIGHTNESS_PERSON.
-    This prevents PSO from dimming lamp to near-zero due to brief false 'no person' detections."""
-    if _person_present_recently_lamp():
-        b1 = max(b1, LAMP_MIN_BRIGHTNESS_PERSON)
-        b2 = max(b2, LAMP_MIN_BRIGHTNESS_PERSON)
-    return int(b1), int(b2)
+    """Ensure brightness value is not negative."""
+    return max(0, int(b1)), max(0, int(b2))
 
 def _should_apply_lamp(b1, b2):
-    """Return True only if debounce elapsed AND (lux error is large OR brightness+lux changed enough).
-    Lux-error bypass: when avg_lux is more than LUX_ERROR_FORCE_THRESHOLD away from the 350 lux
-    target, all change/stability gates are skipped so PSO can correct toward 350 without delay.
-    """
-    global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
+    """Return True if 5-minute debounce has passed (per document interval)."""
+    global _last_adaptive_lamp_apply
     now = time.time()
-    b1i, b2i = int(b1), int(b2)
-
-    # --- Determine if lux is far from target (enables fast-correction mode) ---
-    person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
-    target_lux = 350.0 if person_now else 0.0
-    cur_lux1 = float(opt_sensor_data.get('lux1', -1.0))
-    cur_lux2 = float(opt_sensor_data.get('lux2', -1.0))
-    cur_lux3 = float(opt_sensor_data.get('lux3', -1.0))
-    lux_error_large = False
-    if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
-        avg_lux = (cur_lux1 + cur_lux2 + cur_lux3) / 3.0
-        lux_error_large = abs(avg_lux - target_lux) > LUX_ERROR_FORCE_THRESHOLD
-
-    # Use shorter debounce when lux is far from target for faster correction loop
-    debounce_limit = 60 if lux_error_large else LAMP_ADAPTIVE_DEBOUNCE
-    if (now - _last_adaptive_lamp_apply) < debounce_limit:
+    if (now - _last_adaptive_lamp_apply) < LAMP_ADAPTIVE_DEBOUNCE:
         return False
-
-    # When lux is far from 350 target: bypass brightness-change gate and lux-stability gate.
-    # PSO must be allowed to steer lamp toward 350 lux even if brightness step is small
-    # or the room lux environment appears stable.
-    if lux_error_large:
-        return True
-
-    # Near target — apply normal gates to prevent PSO stochastic noise from causing flicker
-    change_ok = (abs(b1i - _last_sent_lamp_b1) >= LAMP_CHANGE_THRESHOLD or
-                 abs(b2i - _last_sent_lamp_b2) >= LAMP_CHANGE_THRESHOLD)
-    if not change_ok:
-        return False
-
-    # Lux stability gate: if the light environment hasn't changed meaningfully since the
-    # last apply, PSO randomness alone must not cause lamp flicker.
-    if _last_apply_lux1 >= 0.0:
-        force_apply = (now - _last_adaptive_lamp_apply) >= LUX_FORCE_APPLY_TIMEOUT
-        if not force_apply:
-            if cur_lux1 >= 0 and cur_lux2 >= 0 and cur_lux3 >= 0:
-                lux_changed = (abs(cur_lux1 - _last_apply_lux1) >= LUX_CHANGE_THRESHOLD or
-                               abs(cur_lux2 - _last_apply_lux2) >= LUX_CHANGE_THRESHOLD or
-                               abs(cur_lux3 - _last_apply_lux3) >= LUX_CHANGE_THRESHOLD)
-                if not lux_changed:
-                    return False  # environment stable — PSO noise must not cause flicker
     return True
 
 def _record_lamp_apply(b1, b2):
-    """Update brightness tracking and capture lux snapshot for the stability gate.
-    Also records pre-apply lux state for closed-loop gain calibration."""
+    """Record last time brightness was applied to lamp.
+    Jika brightness=0 (lampu dimatikan), schedule EMA reset setelah grace period
+    agar filter langsung siap menerima lux=0 tanpa drift lambat.
+    """
     global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-    global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3, _pending_calibration
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
-    _last_apply_lux1 = float(opt_sensor_data.get('lux1', _last_apply_lux1))
-    _last_apply_lux2 = float(opt_sensor_data.get('lux2', _last_apply_lux2))
-    _last_apply_lux3 = float(opt_sensor_data.get('lux3', _last_apply_lux3))
-    # Simpan state sebelum apply untuk kalkulasi gain setelah feedback tiba
-    pwm1 = b1 * 255.0 / 100.0
-    pwm2 = b2 * 255.0 / 100.0
-    _pending_calibration = {
-        'pwm1': pwm1, 'pwm2': pwm2,
-        'lux1': _last_apply_lux1, 'lux2': _last_apply_lux2, 'lux3': _last_apply_lux3,
-        'prev_pwm1': float(opt_sensor_data.get('curr_brightness1', 0)) * 255.0 / 100.0,
-        'prev_pwm2': float(opt_sensor_data.get('curr_brightness2', 0)) * 255.0 / 100.0,
-        'ts': time.time()
-    }
+    # If lamp is turned off, reset EMA now to low value so
+    # after 8 second grace period, ghost lux detected with exact threshold.
+    if int(b1) == 0 and int(b2) == 0:
+        for i in range(3):
+            if _lux_ema[i] is not None and _lux_ema[i] > LUX_DARK_THRESHOLD:
+                # Set to threshold value, not 0, so spike detection still works
+                # in case real natural light enters the room
+                _lux_ema[i] = LUX_DARK_THRESHOLD
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
@@ -1632,14 +2085,9 @@ def handle_person_based_control(person_count):
             if _lamp_auto_off_triggered:
                 _lamp_auto_off_triggered = False
                 global _last_sent_lamp_b1, _last_sent_lamp_b2, _last_adaptive_lamp_apply
-                global _last_apply_lux1, _last_apply_lux2, _last_apply_lux3
                 _last_sent_lamp_b1 = -1
                 _last_sent_lamp_b2 = -1
                 _last_adaptive_lamp_apply = 0
-                # Reset lux cache so the first PSO result after person returns always passes the gate
-                _last_apply_lux1 = -1.0
-                _last_apply_lux2 = -1.0
-                _last_apply_lux3 = -1.0
             _auto_off_time = 0.0
         elif _person_consecutive_frames >= required_frames and in_cooldown:
             cooldown_left = AUTO_OFF_COOLDOWN - (time.time() - _auto_off_time)
@@ -1873,6 +2321,9 @@ def camera_detection_loop():
             
             mqtt_data['camera']['status'] = 'active'
             camera_fail_count = 0  # Reset on successful frame
+            # Update device_last_seen so sensor fault detection shows 'Online'
+            device_last_seen['camera']['last_seen'] = datetime.now()
+            device_last_seen['camera']['status'] = 'online'
             frame_count += 1
             
             # Run YOLO only every Nth frame — other frames reuse last detection
@@ -2014,7 +2465,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     
     if is_success:
         mqtt_status['connected'] = True
-        mqtt_status['last_connect_time'] = datetime.now().strftime('%H:%M:%S')
+        mqtt_status['last_connect_time'] = datetime.now().strftime('%d %b %Y %H:%M:%S')
         mqtt_status['error'] = None
         print("[OK] MQTT connected")
         client.subscribe("smartroom/#")
@@ -2060,6 +2511,7 @@ def on_message(client, userdata, msg):
                 'ac_state': payload.get('ac_state', 'OFF'),
                 'ac_temp': payload.get('ac_temp', 24),
                 'fan_speed': payload.get('fan_speed', 1),
+                'set_rh': payload.get('set_rh', 50),
                 'ac_mode': payload.get('ac_mode', 'ADAPTIVE'),
                 'ac_fan_mode': payload.get('ac_fan_mode', 'COOL'),
                 'rssi': payload.get('rssi', 0),
@@ -2095,12 +2547,13 @@ def on_message(client, userdata, msg):
             
         elif 'lamp/sensors' in topic:
             global _last_lamp_mqtt_ts
-            _last_lamp_mqtt_ts = time.time()  # catat waktu pesan diterima (walau lux=0)
-            l1 = payload.get('lux1', payload.get('lux', 0))
-            l2 = payload.get('lux2', l1)
-            l3 = payload.get('lux3', l1)
+            _last_lamp_mqtt_ts = time.time()
             b1 = payload.get('brightness1', payload.get('brightness', 0))
             b2 = payload.get('brightness2', b1)
+            # Filter BH1750: validasi + ghost lux + spike detection
+            l1 = _filter_lux(payload.get('lux1', payload.get('lux', 0)), 0, b1, b2)
+            l2 = _filter_lux(payload.get('lux2', payload.get('lux', 0)), 1, b1, b2)
+            l3 = _filter_lux(payload.get('lux3', payload.get('lux', 0)), 2, b1, b2)
             mqtt_data['lamp'].update({
                 'lux1': l1, 'lux2': l2, 'lux3': l3,
                 'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
@@ -2115,32 +2568,6 @@ def on_message(client, userdata, msg):
             save_lamp_data(l1, l2, l3, b1, b2, mqtt_data['lamp']['motion'])
             update_opt_sensor_data(lux=round((l1 + l2 + l3) / 3.0, 1), lux1=l1, lux2=l2, lux3=l3,
                                     curr_brightness1=b1, curr_brightness2=b2)
-            # ── Closed-loop gain calibration ──────────────────────────────────
-            # Jika ada pending calibration (baru apply PSO), hitung gain aktual
-            # dari perubahan lux yang terjadi, lalu update EMA.
-            # Tunggu minimal 4 detik agar ESP32 sempat baca ulang sensor.
-            global _pending_calibration
-            if _pending_calibration is not None:
-                elapsed = time.time() - _pending_calibration['ts']
-                if elapsed >= 4.0:  # cukup waktu untuk sensor merespons
-                    delta_pwm1 = _pending_calibration['pwm1'] - _pending_calibration['prev_pwm1']
-                    delta_pwm2 = _pending_calibration['pwm2'] - _pending_calibration['prev_pwm2']
-                    total_delta_pwm = abs(delta_pwm1) + abs(delta_pwm2)
-                    if total_delta_pwm >= 10:  # hanya kalkulasi jika perubahan cukup besar
-                        # Rata-rata delta lux aktual dari ketiga sensor
-                        delta_lux_actual = ((l1 - _pending_calibration['lux1'])
-                                           + (l2 - _pending_calibration['lux2'])
-                                           + (l3 - _pending_calibration['lux3'])) / 3.0
-                        if total_delta_pwm > 0 and abs(delta_lux_actual) > 1.0:
-                            actual_gain = abs(delta_lux_actual) / total_delta_pwm
-                            if GAIN_MIN <= actual_gain <= GAIN_MAX:
-                                global _gain_per_pwm
-                                old_gain = _gain_per_pwm
-                                _gain_per_pwm = (1 - GAIN_EMA_ALPHA) * _gain_per_pwm + GAIN_EMA_ALPHA * actual_gain
-                                print(f'[CALIB] gain_per_pwm: {old_gain:.3f} -> {_gain_per_pwm:.3f} '
-                                      f'(actual={actual_gain:.3f}, delta_pwm={total_delta_pwm:.1f}, '
-                                      f'delta_lux={delta_lux_actual:.1f})')
-                    _pending_calibration = None  # selesai, hapus pending
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
@@ -2157,7 +2584,7 @@ def on_message(client, userdata, msg):
                 'connected': True
             })
             socketio.emit('mqtt_update', {'type': 'energy', 'data': mqtt_data['energy']})
-            # Simpan ke InfluxDB energy_monitor setiap 6 menit (untuk fitur export)
+            # Save to InfluxDB energy_monitor every 6 minutes (for export feature)
             global _last_ac_energy_influx_ts
             _now_e = time.time()
             if _now_e - _last_ac_energy_influx_ts >= INFLUX_WRITE_INTERVAL:
@@ -2222,13 +2649,16 @@ def on_message(client, userdata, msg):
                 opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
                 opt_fan  = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
                 opt_mode = ga_sol.get('mode', 'COOL')
+                opt_rh   = ga_sol.get('set_rh', 50)
                 if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                     global _last_adaptive_ac_apply
                     now = time.time()
                     if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                         _last_adaptive_ac_apply = now
-                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                        ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                                  'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
+                        mqtt_data['ac']['set_rh'] = int(opt_rh)
             # AUTO-APPLY Lamp — only if pso_solution was present in this payload
             if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
                 opt_b1, opt_b2 = _safe_lamp_brightness(
@@ -2443,7 +2873,7 @@ def login():
             session['username'] = username
             session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Username atau password salah')
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid username or password')
     return render_template_string(LOGIN_TEMPLATE, error=None)
 
 @app.route('/logout')
@@ -2561,7 +2991,7 @@ def mqtt_config():
     new_broker = data.get('broker', '').strip()
     new_port = int(data.get('port', 1883))
     if not new_broker:
-        return jsonify({'status': 'error', 'message': 'Broker IP tidak boleh kosong'}), 400
+        return jsonify({'status': 'error', 'message': 'Broker IP cannot be empty'}), 400
     old_broker = MQTT_BROKER
     MQTT_BROKER = new_broker
     MQTT_PORT = new_port
@@ -2580,7 +3010,7 @@ def mqtt_config():
         except Exception as e:
             mqtt_status['error'] = str(e)
     threading.Thread(target=reconnect_thread, daemon=True).start()
-    return jsonify({'status': 'ok', 'message': f'Mencoba connect ke {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
+    return jsonify({'status': 'ok', 'message': f'Trying to connect to {MQTT_BROKER}:{MQTT_PORT}', 'broker': MQTT_BROKER, 'port': MQTT_PORT})
 
 @app.route('/api/simulate', methods=['POST'])
 def simulate_data():
@@ -2705,9 +3135,9 @@ _PHP_ENERGY_HISTORY_URL = 'https://iotlab-uns.com/api_energy.php'
 _PHP_ENERGY_KEY         = 'iotlab_smartroom_2024'
 
 def _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt, limit=5000):
-    """Ambil data energi historis dari MySQL via PHP proxy.
-    Returns list of dicts atau raise Exception jika gagal.
-    id_kwh: 1=AC, 3=Lampu
+    """Fetch historical energy data from MySQL via PHP proxy.
+    Returns list of dicts or raises Exception on failure.
+    id_kwh: 1=AC, 3=Lamp
     """
     import urllib.request as _ureq, urllib.parse as _uparse
     params = _uparse.urlencode({
@@ -2730,9 +3160,9 @@ def _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt, limit=5000):
 @app.route('/api/export/csv')
 @admin_required
 def export_csv_from_db():
-    """Export CSV dari MySQL (energy) atau InfluxDB (temp/lux/occupancy).
+    """Export CSV from MySQL (energy) or InfluxDB (temp/lux/occupancy).
     Params: type=energy_ac|energy_lamp|temp|lux|occupancy
-            from=YYYY-MM-DD  to=YYYY-MM-DD  (tanggal WIB)
+            from=YYYY-MM-DD  to=YYYY-MM-DD  (WIB timezone)
     """
     import io, csv as _csv
     from datetime import timezone, timedelta as _td
@@ -2742,53 +3172,53 @@ def export_csv_from_db():
     to_dt   = request.args.get('to', '')
 
     if not from_dt or not to_dt:
-        return jsonify({'error': 'from dan to wajib diisi (YYYY-MM-DD)'}), 400
+        return jsonify({'error': 'from and to are required (YYYY-MM-DD)'}), 400
 
     try:
         datetime.strptime(from_dt, '%Y-%m-%d')
         datetime.strptime(to_dt,   '%Y-%m-%d')
     except ValueError:
-        return jsonify({'error': 'Format tanggal salah. Gunakan YYYY-MM-DD'}), 400
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
 
     valid_types = ('energy_ac', 'energy_lamp', 'temp', 'lux', 'occupancy')
     if dtype not in valid_types:
-        return jsonify({'error': f'type tidak valid. Pilihan: {", ".join(valid_types)}'}), 400
+        return jsonify({'error': f'Invalid type. Options: {", ".join(valid_types)}'}), 400
 
-    # ── Energy: ambil dari MySQL via PHP (sumber data lengkap) ──────────────
+    # ── Energy: fetch from MySQL via PHP (complete data source) ──────────────
     if dtype in ('energy_ac', 'energy_lamp'):
         id_kwh   = 1 if dtype == 'energy_ac' else 3
-        dev_name = 'AC' if dtype == 'energy_ac' else 'Lampu'
+        dev_name = 'AC' if dtype == 'energy_ac' else 'Lamp'
         try:
             mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
         except Exception as ex:
-            # Fallback ke InfluxDB jika PHP tidak bisa dijangkau
+            # Fallback to InfluxDB if PHP is unreachable
             mysql_rows = None
             influx_err = str(ex)
 
         if mysql_rows is not None:
             if not mysql_rows:
-                return jsonify({'error': f'Tidak ada data {dev_name} di MySQL untuk rentang {from_dt} s.d. {to_dt}'}), 404
+                return jsonify({'error': f'No data for {dev_name} in MySQL for range {from_dt} to {to_dt}'}), 404
             output = io.StringIO()
-            fields  = ['timestamp','tegangan','arus','active_power','reactive_power',
-                       'apparent_power','power_factor','frekuensi','energy_kwh']
-            headers = ['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
-                       'Daya Reaktif (VAR)','Daya Semu (VA)','Power Factor','Frekuensi (Hz)',
-                       'Konsumsi Energi (kWh)']
+            fields  = ['timestamp','voltage','current','active_power','reactive_power',
+                       'apparent_power','power_factor','frequency','energy_kwh']
+            headers = ['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
+                       'Reactive Power (VAR)','Apparent Power (VA)','Power Factor','Frequency (Hz)',
+                       'Konsumsi Energy (kWh)']
             writer = _csv.writer(output)
             writer.writerow(headers)
             for r in mysql_rows:
                 writer.writerow([
                     r.get('timestamp', ''),
-                    r.get('tegangan',       ''),
-                    r.get('arus',           ''),
+                    r.get('voltage',       ''),
+                    r.get('current',           ''),
                     r.get('active_power',   ''),
                     r.get('reactive_power', ''),
                     r.get('apparent_power', ''),
                     r.get('power_factor',   ''),
-                    r.get('frekuensi',      ''),
+                    r.get('frequency',      ''),
                     r.get('energy_kwh',     ''),
                 ])
-            csv_bytes = output.getvalue().encode('utf-8-sig')  # BOM agar Excel baca benar
+            csv_bytes = output.getvalue().encode('utf-8-sig')  # BOM so Excel reads correctly
             fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
             return Response(
                 csv_bytes,
@@ -2797,7 +3227,7 @@ def export_csv_from_db():
             )
         else:
             # Fallback InfluxDB — pakai kedua device tag (esp32_ac/mysql_ac)
-            print(f'[EXPORT] MySQL gagal ({influx_err}), fallback ke InfluxDB')
+            print(f'[EXPORT] MySQL failed ({influx_err}), falling back to InfluxDB')
             tag_vals = ('esp32_ac', 'mysql_ac') if dtype == 'energy_ac' else ('esp32_lamp', 'mysql_lamp')
             influx_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
             wib = timezone(_td(hours=7))
@@ -2827,15 +3257,15 @@ from(bucket: "{INFLUX_BUCKET}")
                             if v is not None:
                                 rows_by_ts[ts_str][fld] = v
                 if not rows_by_ts:
-                    return jsonify({'error': f'Tidak ada data ditemukan. MySQL error: {influx_err}'}), 404
+                    return jsonify({'error': f'No data ditemukan. MySQL error: {influx_err}'}), 404
                 sorted_ts = sorted(rows_by_ts.keys())
-                # Buat energy_kwh relatif (kurangi nilai pertama)
+                # Make energy_kwh relative (subtract first value)
                 first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
                                   for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
                 output = io.StringIO()
                 writer = _csv.writer(output)
-                writer.writerow(['Timestamp','Tegangan (V)','Arus (A)','Daya Aktif (W)',
-                                 'Frekuensi (Hz)','Power Factor','Konsumsi Energi (kWh)'])
+                writer.writerow(['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
+                                 'Frequency (Hz)','Power Factor','Konsumsi Energy (kWh)'])
                 for ts in sorted_ts:
                     r = rows_by_ts[ts]
                     kwh_raw = r.get('energy_kwh')
@@ -2855,7 +3285,7 @@ from(bucket: "{INFLUX_BUCKET}")
             except Exception as e2:
                 return jsonify({'error': f'MySQL: {influx_err} | InfluxDB: {e2}'}), 500
 
-    # ── Temp / Lux / Occupancy: tetap dari InfluxDB ──────────────────────────
+    # ── Temp / Lux / Occupancy: remain from InfluxDB ──────────────────────────
     wib = timezone(_td(hours=7))
     try:
         start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
@@ -2865,10 +3295,38 @@ from(bucket: "{INFLUX_BUCKET}")
     start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 
+    # Human-readable column header labels per field
+    _FIELD_LABELS = {
+        # Sensor readings
+        'temperature':  'Temp Ruangan (°C)',
+        'humidity':     'Kelembapan Ruangan (%)',
+        'heat_index':   'Heat Index (°C)',
+        # Multi-sensor
+        'temp1': 'Sensor 1 – Suhu (°C)',  'hum1': 'Sensor 1 – RH (%)',
+        'temp2': 'Sensor 2 – Suhu (°C)',  'hum2': 'Sensor 2 – RH (%)',
+        'temp3': 'Sensor 3 – Suhu (°C)',  'hum3': 'Sensor 3 – RH (%)',
+        # AC status
+        'ac_temp':     'Set Temperature AC (°C)',
+        'fan_speed':   'Fan Speed (1=Low 2=Med 3=High 4=Turbo)',
+        'ac_fan_mode': 'Mode AC (COOL/DRY/FAN/AUTO)',
+        'set_rh':      'Set RH (%)',
+        'ac_state':    'Status Kontrol AC (ON/OFF)',
+        'mode':        'Mode Kontrol (ADAPTIVE/MANUAL)',
+        # Lamp
+        'lux1': 'Lux Sensor 1', 'lux2': 'Lux Sensor 2', 'lux3': 'Lux Sensor 3',
+        'lux_avg': 'Lux Average', 'brightness1': 'Brightness 1 (%)', 'brightness2': 'Brightness 2 (%)',
+        # Occupancy
+        'person_count': 'Person Count', 'confidence': 'Confidence',
+    }
+
     TYPE_MAP = {
-        'temp':      ('ac_sensor',       ['temperature','humidity','heat_index','temp1','hum1','temp2','hum2','temp3','hum3'], None, None),
-        'lux':       ('lamp_sensor',     ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'],                        None, None),
-        'occupancy': ('camera_detection',['person_count','confidence'],                                                        None, None),
+        'temp':      ('ac_sensor',        [
+                         'temperature', 'humidity', 'heat_index',
+                         'temp1', 'hum1', 'temp2', 'hum2', 'temp3', 'hum3',
+                         'ac_temp', 'fan_speed', 'ac_fan_mode', 'set_rh', 'ac_state', 'mode',
+                     ], None, None),
+        'lux':       ('lamp_sensor',      ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'], None, None),
+        'occupancy': ('camera_detection', ['person_count','confidence'],                               None, None),
     }
     measurement, fields, tag_key, tag_val = TYPE_MAP[dtype]
 
@@ -2903,12 +3361,14 @@ from(bucket: "{INFLUX_BUCKET}")
                     rows_by_ts[ts_str][field] = record.get_value()
 
         if not rows_by_ts:
-            return jsonify({'error': 'Tidak ada data ditemukan untuk rentang tanggal tersebut'}), 404
+            return jsonify({'error': 'No data found for the selected date range'}), 404
 
         sorted_ts = sorted(rows_by_ts.keys())
         output    = io.StringIO()
         writer    = _csv.writer(output)
-        writer.writerow(['Timestamp'] + fields)
+        # Use human-readable headers
+        header_row = ['Timestamp'] + [_FIELD_LABELS.get(f, f) for f in fields]
+        writer.writerow(header_row)
         for ts_str in sorted_ts:
             row_d = rows_by_ts[ts_str]
             row = [ts_str] + [
@@ -2932,7 +3392,7 @@ from(bucket: "{INFLUX_BUCKET}")
 # Allowed lists prevent InfluxDB injection
 _CHART_ALLOWED_MEAS = {'ac_sensor', 'lamp_sensor', 'camera_detection', 'energy_monitor'}
 _CHART_ALLOWED_FIELDS = {
-    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed',
+    'temperature', 'humidity', 'heat_index', 'ac_temp', 'fan_speed', 'set_rh',
     'lux', 'lux_avg', 'lux1', 'lux2', 'lux3',
     'brightness', 'brightness_avg', 'brightness1', 'brightness2',
     'person_count', 'confidence',
@@ -3164,37 +3624,37 @@ def energy_compare():
 @app.route('/api/energy/export-csv')
 @admin_required
 def energy_export_csv():
-    """Export data energi sebagai CSV — dari ring buffer realtime atau PHP proxy.
+    """Export energy data as CSV — from realtime ring buffer or PHP proxy.
     ?device=ac|lamp|all   (default: all)
-    ?source=realtime|php  (default: php — ambil dari PHP proxy)
+    ?source=realtime|php  (default: php — fetch from PHP proxy)
     """
     import io, csv as csv_mod
 
     device = request.args.get('device', 'all')   # ac, lamp, all
-    source = request.args.get('source', 'php')   # php atau realtime
+    source = request.args.get('source', 'php')   # php or realtime
 
     rows = []
 
     if source == 'realtime':
-        # Ambil dari ring buffer _mysqlBuf yang ada di JS — tidak bisa langsung.
-        # Gunakan energy_runtime_history yang ada di Python.
+        # Fetch from _mysqlBuf ring buffer in JS — cannot directly.
+        # Use energy_runtime_history in Python.
         with _recording_lock:
             hist = list(energy_runtime_history)
         for rec in hist:
             rows.append({
                 'timestamp': rec.get('ts', '').strftime('%Y-%m-%d %H:%M:%S') if hasattr(rec.get('ts',''), 'strftime') else str(rec.get('ts','')),
                 'device':    'AC',
-                'tegangan':  rec.get('voltage', 0),
-                'arus':      rec.get('current', 0),
-                'daya_aktif':rec.get('power', 0),
-                'energi_kwh':rec.get('energy_kwh', 0),
-                'frekuensi': rec.get('frequency', 0),
+                'voltage':  rec.get('voltage', 0),
+                'current':      rec.get('current', 0),
+                'active_power':rec.get('power', 0),
+                'energy_kwh':rec.get('energy_kwh', 0),
+                'frequency': rec.get('frequency', 0),
                 'pf':        rec.get('power_factor', 0),
-                'reaktif':   '',
+                'reactive_power':   '',
                 'semu':      '',
             })
     else:
-        # Ambil langsung dari PHP proxy (fresh data)
+        # Fetch directly from PHP proxy (fresh data)
         import urllib.request as _ureq, json as _json
         PHP_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024'
         try:
@@ -3202,7 +3662,7 @@ def energy_export_csv():
             with _ureq.urlopen(req, timeout=8) as resp:
                 data = _json.loads(resp.read().decode('utf-8'))
         except Exception as ex:
-            return jsonify({'error': f'Gagal ambil data PHP: {ex}'}), 502
+            return jsonify({'error': f'Failed to fetch PHP data: {ex}'}), 502
 
         if 'error' in data:
             return jsonify({'error': data['error']}), 500
@@ -3214,24 +3674,24 @@ def energy_export_csv():
             return {
                 'timestamp':  str(d.get('created_at', '')),
                 'device':     label,
-                'tegangan':   float(d.get('tegangan')   or 0),
-                'arus':       float(d.get('arus')       or 0),
-                'daya_aktif': p,
-                'energi_kwh': float(d.get('total_energy') or 0),
-                'frekuensi':  float(d.get('frekuensi')  or 0),
+                'voltage':   float(d.get('voltage')   or 0),
+                'current':       float(d.get('current')       or 0),
+                'active_power': p,
+                'energy_kwh': float(d.get('total_energy') or 0),
+                'frequency':  float(d.get('frequency')  or 0),
                 'pf':         pf,
-                'reaktif':    float(d.get('reactive_power') or 0),
+                'reactive_power':    float(d.get('reactive_power') or 0),
                 'semu':       ap,
             }
 
         if device in ('ac', 'all') and data.get('ac'):
             rows.append(_row(data['ac'], 'AC'))
         if device in ('lamp', 'all') and data.get('lamp'):
-            rows.append(_row(data['lamp'], 'Lampu'))
+            rows.append(_row(data['lamp'], 'Lamp'))
 
     # Buat CSV
     output = io.StringIO()
-    fields = ['timestamp','device','tegangan','arus','daya_aktif','energi_kwh','frekuensi','pf','reaktif','semu']
+    fields = ['timestamp','device','voltage','current','active_power','energy_kwh','frequency','pf','reactive_power','semu']
     writer = csv_mod.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
@@ -3262,8 +3722,8 @@ def energy_history():
         '24h':  {'range': '-24h',  'window': '5m'},
         '7d':   {'range': '-7d',   'window': '1h'},
         '30d':  {'range': '-30d',  'window': '6h'},
-        '12mo': {'range': '-12mo', 'window': '1mo'},  # bulanan: 12 bulan terakhir
-        '5y':   {'range': '-5y',   'window': '1y'},   # tahunan: 5 tahun terakhir
+        '12mo': {'range': '-12mo', 'window': '1mo'},  # monthly: last 12 months
+        '5y':   {'range': '-5y',   'window': '1y'},   # yearly: last 5 years
     }
 
     if period not in period_map:
@@ -3290,8 +3750,8 @@ def energy_history():
             time_format = '%Y'      # 2024, 2025, 2026, ...
 
         def query_field_points(field_name):
-            # energy_kwh bersifat kumulatif — pakai last() per window agar nilai akhir
-            # setiap interval diambil (bukan rata-rata), sehingga JS bisa diff antar titik
+            # energy_kwh is cumulative — use last() per window so final value
+            # of each interval is taken (not average), so JS can diff between points
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
@@ -3304,12 +3764,12 @@ def energy_history():
             '''
             result = query_api.query(query=query)
             points = []
-            dp = 4 if field_name == 'energy_kwh' else 2
             for table in result:
                 for record in table.records:
+                    dec = 5 if field_name == 'energy_kwh' else 2
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(float(record.get_value()), dp)
+                        'value': round(float(record.get_value()), dec)
                     })
             return points
 
@@ -3356,29 +3816,31 @@ def energy_history():
 def ml_status():
     """Return current ML optimization state for the ML page"""
     return jsonify({
-        'ga_fitness': mqtt_data['system'].get('ga_fitness', 0),
-        'pso_fitness': mqtt_data['system'].get('pso_fitness', 0),
-        'ga_temp': mqtt_data['system'].get('ga_temp', 0),
-        'ga_fan': mqtt_data['system'].get('ga_fan', 0),
-        'ga_mode': mqtt_data['system'].get('ga_mode', 'COOL'),
-        'pso_brightness': mqtt_data['system'].get('pso_brightness', 0),
-        'pso_brightness1': mqtt_data['system'].get('pso_brightness1', 0),
-        'pso_brightness2': mqtt_data['system'].get('pso_brightness2', 0),
-        'pso_pwm1': mqtt_data['system'].get('pso_pwm1', 0),
-        'pso_pwm2': mqtt_data['system'].get('pso_pwm2', 0),
+        'ga_fitness':       mqtt_data['system'].get('ga_fitness', 0),
+        'pso_fitness':      mqtt_data['system'].get('pso_fitness', 0),
+        'ga_temp':          mqtt_data['system'].get('ga_temp', 0),
+        'ga_fan':           mqtt_data['system'].get('ga_fan', 0),
+        'ga_mode':          mqtt_data['system'].get('ga_mode', 'COOL'),
+        'pso_brightness':   mqtt_data['system'].get('pso_brightness', 0),
+        'pso_brightness1':  mqtt_data['system'].get('pso_brightness1', 0),
+        'pso_brightness2':  mqtt_data['system'].get('pso_brightness2', 0),
+        'pso_pwm1':         mqtt_data['system'].get('pso_pwm1', 0),
+        'pso_pwm2':         mqtt_data['system'].get('pso_pwm2', 0),
         'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
-        'ga_history': mqtt_data['system'].get('ga_history', []),
-        'pso_history': mqtt_data['system'].get('pso_history', [])
+        'ga_history':       mqtt_data['system'].get('ga_history', []),
+        'pso_history':      mqtt_data['system'].get('pso_history', []),
+        # iteration_log for detailed PSO chart (PWM1, PWM2, Lux per iteration)
+        'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
     })
 
 @app.route('/api/ga/export-csv')
 @admin_required
 def ga_export_csv():
-    """Export laporan hasil GA (AC Optimization) dalam format CSV lengkap."""
+    """Export GA results report (AC Optimization) in full CSV format."""
     import io, csv as csv_mod
     ga = last_opt_results.get('ga', {})
     if not ga or ga.get('fitness', 0) == 0:
-        return jsonify({'error': 'Belum ada hasil GA. Jalankan GA terlebih dahulu.'}), 404
+        return jsonify({'error': 'No GA results yet. Run GA first.'}), 404
 
     params    = ga.get('params', ga_params)
     run_time  = ga.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
@@ -3405,40 +3867,40 @@ def ga_export_csv():
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
-    wr.writerow(['=== LAPORAN HASIL GA (GENETIC ALGORITHM) - SMART ROOM ==='])
+    wr.writerow(['=== GA RESULT REPORT (GENETIC ALGORITHM) - SMART ROOM ==='])
     wr.writerow([])
-    wr.writerow(['Tanggal Run', run_time])
+    wr.writerow(['Run Date', run_time])
     wr.writerow([])
 
     # ── Parameter GA ────────────────────────────────────────────────────────
     wr.writerow(['--- PARAMETER GA ---'])
     wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
-    wr.writerow(['Jumlah Generasi',   params.get('generations', '-')])
+    wr.writerow(['Generation Count',   params.get('generations', '-')])
     wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
     wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
     wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
     wr.writerow([])
 
-    # ── Kondisi Ruangan Saat Run ─────────────────────────────────────────────
-    wr.writerow(['--- KONDISI RUANGAN SAAT OPTIMASI ---'])
-    wr.writerow(['Suhu Ruangan',   f"{snap.get('temp_room', '-')} °C"])
+    # ── Room Condition on Run ─────────────────────────────────────────────
+    wr.writerow(['--- ROOM CONDITIONS DURING OPTIMIZATION ---'])
+    wr.writerow(['Temperature Room',   f"{snap.get('temp_room', '-')} °C"])
     wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
-    wr.writerow(['Orang Terdeteksi', 'Ya' if snap.get('person_detected') else 'Tidak'])
-    wr.writerow(['Jumlah Orang',  snap.get('person_count', 0)])
-    wr.writerow(['Daya AC (real)', f"{snap.get('actual_watt', '-')} W"])
+    wr.writerow(['Person Detected', 'Yes' if snap.get('person_detected') else 'No'])
+    wr.writerow(['Person Count',  snap.get('person_count', 0)])
+    wr.writerow(['Power AC (real)', f"{snap.get('actual_watt', '-')} W"])
     wr.writerow([])
 
     # ── Hasil Optimal ────────────────────────────────────────────────────────
     wr.writerow(['--- HASIL OPTIMASI AC ---'])
-    wr.writerow(['Suhu AC Optimal',        f"{temp_opt} °C"])
-    wr.writerow(['Kecepatan Fan Optimal',   f"{fan_opt} ({fan_label})"])
+    wr.writerow(['Temperature AC Optimal',        f"{temp_opt} °C"])
+    wr.writerow(['Speed Fan Optimal',   f"{fan_opt} ({fan_label})"])
     wr.writerow(['Mode AC Optimal',         mode_opt])
     wr.writerow([])
 
     # ── Performa GA ─────────────────────────────────────────────────────────
     wr.writerow(['--- PERFORMA ALGORITMA ---'])
     wr.writerow(['Fitness Awal (Gen 1)',     init_fit])
-    wr.writerow(['Fitness Akhir (Terbaik)',  final_fit])
+    wr.writerow(['Final Fitness (Best)',  final_fit])
     wr.writerow(['Peningkatan Fitness',      f"{improvement}%" if improvement != '-' else '-'])
     if bf:
         wr.writerow(['Brute-Force Validation',
@@ -3448,10 +3910,10 @@ def ga_export_csv():
                      f"Fitness={round(bf.get('fitness', 0), 2)}"])
     wr.writerow([])
 
-    # ── Riwayat Konvergensi ──────────────────────────────────────────────────
+    # ── History Konvergensi ──────────────────────────────────────────────────
     if history:
-        wr.writerow(['=== RIWAYAT KONVERGENSI FITNESS ==='])
-        wr.writerow(['Generasi', 'Fitness Terbaik', 'Delta'])
+        wr.writerow(['=== FITNESS CONVERGENCE HISTORY ==='])
+        wr.writerow(['Generation', 'Fitness Best', 'Delta'])
         prev = None
         for idx, val in enumerate(history, 1):
             v = round(val, 4)
@@ -3470,61 +3932,39 @@ def ga_export_csv():
 @app.route('/api/pso/export-csv')
 @admin_required
 def pso_export_csv():
-    """Export laporan hasil PSO dalam format CSV informatif."""
+    """Export PSO results per iteration as CSV table."""
     import io, csv as csv_mod
     pso = last_opt_results.get('pso', {})
-    if not pso or pso.get('brightness1', 0) == 0:
-        return jsonify({'error': 'Belum ada hasil PSO. Jalankan PSO terlebih dahulu.'}), 404
+    iteration_log = pso.get('iteration_log', [])
 
-    params = pso.get('params', pso_params)
-    run_time = pso.get('run_time', datetime.now().strftime('%d %b %Y %H:%M'))
-    b1 = pso.get('brightness1', 0)
-    b2 = pso.get('brightness2', 0)
-    initial_err = pso.get('initial_error', '-')
-    final_err = pso.get('final_error', pso.get('fitness', '-'))
-    lux_achieved = pso.get('lux_achieved', '-')
-    target_lux = pso.get('target_lux', 350.0)
-    history = pso.get('stats', [])
+    if not pso or not iteration_log:
+        return jsonify({'error': 'No PSO iteration data yet. Run PSO first.'}), 404
 
     buf = io.StringIO()
-    wr = csv_mod.writer(buf)
+    wr  = csv_mod.writer(buf)
 
-    pwm1 = pso.get('pwm1', int(round(b1 * 255 / 100)))
-    pwm2 = pso.get('pwm2', int(round(b2 * 255 / 100)))
+    # Header
+    wr.writerow(['Iteration', 'PWM 1', 'PWM 2', 'Lux 1', 'Lux 2', 'Lux 3',
+                 'Average Lux', 'Fitness'])
 
-    # --- Laporan header ---
-    wr.writerow(['=== LAPORAN HASIL PSO - SMART ROOM ==='])
-    wr.writerow([])
-    wr.writerow(['Tanggal run', run_time])
-    wr.writerow(['Parameter PSO',
-                f"swarm={params.get('swarm_size', '-')}, "
-                f"iterasi={params.get('iterations', '-')}, "
-                f"w={params.get('w', '-')}, "
-                f"c1={params.get('c1', '-')}, "
-                f"c2={params.get('c2', '-')}"])
-    wr.writerow(['Error awal', f"{initial_err} lux^2"])
-    wr.writerow(['Error akhir', f"{final_err} lux^2"])
-    wr.writerow(['PWM1 optimal (0-255)', f"{pwm1}"])
-    wr.writerow(['PWM2 optimal (0-255)', f"{pwm2}"])
-    wr.writerow(['Brightness1 (% untuk ESP32)', f"{b1}%"])
-    wr.writerow(['Brightness2 (% untuk ESP32)', f"{b2}%"])
-    wr.writerow(['Lux aktual sensor (rata-rata L1+L2+L3)', f"{lux_achieved} lux"])
-    wr.writerow(['Target lux', f"{target_lux} lux"])
-    wr.writerow([])
-
-    # --- Riwayat konvergensi ---
-    if history:
-        wr.writerow(['=== RIWAYAT KONVERGENSI ==='])
-        wr.writerow(['Iterasi', 'Lux Error (lux^2)'])
-        for idx, val in enumerate(history, 1):
-            wr.writerow([idx, round(val, 2)])
+    # Baris per iterasi
+    for entry in iteration_log:
+        it       = entry.get('iter',    '--')
+        pwm1     = entry.get('pwm1',    '--')
+        pwm2     = entry.get('pwm2',    '--')
+        lux1     = entry.get('lux1',    '--')
+        lux2     = entry.get('lux2',    '--')
+        lux3     = entry.get('lux3',    '--')
+        lux_avg  = entry.get('lux_avg', '--')
+        fitness  = entry.get('fitness', '--')
+        wr.writerow([it, pwm1, pwm2, lux1, lux2, lux3, lux_avg, fitness])
 
     output = buf.getvalue().encode('utf-8-sig')
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     return Response(
         output,
         mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename=pso_report_{ts}.csv'}
+        headers={'Content-Disposition': f'attachment; filename=pso_iterations_{ts}.csv'}
     )
 
 @app.route('/api/ml/run', methods=['POST'])
@@ -3545,7 +3985,14 @@ def ml_run():
             if 'ga' in params: ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
             if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
         
-        t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
+        # PSO: gunakan _pso_lamp_cycle() agar urutan Baca→Hitung→Send konsisten
+        # with automatic cycle. GA still uses run_optimization_cycle().
+        if algo == 'pso':
+            t = threading.Thread(target=_pso_lamp_cycle, daemon=True)
+        elif algo == 'ga':
+            t = threading.Thread(target=run_optimization_cycle, args=('ga',), daemon=True)
+        else:
+            t = threading.Thread(target=run_optimization_cycle, args=(algo,), daemon=True)
         t.start()
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'ML Run triggered: {algo}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'{algo} optimization triggered'})
@@ -3784,6 +4231,7 @@ def control_ac():
         command = str(data.get('command', data.get('action', '')) or '').strip().upper()
         current_temp = int(mqtt_data['ac'].get('ac_temp', 24) or 24)
         current_fan = int(mqtt_data['ac'].get('fan_speed', 1) or 1)
+        current_rh = int(mqtt_data['ac'].get('set_rh', 50) or 50)
         current_mode = str(mqtt_data['ac'].get('ac_fan_mode', 'COOL') or 'COOL').upper()
         current_state = str(mqtt_data['ac'].get('ac_state', 'OFF') or 'OFF').upper()
         payload = dict(data)
@@ -3791,6 +4239,7 @@ def control_ac():
         payload['action'] = command
         payload['temperature'] = int(payload.get('temperature', current_temp) or current_temp)
         payload['fan_speed'] = int(payload.get('fan_speed', current_fan) or current_fan)
+        payload['set_rh'] = int(payload.get('set_rh', current_rh) or current_rh)
         payload['mode'] = str(payload.get('mode', current_mode) or current_mode).upper()
         payload['ac_state'] = str(payload.get('ac_state', current_state) or current_state).upper()
         payload['power'] = payload['ac_state']
@@ -3826,9 +4275,25 @@ def control_ac():
 
         mqtt_data['ac']['ac_temp'] = payload['temperature']
         mqtt_data['ac']['fan_speed'] = payload['fan_speed']
+        mqtt_data['ac']['set_rh'] = payload['set_rh']
         mqtt_data['ac']['ac_state'] = payload['ac_state']
         mqtt_data['ac']['ac_fan_mode'] = payload['mode']
         socketio.emit('mqtt_update', {'type': 'ac', 'data': mqtt_data['ac']})
+
+        # Force immediate InfluxDB write with updated set_rh so the chart reflects the change
+        try:
+            write_to_influxdb('ac_sensor', {
+                'ac_temp': float(payload['temperature']),
+                'fan_speed': int(payload['fan_speed']),
+                'set_rh': int(payload['set_rh']),
+                'ac_state': str(payload['ac_state']),
+                'ac_fan_mode': str(payload['mode']),
+                'temperature': float(mqtt_data['ac'].get('temperature', 0)),
+                'humidity': float(mqtt_data['ac'].get('humidity', 0)),
+                'heat_index': float(mqtt_data['ac'].get('heat_index', 0)),
+            }, tags={'device': 'esp32_ac', 'type': 'control', 'location': 'room'})
+        except Exception as e:
+            print(f'[WARN] control_ac influx write: {e}')
 
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'AC Control: {command}', 'level': 'info'})
         return jsonify({'status': 'success', 'message': f'AC command sent: {command}', 'ac': mqtt_data['ac'], 'payload': payload, 'ir_sent': True})
@@ -3905,14 +4370,17 @@ def update_optimization():
             opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
             opt_fan  = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
             opt_mode = ga_sol.get('mode', 'COOL')
+            opt_rh   = ga_sol.get('set_rh', 50)
             if opt_temp >= 16 and opt_temp <= 30 and opt_fan >= 1:
                 global _last_adaptive_ac_apply
                 now = time.time()
                 if now - _last_adaptive_ac_apply >= AC_ADAPTIVE_DEBOUNCE:
                     _last_adaptive_ac_apply = now
-                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan), 'mode': opt_mode, 'source': 'adaptive'}
+                    ac_cmd = {'command': 'SET', 'temperature': int(opt_temp), 'fan_speed': int(opt_fan),
+                              'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode}', 'level': 'success'})
+                    mqtt_data['ac']['set_rh'] = int(opt_rh)
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode} RH:{opt_rh}%', 'level': 'success'})
         
         # AUTO-APPLY Lamp — only if pso_solution was provided in this request
         if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
@@ -4108,7 +4576,7 @@ def get_device_status():
             dev['status'] = 'offline'
         else:
             dev['status'] = 'online'
-    return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
+    return jsonify({k: {'status': v['status'], 'last_seen': v['last_seen'].strftime('%d %b %H:%M:%S') if v['last_seen'] else 'Never'} for k, v in device_last_seen.items()})
 
 @app.route('/api/sensor/health')
 def sensor_health_api():
@@ -4129,7 +4597,7 @@ def sensor_health_api():
             'label':   labels.get(dev_id, dev_id),
             'status':  status,
             'age':     'never' if age == float('inf') else f"{int(age)}s ago",
-            'last_seen': last.strftime('%H:%M:%S') if last else None,
+            'last_seen': last.strftime('%d %b %H:%M:%S') if last else None,
         }
     return jsonify(health)
 
@@ -4255,6 +4723,9 @@ HTML_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Smart Room IoT Dashboard</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
@@ -4271,7 +4742,7 @@ HTML_TEMPLATE = '''
             --text-secondary: #94a3b8; --border: #334155; --shadow: rgba(0, 0, 0, 0.3); --input-bg: #0f172a;
         }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
+            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark);
             color: var(--text-primary); overflow-x: hidden; -webkit-tap-highlight-color: transparent;
         }
         .sidebar {
@@ -4413,39 +4884,7 @@ HTML_TEMPLATE = '''
         .chart-option-btn.active {
             background: var(--primary); color: white; border-color: var(--primary);
         }
-        /* Energy page premium chart styling */
-        #energy .power-card {
-            border-radius: 16px; border: 1px solid rgba(99, 102, 241, 0.16);
-            background: linear-gradient(150deg, rgba(99,102,241,0.08), rgba(15,23,42,0.03)); box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
-        }
-        #energy .chart-container {
-            border-radius: 16px; border: 1px solid rgba(99, 102, 241, 0.18); background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.9));
-            box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08); padding: 18px 20px 16px; margin-bottom: 22px;
-        }
-        #energy .chart-header {
-            margin-bottom: 14px; gap: 10px; flex-wrap: wrap;
-        }
-        #energy .chart-title {
-            font-size: 16px; font-weight: 700; letter-spacing: 0.2px; color: var(--text-primary);
-        }
-        #energy .chart-options {
-            gap: 8px; flex-wrap: wrap;
-        }
-        #energy .chart-option-btn {
-            border-radius: 999px; padding: 6px 13px; font-size: 12px;
-            font-weight: 700; border: 1px solid rgba(99, 102, 241, 0.22); background: rgba(99, 102, 241, 0.06);
-            color: #475569;
-        }
-        #energy .chart-option-btn:hover {
-            transform: translateY(-1px); background: rgba(99, 102, 241, 0.12); color: #1e293b;
-        }
-        #energy .chart-option-btn.active {
-            background: linear-gradient(135deg, #4f46e5, #6366f1); color: #ffffff;
-            border-color: transparent; box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
-        }
-        #energy canvas {
-            height: 250px !important; max-height: 250px;
-        }
+        /* Energy page — uses same chart styling as other pages for consistency */
         /* ML Optimization Page Styles */
         .ml-table {
             width: 100%; border-collapse: collapse; font-size: 13px;
@@ -4616,11 +5055,7 @@ HTML_TEMPLATE = '''
             0%, 100% { opacity: 1; }
             50% { opacity: 0.4; }
         }
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 20px;
-        margin-top: 20px;
-        }
+
         .power-card {
             background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border); text-align: center;
         }
@@ -4916,6 +5351,7 @@ HTML_TEMPLATE = '''
             <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#6366f1;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
         </div>
         <div class="nav-item active" onclick="showPage('dashboard-ac')">
+            <i class="fas fa-snowflake"></i>
             <span>AC Dashboard</span>
         </div>
         <div class="nav-item" onclick="showPage('dashboard-lamp')">
@@ -4975,7 +5411,7 @@ HTML_TEMPLATE = '''
         <div id="dashboard-ac" class="page active">
             <div class="header">
                 <h1>AC Dashboard</h1>
-                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostik</button></p>
+                <p>Air Conditioning monitoring & status <button onclick="document.getElementById('diag-panel').style.display='block'" style="margin-left: 10px; padding: 3px 10px; font-size: 11px; background: #f59e0b; border: none; color: white; border-radius: 6px; cursor: pointer;">Diagnostics</button></p>
                 <div id="device-status-bar" style="display: flex; gap: 15px; margin-top: 12px; flex-wrap: wrap;">
                     <div class="device-status-item" id="ds-mqtt-broker" style="cursor: pointer;" onclick="checkMqttStatus()">
                         <span class="device-dot offline" id="mqtt-dot"></span>
@@ -5002,10 +5438,10 @@ HTML_TEMPLATE = '''
                     <strong style="color: #f59e0b;">Diagnostic Mode</strong>
                     <button onclick="document.getElementById('diag-panel').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 18px;">&times;</button>
                 </div>
-                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Klik tombol di bawah untuk diagnosa...</div>
+                <div id="diag-result" style="font-family: monospace; font-size: 12px; background: var(--bg-secondary); padding: 10px; border-radius: 8px; margin-bottom: 12px; min-height: 60px; white-space: pre-wrap; color: var(--text-primary);">Click the button below to diagnose...</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                     <button onclick="runSimulate()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #10b981; border: none; color: white; border-radius: 8px; border-radius: 8px;">
-                        Test Frontend (Inject Data Dummy)
+                        Test Frontend (Inject Dummy Data)
                     </button>
                     <button onclick="runMqttSelftest()" style="padding: 8px 16px; font-size: 13px; cursor: pointer; background: #3b82f6; border: none; color: white; border-radius: 8px;">
                         Test MQTT Broker (Self-Test)
@@ -5032,9 +5468,9 @@ HTML_TEMPLATE = '''
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-temp1">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-temp2">0</strong>°C</span>
-                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-temp3">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Near)</small>: <strong id="dash-temp1">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Mid)</small>: <strong id="dash-temp2">0</strong>°C</span>
+                        <span style="flex:1; text-align:center; background: rgba(239,68,68,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Far)</small>: <strong id="dash-temp3">0</strong>°C</span>
                     </div>
                 </div>
 
@@ -5050,9 +5486,9 @@ HTML_TEMPLATE = '''
                         <span>Avg 3×DHT22 — Real-time</span>
                     </div>
                     <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1: <strong id="dash-hum1">0</strong>%</span>
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2: <strong id="dash-hum2">0</strong>%</span>
-                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3: <strong id="dash-hum3">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S1 <small>(Near)</small>: <strong id="dash-hum1">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S2 <small>(Mid)</small>: <strong id="dash-hum2">0</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(59,130,246,0.08); border-radius: 6px; padding: 3px 0;">S3 <small>(Far)</small>: <strong id="dash-hum3">0</strong>%</span>
                     </div>
                 </div>
 
@@ -5129,7 +5565,7 @@ HTML_TEMPLATE = '''
                         <!-- Operating Mode (ADAPTIVE/MANUAL) -->
                         <div style="text-align: center; padding: 14px 8px; background: rgba(16, 185, 129, 0.06); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.15);">
                             <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">
-                                Kontrol
+                                Control
                             </div>
                             <div style="font-size: 22px; font-weight: 800; color: #10b981;" id="dash-ac-ctrl-icon">A</div>
                             <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 2px;" id="dash-ac-ctrl-mode">ADAPTIVE</div>
@@ -5139,9 +5575,9 @@ HTML_TEMPLATE = '''
                     <div style="padding: 10px 20px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary);">
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                             <span>Avg: <strong id="dash-ac-room-temp" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S1: <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S2: <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
-                            <span style="font-size: 11px; color: var(--text-secondary);">S3: <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S1(Near): <strong id="dash-ac-temp1" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S2(Mid): <strong id="dash-ac-temp2" style="color: var(--text);">0</strong>°C</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">S3(Far): <strong id="dash-ac-temp3" style="color: var(--text);">0</strong>°C</span>
                             <span>Hum: <strong id="dash-ac-room-hum" style="color: var(--text);">0</strong>%</span>
                         </div>
                         <div id="dash-ac-source" style="padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25);">
@@ -5150,14 +5586,80 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- Energy Usage, Person Detection, ML Optimization dihapus dari AC Dashboard -->
+                <!-- Fan & Mode Decision Range Table -->
+                <div class="stat-card" style="grid-column: 1 / -1; padding: 0; overflow: hidden;">
+                    <div style="padding: 14px 20px; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(234, 179, 8, 0.08)); border-bottom: 1px solid var(--border);">
+                        <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(245, 158, 11, 0.2); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #f59e0b; font-size: 13px;">
+                            &#9881;
+                        </div>
+                        <div>
+                            <div style="font-size: 15px; font-weight: 700; color: var(--text);">Fan &amp; Mode — Definisi Range</div>
+                            <div style="font-size: 11px; color: var(--text-secondary);">Temperature &amp; humidity limits that determine Fan Speed and AC Mode output (from GA)</div>
+                        </div>
+                    </div>
+                    <div style="padding: 16px 20px; overflow-x: auto;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 12px; color: var(--text);">
+                            <thead>
+                                <tr style="background: rgba(245, 158, 11, 0.06); border-bottom: 2px solid var(--border);">
+                                    <th style="padding: 10px 12px; text-align: left; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Kondisi</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Set Temp</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Fan Speed</th>
+                                    <th style="padding: 10px 12px; text-align: center; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;">Mode AC</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">Tier 0</span> — No person</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">27–29°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(16,185,129,0.12); color: #10b981; font-weight: 600;">1 (Low)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL / FAN</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH ≤ 65%</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">24–26°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">1–2 (Adaptif)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">Tier 1</span> — 1–2 persons, RH &gt; 65%</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22–24°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(245,158,11,0.12); color: #f59e0b; font-weight: 600;">2–3</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">Tier 2</span> — 3–5 persons</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">22°C</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">3 (High)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid var(--border);">
+                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">Tier 3</span> — &gt;5 persons</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #3b82f6;">16°C (Min)</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(239,68,68,0.12); color: #ef4444; font-weight: 600;">4 (Max)</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(14,165,233,0.12); color: #0ea5e9; font-weight: 600;">COOL</span></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 10px 12px;"><span style="color: #a855f7; font-weight: 600;">Override</span> — RH &gt; 65% (all tiers)</td>
+                                    <td style="padding: 10px 12px; text-align: center; font-weight: 600; color: #6b7280;">−2°C offset</td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">+1 boost</span></td>
+                                    <td style="padding: 10px 12px; text-align: center;"><span style="padding: 2px 10px; border-radius: 12px; background: rgba(168,85,247,0.12); color: #a855f7; font-weight: 600;">DRY</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div style="margin-top: 12px; padding: 8px 14px; border-radius: 8px; background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.15); font-size: 11px; color: var(--text-secondary);">
+                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization automatically determines the optimal combination based on room conditions, number of people, and temperature trends. The table above is a general guide.
+                        </div>
+                    </div>
+                </div>
 
-                <!-- ===== PANEL EXPORT SUHU & HUMIDITY DARI DATABASE ===== -->
+                <!-- Energy Usage, Person Detection, ML Optimization removed from AC Dashboard -->
+
+                <!-- ===== PANEL EXPORT TEMPERATURE & HUMIDITY FROM DATABASE ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Suhu &amp; Kelembaban</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data suhu &amp; humidity dari database — pilih rentang tanggal, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Temperature &amp; Humidity</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch temperature &amp; humidity data from database — select date range, export to CSV</p>
                         </div>
                         <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.12);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">
                             <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
@@ -5165,11 +5667,11 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                             <input type="date" id="db-temp-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                             <input type="date" id="db-temp-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <button onclick="dbExportCSV('temp')"
@@ -5178,20 +5680,20 @@ HTML_TEMPLATE = '''
                         </button>
                         <button onclick="dbExportSetToday('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            Hari Ini
+                            Today
                         </button>
                         <button onclick="dbExportSet7d('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            7 Hari
+                            7 Days
                         </button>
                         <button onclick="dbExportSet30d('temp')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
-                            30 Hari
+                            30 Days
                         </button>
                     </div>
                     <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
                         <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
-                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Temperature (°C), Humidity (%), Heat Index (°C)</strong>
+                        Data fetched directly from InfluxDB — columns: <strong>Timestamp, Temp Ruangan (°C), Kelembapan (%), Heat Index (°C), Sensor 1–3 Suhu/RH, Set Temperature AC (°C), Fan Speed, Mode AC (COOL/DRY/FAN/AUTO), Set RH (%), Status Kontrol AC (ON/OFF), Mode Kontrol (ADAPTIVE/MANUAL)</strong>
                     </div>
                 </div>
 
@@ -5325,12 +5827,12 @@ HTML_TEMPLATE = '''
                         <span style="font-size: 11px; color: #94a3b8;">Brightness: <span style="color: #f59e0b; font-weight: bold;">--</span>%</span>
                     </div>
                 </div>
-                <!-- ===== PANEL EXPORT LUX & BRIGHTNESS DARI DATABASE ===== -->
+                <!-- ===== PANEL EXPORT LUX & BRIGHTNESS FROM DATABASE ===== -->
                 <div style="grid-column:1/-1;margin-top:6px;padding:22px;border-radius:18px;border:1px solid rgba(234,179,8,0.25);background:linear-gradient(160deg,rgba(234,179,8,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                         <div>
-                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#eab308;margin-right:8px;"></i>Export Lux &amp; Kecerahan Lampu</h2>
-                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data lux &amp; brightness dari database — pilih rentang tanggal, export ke CSV</p>
+                            <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#eab308;margin-right:8px;"></i>Export Lux &amp; Lamp Brightness</h2>
+                            <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch lux &amp; brightness data from database — select date range, export to CSV</p>
                         </div>
                         <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(234,179,8,0.12);color:#ca8a04;border:1px solid rgba(234,179,8,0.3);">
                             <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
@@ -5338,11 +5840,11 @@ HTML_TEMPLATE = '''
                     </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;">
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                             <input type="date" id="db-lux-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <div>
-                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                            <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                             <input type="date" id="db-lux-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                         </div>
                         <button onclick="dbExportCSV('lux')"
@@ -5351,20 +5853,20 @@ HTML_TEMPLATE = '''
                         </button>
                         <button onclick="dbExportSetToday('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            Hari Ini
+                            Today
                         </button>
                         <button onclick="dbExportSet7d('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            7 Hari
+                            7 Days
                         </button>
                         <button onclick="dbExportSet30d('lux')"
                             style="padding:10px 14px;border-radius:10px;border:1px solid rgba(234,179,8,0.35);background:rgba(234,179,8,0.08);color:#ca8a04;font-size:12px;font-weight:600;cursor:pointer;">
-                            30 Hari
+                            30 Days
                         </button>
                     </div>
                     <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(234,179,8,0.05);border-radius:8px;border:1px solid rgba(234,179,8,0.12);">
                         <i class="fas fa-info-circle" style="color:#eab308;margin-right:6px;"></i>
-                        Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Lux1 (lx), Lux2 (lx), Lux3 (lx), Avg Lux (lx), Brightness1 (%), Brightness2 (%)</strong>
+                        Data fetched directly from InfluxDB — columns: <strong>Time, Lux1 (lx), Lux2 (lx), Lux3 (lx), Avg Lux (lx), Brightness1 (%), Brightness2 (%)</strong>
                     </div>
                 </div>
 
@@ -5380,38 +5882,10 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Room Temperature Trend</div>
+                    <div class="chart-title">Set Temperature</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Temperature (C)')" title="Export rentang tanggal">&#128197;</button>
-                        <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
-                    </div>
-                </div>
-                <canvas id="tempChart" height="80"></canvas>
-            </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Humidity Trend</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Humidity (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Humidity (%)')" title="Export rentang tanggal">&#128197;</button>
-                        <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
-                        <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
-                    </div>
-                </div>
-                <canvas id="humChart" height="80"></canvas>
-            </div>
-
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">AC Target Temperature</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'AC Target Temp (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'AC Target Temp (C)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'Set Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'Set Temperature (C)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
@@ -5422,7 +5896,49 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">AC Power Consumption (kW)</div>
+                    <div class="chart-title">Set RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acHum', 'Set RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acHum', 'Set RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('acHum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acHumChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual Temperature</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Actual Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Actual Temperature (C)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="tempChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Actual RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Actual RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="humChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">AC Power (kW)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('acPower', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('acPower', 6)">6h</button>
@@ -5430,6 +5946,42 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="acPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- AC Energy Usage Section -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(16,185,129,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
+                    <div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Consumption</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
+                    </div>
+                </div>
+                <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
+                    <div class="chart-header">
+                        <div class="chart-title">AC Energy Consumption (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac','24h',this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','7d',this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','30d',this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="acEnergyKwhChart" height="90"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
+                        <div id="ac-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
+                        <div id="ac-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
+                        <div id="ac-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#10b981;">--</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -5445,7 +5997,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Light Intensity (Lux) — 3 Sensors</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampLux', 'Lux')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('lampLux', 'Lux')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampLux', 'Lux')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampLux', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampLux', 24)">24h</button>
@@ -5459,7 +6011,7 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">Average Brightness Level — 2 Lamps</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportChartData('lampBright', 'Brightness (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('lampBright', 'Brightness (%)')" title="Export rentang tanggal">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportChartRange('lampBright', 'Brightness (%)')" title="Export date range">&#128197;</button>
                         <button class="chart-option-btn active" onclick="changeChartRange('lampBright', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 6)">6h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampBright', 24)">24h</button>
@@ -5470,7 +6022,7 @@ HTML_TEMPLATE = '''
 
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">Lamp Power Consumption (kW)</div>
+                    <div class="chart-title">Lamp Power Consumption (W)</div>
                     <div class="chart-options">
                         <button class="chart-option-btn active" onclick="changeChartRange('lampPower', 1)">1h</button>
                         <button class="chart-option-btn" onclick="changeChartRange('lampPower', 6)">6h</button>
@@ -5478,6 +6030,42 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 <canvas id="lampPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- Lamp Energy Usage Section -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(168,85,247,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#128161;</div>
+                    <div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">Lamp Energy Usage</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
+                    </div>
+                </div>
+                <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
+                    <div class="chart-header">
+                        <div class="chart-title">Lamp Energy per Interval (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('lamp','24h',this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp','7d',this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('lamp','30d',this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="lampEnergyKwhChart" height="90"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
+                        <div id="lamp-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
+                        <div id="lamp-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
+                        <div id="lamp-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#a855f7;">--</div>
+                    </div>
+                </div>
             </div>
         </div>
         <div id="camera" class="page">
@@ -5554,38 +6142,38 @@ HTML_TEMPLATE = '''
             <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(160deg,rgba(168,85,247,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Grafik Occupancy Harian</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Jumlah orang terdeteksi per jam (otomatis direkam setiap jam) &mdash; max 24 data/hari</p>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#a855f7;margin-right:8px;"></i>Daily Occupancy Chart</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Persons detected per hour (auto-recorded every hour) &mdash; max 24 data/day</p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
                         <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#a855f7,#9333ea);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
-                        <button onclick="dbExportCSV('occupancy')" title="Export dari InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
-                        <button onclick="occExportRange()" title="Export rentang tanggal" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
+                        <button onclick="dbExportCSV('occupancy')" title="Export from InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
+                        <button onclick="occExportRange()" title="Export date range" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(168,85,247,0.35);background:rgba(168,85,247,0.10);color:#a855f7;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
                         <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
                     </div>
                 </div>
                 <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
-                    <span style="color:var(--text-secondary);">Data tampil: <strong id="occ-count" style="color:#a855f7;">0</strong> jam</span>
-                    <span style="color:var(--text-secondary);">Berikutnya: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
-                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> orang</span>
+                    <span style="color:var(--text-secondary);">Data shown: <strong id="occ-count" style="color:#a855f7;">0</strong> hrs</span>
+                    <span style="color:var(--text-secondary);">Next: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#10b981;">0</strong> persons</span>
                 </div>
                 <!-- Range filter occupancy -->
                 <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Hari Ini</button>
-                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Hari</button>
-                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Hari</button>
-                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">Semua</button>
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#a855f7;color:#fff;box-shadow:0 1px 4px rgba(168,85,247,0.3);">Today</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">7 Days</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">30 Days</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(168,85,247,0.12);color:#a855f7;">All</button>
                 </div>
                 <!-- DB Export date range for occupancy -->
                 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);">
                     <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#6366f1;margin-right:4px;"></i>DB Export:</span>
                     <input type="date" id="db-occupancy-from" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
-                    <span style="font-size:11px;color:var(--text-secondary);">s/d</span>
+                    <span style="font-size:11px;color:var(--text-secondary);">to</span>
                     <input type="date" id="db-occupancy-to" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
-                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Hari Ini</button>
-                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Hari</button>
-                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Hari</button>
+                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">Today</button>
+                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">7 Days</button>
+                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(99,102,241,0.25);background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;font-weight:600;cursor:pointer;">30 Days</button>
                 </div>
                 <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
                     <canvas id="occChart"></canvas>
@@ -5594,14 +6182,14 @@ HTML_TEMPLATE = '''
                     <table style="width:100%;border-collapse:collapse;font-size:11px;">
                         <thead>
                             <tr style="background:rgba(168,85,247,0.08);">
-                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Waktu</th>
-                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Jam</th>
-                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Jumlah Orang</th>
+                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>
+                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Hour</th>
+                                <th style="padding:8px 12px;text-align:right;color:#a855f7;font-weight:600;">Person Count</th>
                                 <th style="padding:8px 12px;text-align:right;color:#f59e0b;font-weight:600;">Confidence (%)</th>
                             </tr>
                         </thead>
                         <tbody id="occ-preview-body">
-                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Menunggu data jam pertama&hellip;</td></tr>
+                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Waiting for first hour data&hellip;</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -5623,7 +6211,7 @@ HTML_TEMPLATE = '''
                         <div style="width:38px;height:38px;border-radius:10px;background:rgba(99,102,241,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
                         <div>
                             <div style="font-size:15px;font-weight:700;color:var(--text);">Live Energy Monitor</div>
-                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; update tiap 5 detik</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; updates every 5 seconds</div>
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:12px;">
@@ -5645,26 +6233,26 @@ HTML_TEMPLATE = '''
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#ef4444;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(239,68,68,0.12);overflow:hidden;">
                                 <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#ef4444,#f87171);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 3.0 kW max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 3.0 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-voltage">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">V</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
                                 <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
@@ -5679,7 +6267,7 @@ HTML_TEMPLATE = '''
                                 <div style="font-size:10px;color:var(--text-secondary);">VA</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-freq">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
                             </div>
@@ -5698,32 +6286,32 @@ HTML_TEMPLATE = '''
                     <!-- ── Lamp ── -->
                     <div style="padding:18px 20px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lampu (id_kwh=2)</div>
+                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lamp (id_kwh=2)</div>
                             <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(234,179,8,0.1);color:#eab308;border:1px solid rgba(234,179,8,0.2);">Live</div>
                         </div>
                         <!-- Big power -->
                         <div style="text-align:center;margin-bottom:12px;">
                             <div style="font-size:48px;font-weight:800;color:#eab308;line-height:1;transition:color 0.3s;"><span id="lamp-power">--</span></div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Daya Aktif</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
                             <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
                                 <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
                             </div>
-                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">dari 0.5 kW max</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 0.5 kW max</div>
                         </div>
                         <!-- Metrics 3-col -->
                         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Tegangan</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-voltage">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">V</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Arus</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-current">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">A</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Energi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
                                 <div style="font-size:17px;font-weight:700;color:#10b981;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
                             </div>
@@ -5738,7 +6326,7 @@ HTML_TEMPLATE = '''
                                 <div style="font-size:10px;color:var(--text-secondary);">VA</div>
                             </div>
                             <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
-                                <div style="font-size:10px;color:var(--text-secondary);">Frekuensi</div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
                                 <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-freq">--</span></div>
                                 <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
                             </div>
@@ -5758,23 +6346,23 @@ HTML_TEMPLATE = '''
                 <!-- Total footer row -->
                 <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(99,102,241,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(99,102,241,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Daya</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Power</div>
                         <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Arus</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Current</div>
                         <div style="font-size:20px;font-weight:800;color:#6366f1;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energi</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energy</div>
                         <div style="font-size:20px;font-weight:800;color:#10b981;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frekuensi</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frequency</div>
                         <div style="font-size:20px;font-weight:800;color:var(--text);"><span id="total-freq-card">--</span><span style="font-size:11px;"> Hz</span></div>
                     </div>
                     <div style="text-align:center;">
-                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Biaya</div>
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Cost</div>
                         <div style="font-size:17px;font-weight:800;color:#f59e0b;">Rp <span id="daily-cost">--</span></div>
                         <div style="font-size:9px;color:var(--text-secondary);">@ Rp 1.500/kWh</div>
                     </div>
@@ -5874,7 +6462,7 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Energi per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#10b981;">&#9632;</span> &amp; Lamp <span style="color:#a855f7;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
                             <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
                             <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
@@ -5886,10 +6474,10 @@ HTML_TEMPLATE = '''
                     <canvas id="energyKwhChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
                         <span style="color:#10b981;font-weight:600;">AC</span>
-                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
                         <span style="color:#a855f7;font-weight:600;margin-left:10px;">Lamp</span>
-                        <span style="color:var(--text-secondary);">Interval Terakhir: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
                     </div>
                 </div>
@@ -5958,26 +6546,26 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- ===== PANEL EXPORT ENERGI DARI DATABASE ===== -->
+            <!-- ===== PANEL EXPORT ENERGY FROM DATABASE ===== -->
             <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(16,185,129,0.25);background:linear-gradient(160deg,rgba(16,185,129,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
                     <div>
-                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Data Energi dari Database</h2>
-                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Ambil data energi langsung dari InfluxDB — pilih rentang tanggal &amp; perangkat, export ke CSV</p>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#10b981;margin-right:8px;"></i>Export Energy Data from Database</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch energy data directly from InfluxDB — select date range &amp; device, export to CSV</p>
                     </div>
                     <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3);">
                         <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
                     </div>
                 </div>
 
-                <!-- Baris 1: Tanggal + AC -->
+                <!-- Row 1: Date + AC -->
                 <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
                     <div>
-                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Dari Tanggal</label>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
                         <input type="date" id="db-energy-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
                     <div>
-                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">Sampai Tanggal</label>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
                         <input type="date" id="db-energy-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
                     </div>
                     <button onclick="dbExportCSV('energy_ac')"
@@ -5986,24 +6574,24 @@ HTML_TEMPLATE = '''
                     </button>
                     <button onclick="dbExportCSV('energy_lamp')"
                         style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
-                        <i class="fas fa-download"></i> Export Lampu
+                        <i class="fas fa-download"></i> Export Lamp
                     </button>
                     <button onclick="dbExportSetToday('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        Hari Ini
+                        Today
                     </button>
                     <button onclick="dbExportSet7d('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        7 Hari
+                        7 Days
                     </button>
                     <button onclick="dbExportSet30d('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.08);color:#10b981;font-size:12px;font-weight:600;cursor:pointer;">
-                        30 Hari
+                        30 Days
                     </button>
                 </div>
                 <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(16,185,129,0.05);border-radius:8px;border:1px solid rgba(16,185,129,0.12);">
                     <i class="fas fa-info-circle" style="color:#10b981;margin-right:6px;"></i>
-                    Data diambil langsung dari InfluxDB — kolom: <strong>Waktu, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
+                    Data fetched directly from InfluxDB — columns: <strong>Time, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
                 </div>
             </div>
         </div>
@@ -6173,6 +6761,13 @@ HTML_TEMPLATE = '''
                         </div>
                     </div>
                     <div class="control-group" style="margin-bottom: 15px;">
+                        <label class="control-label">Set RH: <span id="ac-rh-display" style="color: var(--primary); font-weight: bold;">50</span>%</label>
+                        <input type="range" min="30" max="80" value="50" class="slider" id="ac-rh-slider" oninput="updateACRH(this.value)" style="width: 100%;">
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span>30%</span><span>40%</span><span>50%</span><span>60%</span><span>70%</span><span>80%</span>
+                        </div>
+                    </div>
+                    <div class="control-group" style="margin-bottom: 15px;">
                         <label class="control-label">Fan Speed: Level <span id="fan-speed-display" style="color: var(--primary); font-weight: bold;">1</span></label>
                         <input type="range" min="1" max="3" value="1" class="slider" id="fan-speed-slider" oninput="updateFanSpeed(this.value)" style="width: 100%;">
                         <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
@@ -6297,7 +6892,7 @@ HTML_TEMPLATE = '''
         <div id="ml-optimization" class="page">
             <div class="header">
                 <h1>Machine Learning Optimization</h1>
-                <p>GA -> Adaptive AC | PSO -> Adaptive Lamp | Data from InfluxDB</p>
+                <p>GA &rarr; Adaptive AC | PSO &rarr; Adaptive Lamp | Auto-optimized in ADAPTIVE mode</p>
             </div>
 
             <!-- ML Summary Cards -->
@@ -6317,7 +6912,7 @@ HTML_TEMPLATE = '''
                         <div class="stat-icon" style="background: rgba(239, 68, 68, 0.2); color: #ef4444;">T</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #ef4444;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span></span></div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#ef4444;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
                 </div>
 
                 <div class="stat-card">
@@ -6325,20 +6920,24 @@ HTML_TEMPLATE = '''
                         <span class="stat-title">PSO -> Lamp</span>
                         <div class="stat-icon" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b;">PSO</div>
                     </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.00</span></div>
-                    <div class="stat-change"><span>Lux Error (lower = better)</span></div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #f59e0b;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
+                    <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">Optimized Brightness</span>
-                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">B</div>
+                        <span class="stat-title">PWM Optimal</span>
+                        <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: #6366f1;">PWM</div>
                     </div>
                     <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
                         PWM1: <span id="ml-pso-pwm1" style="color: #6366f1; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
                         PWM2: <span id="ml-pso-pwm2" style="color: #a855f7; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
                     </div>
-                    <div class="stat-change"><span id="ml-pso-brightness" style="display:none;"></span>B1:<span id="ml-pso-brightness1" style="color:#6366f1;font-weight:600;">--</span>% B2:<span id="ml-pso-brightness2" style="color:#a855f7;font-weight:600;">--</span>% &nbsp;|&nbsp; Avg:<span id="ml-pso-brightness-avg" style="color:#6366f1;font-weight:600;">--</span>/255</div>
+                    <div class="stat-change">
+                        Lux1: <span id="ml-pso-lux1" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux2: <span id="ml-pso-lux2" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux3: <span id="ml-pso-lux3" style="color:#22d3ee;font-weight:600;">--</span> lx
+                    </div>
                 </div>
 
                 <div class="stat-card">
@@ -6368,29 +6967,42 @@ HTML_TEMPLATE = '''
                 <div class="chart-header">
                     <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export Laporan GA"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export rentang tanggal">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runGAOptimization()" style="background: linear-gradient(135deg, #10b981, #059669); color: white; border: none;">
-                            Run GA
-                        </button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export GA Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
                     </div>
                 </div>
                 <canvas id="gaFitnessChart" height="80"></canvas>
             </div>
 
-            <!-- PSO Fitness Convergence Chart -->
+            <!-- PSO Iteration Detail Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO Error Convergence — Lamp (lower = better, target 350 lux)</div>
+                    <div class="chart-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Laporan PSO"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export rentang tanggal">&#128197;</button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runPSOOptimization()" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none;">
-                            Run PSO
-                        </button>
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export PSO Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
                     </div>
                 </div>
-                <canvas id="psoFitnessChart" height="80"></canvas>
+                <!-- Iteration detail table -->
+                <div id="pso-iter-table-wrap" style="overflow-x:auto;margin-bottom:8px;display:none;">
+                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                        <thead>
+                            <tr style="background:rgba(245,158,11,0.15);">
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Iteration</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">PWM 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux 3</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Lux Avg</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Fitness (%)</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(245,158,11,0.3);">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pso-iter-tbody"></tbody>
+                    </table>
+                </div>
+                <canvas id="psoFitnessChart" height="100"></canvas>
             </div>
 
             <!-- GA vs PSO Comparison Chart -->
@@ -6399,9 +7011,6 @@ HTML_TEMPLATE = '''
                     <div class="chart-title">GA vs PSO — Fitness Comparison</div>
                     <div class="chart-options">
                         <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn ml-action-btn" onclick="runBothOptimization()" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border: none;">
-                            Run Both
-                        </button>
                         <button class="chart-option-btn" onclick="clearMLCharts()">
                             Clear
                         </button>
@@ -6438,7 +7047,7 @@ HTML_TEMPLATE = '''
                             </tr>
                         </thead>
                         <tbody id="ml-history-body">
-                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Run GA or PSO to start.</td></tr>
+                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Set mode to ADAPTIVE to start automatic optimization.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -6530,7 +7139,7 @@ HTML_TEMPLATE = '''
                         <div class="chart-title">Occupancy Trend</div>
                         <div class="chart-options">
                             <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
-                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export rentang tanggal">&#128197;</button>
+                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export date range">&#128197;</button>
                             <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
                             <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
@@ -6796,7 +7405,12 @@ HTML_TEMPLATE = '''
 
             charts.acTemp = new Chart(document.getElementById('acTempChart'), {
                 type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'AC Target Temp (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+                data: { labels: [], datasets: [{ label: 'Set Temperature (\u00b0C)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
+            });
+
+            charts.acHum = new Chart(document.getElementById('acHumChart'), {
+                type: 'line', options: makeOpts(false),
+                data: { labels: [], datasets: [{ label: 'Set RH (%)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.4, fill: true }] }
             });
 
             charts.lampLux = new Chart(document.getElementById('lampLuxChart'), {
@@ -6817,6 +7431,75 @@ HTML_TEMPLATE = '''
             charts.lampPower = new Chart(document.getElementById('lampPowerChart'), {
                 type: 'line', options: makeOpts(false),
                 data: { labels: [], datasets: [{ label: 'Lamp Power (W)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6 }] }
+            });
+
+            // AC & Lamp individual energy kWh charts (analytics pages)
+            charts.acEnergyKwh = new Chart(document.getElementById('acEnergyKwhChart'), {
+                type: 'line',
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0', borderColor: 'rgba(16,185,129,0.4)', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(16,185,129,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                    }
+                },
+                data: { labels: [], datasets: [{
+                    label: 'AC Energy (kWh)', data: [],
+                    borderColor: '#10b981', borderWidth: 2, tension: 0.3,
+                    backgroundColor: function(ctx) {
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(16,185,129,0.1)';
+                        var g = c.createLinearGradient(0, a.top, 0, a.bottom);
+                        g.addColorStop(0, 'rgba(16,185,129,0.25)'); g.addColorStop(1, 'rgba(16,185,129,0.02)'); return g;
+                    },
+                    fill: true, pointRadius: 2, pointHoverRadius: 6,
+                    pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2
+                }] }
+            });
+
+            charts.lampEnergyKwh = new Chart(document.getElementById('lampEnergyKwhChart'), {
+                type: 'line',
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc',
+                            bodyColor: '#e2e8f0', borderColor: 'rgba(168,85,247,0.4)', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(168,85,247,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                    }
+                },
+                data: { labels: [], datasets: [{
+                    label: 'Lamp Energy (kWh)', data: [],
+                    borderColor: '#a855f7', borderWidth: 2, tension: 0.3,
+                    backgroundColor: function(ctx) {
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(168,85,247,0.1)';
+                        var g = c.createLinearGradient(0, a.top, 0, a.bottom);
+                        g.addColorStop(0, 'rgba(168,85,247,0.25)'); g.addColorStop(1, 'rgba(168,85,247,0.02)'); return g;
+                    },
+                    fill: true, pointRadius: 2, pointHoverRadius: 6,
+                    pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2
+                }] }
             });
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
@@ -6845,8 +7528,8 @@ HTML_TEMPLATE = '''
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
                 ]}
             });
 
@@ -6971,8 +7654,31 @@ HTML_TEMPLATE = '''
             });
 
             charts.psoFitness = new Chart(document.getElementById('psoFitnessChart'), {
-                type: 'line', options: makeOpts(false),
-                data: { labels: [], datasets: [{ label: 'PSO Error (\u2193 better)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.4, fill: true, pointRadius: 2 }] }
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'PWM 1 (0-255)', data: [], borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'PWM 2 (0-255)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', tension: 0.3, fill: false, pointRadius: 4, yAxisID: 'yPWM' },
+                        { label: 'Lux Avg (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)', tension: 0.3, fill: true, pointRadius: 4, yAxisID: 'yLux', borderDash: [4,2] },
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: { duration: 300 },
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
+                        tooltip: { callbacks: {
+                            title: items => `Iteration ${items[0].label}`,
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y}`
+                        }}
+                    },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        yPWM: { type: 'linear', position: 'left', min: 0, max: 255, ticks: { color: '#6366f1', font: { size: 10 } }, title: { display: true, text: 'PWM', color: '#6366f1', font: { size: 10 } }, grid: { color: 'rgba(99,102,241,0.08)' } },
+                        yLux: { type: 'linear', position: 'right', min: 0, ticks: { color: '#f59e0b', font: { size: 10 } }, title: { display: true, text: 'Lux', color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+                    }
+                }
             });
 
             charts.comparison = new Chart(document.getElementById('comparisonChart'), {
@@ -6985,6 +7691,18 @@ HTML_TEMPLATE = '''
                     ]
                 }
             });
+
+            // Load any pending ML data that was stored while the ML page was hidden
+            if (window.__pendingMLData) {
+                var pending = window.__pendingMLData;
+                window.__pendingMLData = null;
+                Object.keys(pending).forEach(function(chartName) {
+                    var pd = pending[chartName];
+                    if (pd && pd.history && pd.history.length > 0) {
+                        try { updateMLChart(chartName, pd.history, pd.algo); } catch(e) { console.warn('[CHART] pending ML data load failed:', e); }
+                    }
+                });
+            }
         }
 
         // Ensure charts are available even if init runs before library/page is fully ready.
@@ -7047,6 +7765,7 @@ HTML_TEMPLATE = '''
                 case 'temp': endpoint = '/api/chart/ac_sensor/temperature/' + hours; break;
                 case 'hum': endpoint = '/api/chart/ac_sensor/humidity/' + hours; break;
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
+                case 'acHum': endpoint = '/api/chart/ac_sensor/set_rh/' + hours; break;
                 case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
                 case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
                 case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
@@ -7107,14 +7826,14 @@ HTML_TEMPLATE = '''
             const maxV = Math.max(...values);
             const avgV = values.reduce((a, b) => a + b, 0) / values.length;
             const lastV = values[values.length - 1];
-            const totalV = values.reduce((a, b) => a + b, 0);
             const isKwh = field === 'energy_kwh';
+            const totalV = values.reduce((a, b) => a + b, 0);
             const dp = isKwh ? 4 : 2;
             const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
             set(prefix + '-latest', lastV.toFixed(dp));
             set(prefix + '-min', minV.toFixed(dp));
             set(prefix + '-max', maxV.toFixed(dp));
-            // kWh: tampilkan total (sum delta) bukan rata-rata
+            // kWh: show total sum of deltas
             set(prefix + '-avg', isKwh ? totalV.toFixed(4) : avgV.toFixed(2));
         }
 
@@ -7200,18 +7919,14 @@ HTML_TEMPLATE = '''
             updateEnergyStats(field, values);
         }
 
-        // Konversi array kumulatif kWh ke delta per-interval: [100.00, 100.05, 100.09] → [0.05, 0.04]
-        function toDelta(values) {
-            if (!values || values.length < 2) return [];
-            var delta = [];
-            for (var i = 1; i < values.length; i++) {
-                delta.push(Math.max(0, parseFloat((values[i] - values[i - 1]).toFixed(4))));
-            }
-            return delta;
-        }
-
         // Track current period per field so auto-refresh doesn't reset user selection
         var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
+
+        // Energy is computed by integrating high-resolution Power data 
+        // to avoid the 1kWh low-resolution stepping from the raw cumulative sensor.
+        var _periodMins = {
+            '1h': 1, '6h': 5, '24h': 10, '7d': 60, '30d': 360, '12mo': 10080, '5y': 43200
+        };
 
         function loadEnergyHistory(field, period, btnElement) {
             // Save current period for this field
@@ -7226,10 +7941,11 @@ HTML_TEMPLATE = '''
             const chartName = energyChartMap[field];
             if (!chartName) return;
 
+            var fetchField = field;
             // Fetch AC and Lamp in parallel
             Promise.all([
-                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=ac').then(r => r.json()),
-                fetch('/api/energy/history?field=' + field + '&period=' + period + '&device=lamp').then(r => r.json())
+                fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=ac').then(r => r.json()),
+                fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=lamp').then(r => r.json())
             ])
             .then(function(results) {
                 var acResult = results[0];
@@ -7241,14 +7957,112 @@ HTML_TEMPLATE = '''
                 if (chart && chart.data && chart.data.datasets) {
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
-                    // energy_kwh: konversi kumulatif → delta per interval (kWh sekarang - kWh sebelumnya)
+                    var acLabels = acData.map(function(d){ return d.time; });
+                    var lampLabels = lampData.map(function(d){ return d.time; });
+                    
                     if (field === 'energy_kwh') {
-                        chart.data.labels = acData.slice(1).map(function(d){ return d.time; });
-                        acValues = toDelta(acValues);
-                        lampValues = toDelta(lampValues);
-                    } else {
-                        chart.data.labels = acData.map(function(d){ return d.time; });
+                        // energy_kwh is cumulative — compute delta per interval:
+                        // delta[i] = cumulative[i+1] - cumulative[i]
+                        // Example: 10:00=100.00, 10:05=100.05 → delta = 0.05 kWh
+                        function computeDeltas(cumValues) {
+                            var deltas = [];
+                            for (var i = 1; i < cumValues.length; i++) {
+                                var diff = cumValues[i] - cumValues[i - 1];
+                                deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
+                            }
+                            return deltas;
+                        }
+                        function buildRangeLabels(labels) {
+                            var rangeLabels = [];
+                            for (var i = 1; i < labels.length; i++) {
+                                rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
+                            }
+                            return rangeLabels;
+                        }
+
+                        // Store raw cumulative for tooltip detail
+                        var acCumRaw = acValues.slice();
+                        var lampCumRaw = lampValues.slice();
+                        acValues = computeDeltas(acValues);
+                        lampValues = computeDeltas(lampValues);
+
+                        // Bar chart for monthly (12mo) and yearly (5y), line chart for others
+                        var useBarChart = (period === '12mo' || period === '5y');
+                        if (useBarChart) {
+                            // Simple labels: "Jan 2026", "2025", etc.
+                            acLabels = acLabels.slice(1);
+                            lampLabels = lampLabels.slice(1);
+                        } else {
+                            // Range labels: "10:00→10:05"
+                            acLabels = buildRangeLabels(acLabels);
+                            lampLabels = buildRangeLabels(lampLabels);
+                        }
+
+                        // Recreate chart if type needs to change (line ↔ bar)
+                        var targetType = useBarChart ? 'bar' : 'line';
+                        if (chart.config.type !== targetType) {
+                            chart.destroy();
+                            var canvas = document.getElementById('energyKwhChart');
+                            if (useBarChart) {
+                                chart = new Chart(canvas, {
+                                    type: 'bar',
+                                    options: Object.assign({}, makeEnergyOpts('kWh'), {
+                                        plugins: Object.assign({}, makeEnergyOpts('kWh').plugins, {
+                                            legend: { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } },
+                                            tooltip: { mode: 'index', intersect: false,
+                                                backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f8fafc', bodyColor: '#e2e8f0',
+                                                borderColor: 'rgba(148,163,184,0.35)', borderWidth: 1, displayColors: true,
+                                                callbacks: { title: function(){return '';}, label: function(){return '';} }
+                                            }
+                                        }),
+                                        scales: {
+                                            x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, font: { size: 11 } } },
+                                            y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' },
+                                                 title: { display: true, text: 'kWh', color: '#94a3b8', font: { size: 11 } } }
+                                        }
+                                    }),
+                                    data: { labels: [], datasets: [
+                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(16,185,129,0.6)', borderColor: '#10b981', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 },
+                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(168,85,247,0.6)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 }
+                                    ]}
+                                });
+                            } else {
+                                chart = new Chart(canvas, {
+                                    type: 'line', options: makeEnergyOpts('kWh'),
+                                    data: { labels: [], datasets: [
+                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#a855f7', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                                    ]}
+                                });
+                            }
+                            charts[chartName] = chart;
+                        }
+
+                        // Attach cumulative data to chart for tooltip access
+                        chart._kwhCumAc = acCumRaw;
+                        chart._kwhCumLamp = lampCumRaw;
+
+                        // Override tooltip to show subtraction formula
+                        chart.options.plugins.tooltip.callbacks.title = function(items) {
+                            if (!items || !items[0]) return '';
+                            var lbl = items[0].label || '';
+                            return lbl.indexOf('\u2192') >= 0 ? lbl.replace('\u2192', ' \u2192 ') : lbl;
+                        };
+                        chart.options.plugins.tooltip.callbacks.label = function(ctx) {
+                            var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                            var delta = ctx.parsed.y;
+                            var idx = ctx.dataIndex;
+                            var cumArr = ctx.datasetIndex === 0 ? chart._kwhCumAc : chart._kwhCumLamp;
+                            if (cumArr && cumArr.length > idx + 1) {
+                                var prev = cumArr[idx].toFixed(4);
+                                var curr = cumArr[idx + 1].toFixed(4);
+                                return dsLabel + ': ' + curr + ' \u2212 ' + prev + ' = ' + delta.toFixed(5) + ' kWh';
+                            }
+                            return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
+                        };
                     }
+                    
+                    chart.data.labels = acLabels;
                     chart.data.datasets[0].data = acValues;
                     // Only update lamp dataset if chart has 2nd dataset (power, current, kwh; not voltage)
                     if (chart.data.datasets[1]) {
@@ -7272,7 +8086,7 @@ HTML_TEMPLATE = '''
                         var overlay = document.createElement('div');
                         overlay.id = noDataId;
                         overlay.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:14px;font-weight:600;pointer-events:none;text-align:center;';
-                        overlay.textContent = 'Menunggu data MySQL (polling setiap 5 detik)...';
+                        overlay.textContent = 'Waiting for MySQL data (polling every 5 seconds)...';
                         canvas.parentElement.style.position = 'relative';
                         canvas.parentElement.appendChild(overlay);
                     }
@@ -7299,6 +8113,57 @@ HTML_TEMPLATE = '''
                 setEl('lamp-kwh-latest', latest);
                 setEl('lamp-kwh-avg', total);
             }
+        }
+
+        // Analytics page individual energy chart loader
+        var _analyticsEnergyPeriod = { ac: '24h', lamp: '24h' };
+        function loadAnalyticsEnergy(device, period, btnEl) {
+            _analyticsEnergyPeriod[device] = period;
+            if (btnEl) {
+                var btns = btnEl.parentElement.querySelectorAll('.chart-option-btn');
+                btns.forEach(function(b){ b.classList.remove('active'); });
+                btnEl.classList.add('active');
+            }
+            fetch('/api/energy/history?field=energy_kwh&period=' + period + '&device=' + device)
+                .then(function(r){ return r.json(); })
+                .then(function(result) {
+                    var raw = result.data || [];
+                    var cumValues = raw.map(function(d){ return parseFloat(d.value || 0); });
+                    var labels = raw.map(function(d){ return d.time; });
+                    // Compute deltas from cumulative values
+                    var deltas = [];
+                    var rangeLabels = [];
+                    for (var i = 1; i < cumValues.length; i++) {
+                        var diff = cumValues[i] - cumValues[i - 1];
+                        deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
+                        rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
+                    }
+                    var chartKey = device === 'ac' ? 'acEnergyKwh' : 'lampEnergyKwh';
+                    var chart = charts[chartKey];
+                    if (chart && chart.data) {
+                        chart.data.labels = rangeLabels;
+                        chart.data.datasets[0].data = deltas;
+                        chart.update('none');
+                    }
+                    // Update stat cards
+                    var prefix = device === 'ac' ? 'ac' : 'lamp';
+                    var lastEl = document.getElementById(prefix + '-analytics-kwh-last');
+                    var totalEl = document.getElementById(prefix + '-analytics-kwh-total');
+                    var avgEl = document.getElementById(prefix + '-analytics-kwh-avg');
+                    if (deltas.length > 0) {
+                        var last = deltas[deltas.length - 1];
+                        var total = deltas.reduce(function(a,b){ return a+b; }, 0);
+                        var avg = total / deltas.length;
+                        if (lastEl) lastEl.textContent = last.toFixed(4) + ' kWh';
+                        if (totalEl) totalEl.textContent = total.toFixed(4) + ' kWh';
+                        if (avgEl) avgEl.textContent = avg.toFixed(4) + ' kWh';
+                    } else {
+                        if (lastEl) lastEl.textContent = '--';
+                        if (totalEl) totalEl.textContent = '--';
+                        if (avgEl) avgEl.textContent = '--';
+                    }
+                })
+                .catch(function(e){ console.error('Analytics energy error (' + device + '):', e); });
         }
 
         function loadAllEnergyCharts() {
@@ -7715,31 +8580,33 @@ HTML_TEMPLATE = '''
                 try { checkCameraStatus(); } catch(e) { console.error('[NAV] camera init error:', e); }
             }
             if (pageId === 'ml-optimization') {
-                try { ensureChartsReady(); } catch(e) { console.error('[NAV] ML ensureCharts error:', e); }
-                try { refreshMLData(); } catch(e) { console.error('[NAV] ML init error:', e); }
-                // Canvas in hidden page has 0px dimensions — resize after page is visible
-                setTimeout(function() {
-                    ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                // Use requestAnimationFrame: fires AFTER browser paints the page with display:block
+                requestAnimationFrame(function() {
+                    // Only create charts if they don't exist yet; otherwise just resize
+                    if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
+                        try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
+                    } else {
+                        // Charts exist — just resize them for correct dimensions
                         try {
-                            if (charts[k] && typeof charts[k].resize === 'function') {
-                                charts[k].resize();
-                                charts[k].update('none');
-                            }
-                        } catch(e) {}
-                    });
-                    // Refresh data after resize so charts render with actual values
-                    try { refreshMLData(); } catch(e) {}
-                }, 200);
+                            ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
+                                if (charts[k]) { charts[k].resize(); charts[k].update('none'); }
+                            });
+                        } catch(e) { console.warn('[NAV] chart resize error:', e); }
+                    }
+                    try { refreshMLData(); } catch(e) { console.error('[NAV] refreshMLData error:', e); }
+                });
             }
             if (pageId === 'ac-analytics') {
-                ['temp', 'hum', 'acTemp', 'acPower'].forEach(function(cn) {
+                ['temp', 'hum', 'acTemp', 'acHum', 'acPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                try { loadAnalyticsEnergy('ac', _analyticsEnergyPeriod.ac || '24h', null); } catch(e) {}
             }
             if (pageId === 'lamp-analytics') {
                 ['lampLux', 'lampBright', 'lampPower'].forEach(function(cn) {
                     try { updateChartData(cn, chartRanges[cn] || 1); } catch(e) {}
                 });
+                try { loadAnalyticsEnergy('lamp', _analyticsEnergyPeriod.lamp || '24h', null); } catch(e) {}
             }
             if (pageId === 'occupancy-feedback') {
                 try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch(e) {}
@@ -7802,51 +8669,209 @@ HTML_TEMPLATE = '''
             const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
 
             setEl('ml-ga-fitness', (data.ga_fitness || 0).toFixed(2));
-            setEl('ml-pso-fitness', (data.pso_fitness || 0).toFixed(2));
+            // PSO fitness is already in percent from server
+            setEl('ml-pso-fitness', (data.pso_fitness != null ? parseFloat(data.pso_fitness) : 0).toFixed(1));
             setEl('ml-ga-temp', data.ga_temp || '--');
             setEl('ml-ga-fan', data.ga_fan || '--');
             setEl('ml-ga-mode', data.ga_mode || 'COOL');
-            setEl('ml-pso-brightness', data.pso_brightness || '--');
-            var b1 = data.pso_brightness1 != null ? data.pso_brightness1 : (data.pso_brightness || '--');
-            var b2 = data.pso_brightness2 != null ? data.pso_brightness2 : (data.pso_brightness || '--');
-            // PWM values 0-255: use pso_pwm1/2 if available, else derive from brightness %
-            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : (b1 !== '--' ? Math.round(parseFloat(b1) * 255 / 100) : '--');
-            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : (b2 !== '--' ? Math.round(parseFloat(b2) * 255 / 100) : '--');
-            var pAvg = (p1 !== '--' && p2 !== '--') ? Math.round((parseFloat(p1) + parseFloat(p2)) / 2) : '--';
+            setEl('ml-ga-rh', data.ga_set_rh || '--');
+            var p1 = data.pso_pwm1 != null && data.pso_pwm1 > 0 ? data.pso_pwm1 : '--';
+            var p2 = data.pso_pwm2 != null && data.pso_pwm2 > 0 ? data.pso_pwm2 : '--';
             setEl('ml-pso-pwm1', p1);
             setEl('ml-pso-pwm2', p2);
-            setEl('ml-pso-brightness1', b1 !== '--' ? b1 : '--');
-            setEl('ml-pso-brightness2', b2 !== '--' ? b2 : '--');
-            setEl('ml-pso-brightness-avg', pAvg);
+            // Sinkron Lamp Dashboard brightness dari PSO result
+            if (data.pso_brightness1 != null) setText('dash-bright1', Math.round(parseFloat(data.pso_brightness1)));
+            if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
-            // Update convergence charts if history available
-            if (data.ga_history && data.ga_history.length > 0) {
-                updateMLChart('gaFitness', data.ga_history, 'GA');
+            // GA chart — use server data, or fallback to localStorage
+            var gaHistory = (data.ga_history && data.ga_history.length > 0) ? data.ga_history : null;
+            if (!gaHistory) {
+                try { gaHistory = JSON.parse(localStorage.getItem('ml_ga_history')); } catch(e) {}
             }
-            if (data.pso_history && data.pso_history.length > 0) {
-                updateMLChart('psoFitness', data.pso_history, 'PSO');
+            if (gaHistory && gaHistory.length > 0) {
+                updateMLChart('gaFitness', gaHistory, 'GA');
+            }
+
+            // PSO chart — use server data, or fallback to localStorage
+            if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
+                updatePSOIterChart(data.pso_iteration_log);
+            } else {
+                var savedIterLog = null;
+                try { savedIterLog = JSON.parse(localStorage.getItem('ml_pso_iterlog')); } catch(e) {}
+                if (savedIterLog && savedIterLog.length > 0) {
+                    updatePSOIterChart(savedIterLog);
+                } else if (data.pso_history && data.pso_history.length > 0) {
+                    // Fallback: if no iteration_log yet, show pso_history as fitness line
+                    const chart = charts.psoFitness;
+                    if (chart) {
+                        chart.data.labels = data.pso_history.map((_, i) => i + 1);
+                        chart.data.datasets[0].data = [];
+                        chart.data.datasets[1].data = [];
+                        chart.data.datasets[2].data = data.pso_history.map(f => Math.max(0, 350 - Math.sqrt(f)));
+                        chart.update('none');
+                    }
+                }
             }
         }
 
         function updateMLChart(chartName, history, algo) {
-            // Re-init ML charts if not yet created - call initMLCharts directly, NOT ensureChartsReady
-            // (ensureChartsReady calls initCharts which crashes on already-existing canvases)
+            // Init chart if not yet created (e.g. ML tab never opened)
             if (!charts[chartName]) {
                 var mlCanvas = document.getElementById('gaFitnessChart');
                 if (mlCanvas && mlCanvas.offsetWidth > 0) {
-                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); }
+                    try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); return; }
                 } else {
-                    return; // ML page not visible yet, skip
+                    // ML tab not yet active — store data to render when tab opens
+                    window.__pendingMLData = window.__pendingMLData || {};
+                    window.__pendingMLData[chartName] = { history, algo };
+                    // Also save to localStorage so data survives refresh
+                    if (algo === 'GA') {
+                        try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
+                    }
+                    return;
                 }
             }
             const chart = charts[chartName];
             if (!chart || !history || history.length === 0) return;
 
-            chart.data.labels = history.map((_, i) => algo === 'GA' ? ('Gen ' + (i + 1)) : ('Iter ' + (i + 1)));
-            chart.data.datasets[0].data = history;
-            chart.update('none');
+            if (algo === 'GA') {
+                chart.data.labels           = history.map((_, i) => 'Gen ' + (i + 1));
+                chart.data.datasets[0].data = history;
+                chart.update('none');
+                // Cache to localStorage for persistence across refresh
+                try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch(e) {}
+            } else if (algo === 'PSO') {
+                // PSO fitness history sebagai fallback jika belum ada iteration_log
+                // Tampilkan sebagai Lux Avg estimasi (dataset index 2)
+                chart.data.labels               = history.map((_, i) => i + 1);
+                chart.data.datasets[0].data     = [];
+                chart.data.datasets[1].data     = [];
+                chart.data.datasets[2].data     = history.map(f => Math.max(0, 350 - Math.sqrt(Math.max(0, f))));
+                chart.update('none');
+            }
         }
+
+        function updatePSOIterChart(iterLog) {
+            if (!iterLog || iterLog.length === 0) return;
+            const chart = charts.psoFitness;
+            if (!chart) return;
+            chart.data.labels           = iterLog.map(d => d.iter);
+            chart.data.datasets[0].data = iterLog.map(d => d.pwm1);
+            chart.data.datasets[1].data = iterLog.map(d => d.pwm2);
+            chart.data.datasets[2].data = iterLog.map(d => d.lux_avg);
+            chart.update('none');
+            // Cache to localStorage for persistence across refresh
+            try { localStorage.setItem('ml_pso_iterlog', JSON.stringify(iterLog)); } catch(e) {}
+            // Update tabel
+            const tbody = document.getElementById('pso-iter-tbody');
+            const wrap  = document.getElementById('pso-iter-table-wrap');
+            if (!tbody) return;
+            wrap.style.display = 'block';
+            tbody.innerHTML = iterLog.map(d => {
+                const inRange     = d.lux_avg >= 315 && d.lux_avg <= 385;
+                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusText  = inRange ? '✓ Target' : '✗ Not yet';
+                const fitPct      = Math.max(0, 100.0 - (d.fitness / 122500.0) * 100.0).toFixed(1);
+                return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        socket.on('pso_iter_progress', function(d) {
+            // Local helper — does not depend on outer scope
+            const _s = function(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; };
+
+            if (d.status === 'done') {
+                // Sinkron Lamp Dashboard brightness
+                _s('dash-bright1', Math.round(parseFloat(d.b1 || 0)));
+                _s('dash-bright2', Math.round(parseFloat(d.b2 || 0)));
+                // Update stat card ML Optimization
+                _s('ml-pso-pwm1',  d.pwm1 != null ? d.pwm1 : '--');
+                _s('ml-pso-pwm2',  d.pwm2 != null ? d.pwm2 : '--');
+                _s('ml-pso-lux1',  d.lux1 != null ? d.lux1 : '--');
+                _s('ml-pso-lux2',  d.lux2 != null ? d.lux2 : '--');
+                _s('ml-pso-lux3',  d.lux3 != null ? d.lux3 : '--');
+                // Fitness %
+                const fitPct = Math.max(0, 100.0 - ((d.fitness || 0) / 122500.0) * 100.0).toFixed(1);
+                _s('ml-pso-fitness', fitPct);
+
+                // Iteration table — replace waiting row with full data
+                const tbody = document.getElementById('pso-iter-tbody');
+                const wrap  = document.getElementById('pso-iter-table-wrap');
+                if (!tbody) return;
+                wrap.style.display = 'block';
+                const inRange     = (d.lux_avg || 0) >= 315 && (d.lux_avg || 0) <= 385;
+                const statusColor = inRange ? '#10b981' : '#f59e0b';
+                const statusText  = inRange ? '✓ Target' : '✗ Not yet';
+                const newRow = `<tr data-iter="${d.iter}" style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#6366f1;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#a855f7;">${d.pwm2 != null ? d.pwm2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux1 != null ? d.lux1 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux2 != null ? d.lux2 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#22d3ee;">${d.lux3 != null ? d.lux3 : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#f59e0b;font-weight:600;">${d.lux_avg != null ? d.lux_avg : '--'}</td>
+                    <td style="padding:4px 8px;text-align:center;color:#10b981;font-weight:600;">${fitPct}%</td>
+                    <td style="padding:4px 8px;text-align:center;color:${statusColor};font-weight:600;">${statusText}</td>
+                </tr>`;
+                const existingRow = tbody.querySelector('tr[data-iter="' + d.iter + '"]');
+                if (existingRow) existingRow.outerHTML = newRow;
+                else tbody.insertAdjacentHTML('beforeend', newRow);
+
+                // Update chart live
+                const chart = charts.psoFitness;
+                if (chart) {
+                    const idx = chart.data.labels.indexOf(d.iter);
+                    if (idx === -1) {
+                        chart.data.labels.push(d.iter);
+                        chart.data.datasets[0].data.push(d.pwm1);
+                        chart.data.datasets[1].data.push(d.pwm2);
+                        chart.data.datasets[2].data.push(d.lux_avg);
+                    } else {
+                        chart.data.datasets[0].data[idx] = d.pwm1;
+                        chart.data.datasets[1].data[idx] = d.pwm2;
+                        chart.data.datasets[2].data[idx] = d.lux_avg;
+                    }
+                    chart.update('none');
+                }
+
+            } else if (d.status === 'waiting') {
+                const tbody = document.getElementById('pso-iter-tbody');
+                const wrap  = document.getElementById('pso-iter-table-wrap');
+                if (!tbody) return;
+                wrap.style.display = 'block';
+                // Delete baris lama jika ada, insert baru
+                const old = tbody.querySelector('tr[data-iter="' + d.iter + '"]');
+                if (old) old.remove();
+                tbody.insertAdjacentHTML('beforeend',
+                    '<tr data-iter="' + d.iter + '" style="border-bottom:1px solid rgba(255,255,255,0.05);opacity:0.6;">' +
+                        '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + d.iter + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#6366f1;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
+                        '<td style="padding:4px 8px;text-align:center;color:#a855f7;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
+                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Reading sensors...</td>' +
+                    '</tr>');
+
+            } else if (d.status === 'new_cycle') {
+                const tbody = document.getElementById('pso-iter-tbody');
+                if (tbody) tbody.innerHTML = '';
+                const chart = charts.psoFitness;
+                if (chart) {
+                    chart.data.labels = [];
+                    chart.data.datasets.forEach(function(ds) { ds.data = []; });
+                    chart.update('none');
+                }
+            }
+        });
 
         function addToComparisonChart(gaFit, psoFit) {
             const chart = charts.comparison;
@@ -7962,7 +8987,7 @@ HTML_TEMPLATE = '''
             fetch('/api/ga/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
                     }
                     return r.blob();
                 })
@@ -7973,16 +8998,16 @@ HTML_TEMPLATE = '''
                     link.download = 'ga_report_' + ts + '.csv';
                     link.click();
                     URL.revokeObjectURL(link.href);
-                    showToast('Laporan GA berhasil diexport!', 'success');
+                    showToast('GA report exported successfully!', 'success');
                 })
-                .catch(function(e) { showToast('Export GA gagal: ' + e.message, 'error'); });
+                .catch(function(e) { showToast('GA export failed: ' + e.message, 'error'); });
         }
 
         function exportPSOReport() {
             fetch('/api/pso/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Gagal export'); });
+                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
                     }
                     return r.blob();
                 })
@@ -7993,9 +9018,9 @@ HTML_TEMPLATE = '''
                     link.download = 'pso_report_' + ts + '.csv';
                     link.click();
                     URL.revokeObjectURL(link.href);
-                    showToast('Laporan PSO berhasil diexport!', 'success');
+                    showToast('PSO report exported successfully!', 'success');
                 })
-                .catch(function(e) { showToast('Export PSO gagal: ' + e.message, 'error'); });
+                .catch(function(e) { showToast('PSO export failed: ' + e.message, 'error'); });
         }
 
         function exportFeedback() {
@@ -8268,6 +9293,11 @@ HTML_TEMPLATE = '''
             saveSettings();
         }
 
+        function updateACRH(value) {
+            document.getElementById('ac-rh-display').textContent = value;
+            saveSettings();
+        }
+
         function updateFanSpeed(value) {
             document.getElementById('fan-speed-display').textContent = value;
             saveSettings();
@@ -8288,6 +9318,13 @@ HTML_TEMPLATE = '''
                 var fanDisplay = document.getElementById('fan-speed-display');
                 if (fanSlider && Number.isFinite(fanValue)) fanSlider.value = fanValue;
                 if (fanDisplay && Number.isFinite(fanValue)) fanDisplay.textContent = fanValue;
+            }
+            if (ac.set_rh !== undefined && ac.set_rh !== null) {
+                var rhValue = parseInt(ac.set_rh, 10);
+                var rhSlider = document.getElementById('ac-rh-slider');
+                var rhDisplay = document.getElementById('ac-rh-display');
+                if (rhSlider && Number.isFinite(rhValue)) rhSlider.value = rhValue;
+                if (rhDisplay && Number.isFinite(rhValue)) rhDisplay.textContent = rhValue;
             }
             if (ac.ac_fan_mode) {
                 selectedACMode = String(ac.ac_fan_mode).toUpperCase();
@@ -8368,6 +9405,7 @@ HTML_TEMPLATE = '''
                     return;
                 }
                 const temp = document.getElementById('ac-temp-slider').value;
+                const rh = document.getElementById('ac-rh-slider').value;
                 const fan = document.getElementById('fan-speed-slider').value;
 
                 fetch('/api/ac/control', {
@@ -8376,6 +9414,7 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({
                         command: 'SET',
                         temperature: parseInt(temp),
+                        set_rh: parseInt(rh),
                         fan_speed: parseInt(fan),
                         mode: selectedACMode
                     })
@@ -8383,7 +9422,7 @@ HTML_TEMPLATE = '''
                 .then(r => r.json())
                 .then(result => {
                     if (result && result.ac) applyACSnapshot(result.ac);
-                    showToast('AC: ' + temp + '°C, Fan ' + fan + ', ' + selectedACMode);
+                    showToast('AC: ' + temp + '°C, RH ' + rh + '%, Fan ' + fan + ', ' + selectedACMode);
                 })
                 .catch(e => showToast('Error: ' + e, 'error'));
             });
@@ -9189,20 +10228,27 @@ HTML_TEMPLATE = '''
                     const temperature = num(ac.temperature);
                     setText('dash-temp', temperature.toFixed(1));
                     setText('dash-hum', num(ac.humidity).toFixed(1));
-                    // Individual sensor readings
+                    // Individual sensor readings — sorted coldest→hottest (S1→S3)
+                    var rawTemps = [
+                        { t: num(ac.temp1), h: num(ac.hum1) },
+                        { t: num(ac.temp2), h: num(ac.hum2) },
+                        { t: num(ac.temp3), h: num(ac.hum3) }
+                    ];
+                    // Sort by temperature ascending (coldest first = S1)
+                    rawTemps.sort(function(a, b) { return a.t - b.t; });
                     const t1El = document.getElementById('dash-temp1');
                     const t2El = document.getElementById('dash-temp2');
                     const t3El = document.getElementById('dash-temp3');
-                    if (t1El) t1El.textContent = num(ac.temp1).toFixed(1);
-                    if (t2El) t2El.textContent = num(ac.temp2).toFixed(1);
-                    if (t3El) t3El.textContent = num(ac.temp3).toFixed(1);
-                    // Individual humidity readings
+                    if (t1El) t1El.textContent = rawTemps[0].t.toFixed(1);
+                    if (t2El) t2El.textContent = rawTemps[1].t.toFixed(1);
+                    if (t3El) t3El.textContent = rawTemps[2].t.toFixed(1);
+                    // Individual humidity readings (sorted same order as temp)
                     const h1El = document.getElementById('dash-hum1');
                     const h2El = document.getElementById('dash-hum2');
                     const h3El = document.getElementById('dash-hum3');
-                    if (h1El) h1El.textContent = num(ac.hum1).toFixed(1);
-                    if (h2El) h2El.textContent = num(ac.hum2).toFixed(1);
-                    if (h3El) h3El.textContent = num(ac.hum3).toFixed(1);
+                    if (h1El) h1El.textContent = rawTemps[0].h.toFixed(1);
+                    if (h2El) h2El.textContent = rawTemps[1].h.toFixed(1);
+                    if (h3El) h3El.textContent = rawTemps[2].h.toFixed(1);
                     
                     // Heat Index
                     const hiEl = document.getElementById('dash-heat-index');
@@ -9310,13 +10356,13 @@ HTML_TEMPLATE = '''
                     const roomHum = document.getElementById('dash-ac-room-hum');
                     if (roomTemp) roomTemp.textContent = temperature.toFixed(1);
                     if (roomHum) roomHum.textContent = num(ac.humidity).toFixed(1);
-                    // Individual sensors in AC panel footer
+                    // Individual sensors in AC panel footer (use sorted rawTemps from above)
                     const acT1 = document.getElementById('dash-ac-temp1');
                     const acT2 = document.getElementById('dash-ac-temp2');
                     const acT3 = document.getElementById('dash-ac-temp3');
-                    if (acT1) acT1.textContent = num(ac.temp1).toFixed(1);
-                    if (acT2) acT2.textContent = num(ac.temp2).toFixed(1);
-                    if (acT3) acT3.textContent = num(ac.temp3).toFixed(1);
+                    if (acT1 && rawTemps) acT1.textContent = rawTemps[0].t.toFixed(1);
+                    if (acT2 && rawTemps) acT2.textContent = rawTemps[1].t.toFixed(1);
+                    if (acT3 && rawTemps) acT3.textContent = rawTemps[2].t.toFixed(1);
                     
                     // Update AC Live Status Bar in control panel
                     const liveDot = document.getElementById('ac-live-dot');
@@ -9409,7 +10455,7 @@ HTML_TEMPLATE = '''
                         psoEl.style.color = psoFitness > 0 ? '#10b981' : '#94a3b8';
                     }
                     
-                    // PSO Brightness — pso-brightness element tidak ada di halaman utama (hanya di ML page)
+                    // PSO Brightness — pso-brightness element not on main page (only on ML page)
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
                         psoBrightEl.textContent = Math.round(num(system.pso_brightness));
@@ -9491,23 +10537,23 @@ HTML_TEMPLATE = '''
                     var txt = document.getElementById('mqtt-status-text');
                     if (dot) dot.className = 'device-dot offline';
                     if (txt) txt.textContent = 'API Error';
-                    if (showDetail) diagLog('ERROR: Tidak bisa fetch /api/mqtt/status');
+                    if (showDetail) diagLog('ERROR: Cannot fetch /api/mqtt/status');
                 });
         }
 
         function runSimulate() {
             diagClear('=== TEST FRONTEND (INJECT DATA DUMMY) ===');
-            diagLog('Mengirim data dummy ke server...');
+            diagLog('Sending dummy data to server...');
             fetch('/api/simulate', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        diagLog('BERHASIL! Data dummy sudah diinjek:');
+                        diagLog('SUCCESS! Dummy data injected:');
                         diagLog('  AC Temperature: ' + data.ac_temp + ' C');
                         diagLog('  Lamp Lux1: ' + data.lamp_lux + ' lux');
                         diagLog('');
-                        diagLog('Jika nilai di dashboard berubah dari 0 -> FRONTEND OK');
-                        diagLog('Jika tetap 0 -> Ada masalah di JavaScript/DOM');
+                        diagLog('If values on dashboard change from 0 -> FRONTEND OK');
+                        diagLog('If still 0 -> Problem in JavaScript/DOM');
                         updateDashboard();
                     } else {
                         diagLog('ERROR: ' + data.message);
@@ -9518,22 +10564,22 @@ HTML_TEMPLATE = '''
 
         function runMqttSelftest() {
             diagClear('=== TEST MQTT BROKER (SELF-TEST) ===');
-            diagLog('Server akan publish ke smartroom/ac/sensors...');
+            diagLog('Server will publish to smartroom/ac/sensors...');
             fetch('/api/mqtt/selftest', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        diagLog('BERHASIL! Pesan test berhasil dipublish ke broker.');
+                        diagLog('SUCCESS! Test message published to broker.');
                         diagLog(data.message);
                         diagLog('');
-                        diagLog('Tunggu 2 detik... lalu cek apakah data muncul di dashboard.');
-                        diagLog('Jika muncul -> MQTT Broker OK, masalah ada di ESP32');
-                        diagLog('Jika tidak muncul -> Ada masalah subscribe/routing topic');
+                        diagLog('Wait 2 seconds... then check if data appears on dashboard.');
+                        diagLog('If visible -> MQTT Broker OK, problem is in ESP32');
+                        diagLog('If not visible -> Problem with subscribe/routing topic');
                         setTimeout(function() { updateDashboard(); diagLog('Dashboard refreshed.'); }, 2000);
                     } else {
-                        diagLog('GAGAL: ' + data.message);
+                        diagLog('FAILED: ' + data.message);
                         diagLog('');
-                        diagLog('Artinya: MQTT Broker tidak berjalan atau tidak bisa terkoneksi!');
+                        diagLog('This means: MQTT Broker is not running or cannot connect!');
                         diagLog('Jalankan Mosquitto terlebih dahulu.');
                     }
                 })
@@ -9542,7 +10588,7 @@ HTML_TEMPLATE = '''
 
         function runMqttReconnect() {
             diagClear('=== RECONNECT MQTT ===');
-            diagLog('Mencoba reconnect ke MQTT broker...');
+            diagLog('Trying to reconnect to MQTT broker...');
             fetch('/api/mqtt/reconnect', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
@@ -9760,11 +10806,11 @@ HTML_TEMPLATE = '''
         });
 
         // ── Direct PHP polling fallback ──
-        // Jika socket tidak kirim data dalam 10 detik, browser fetch langsung ke PHP
+        // If socket sends no data for 10 seconds, browser fetches directly from PHP
         var _PHP_ENERGY_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024';
         var _phpPollErr = 0;
         function _phpDirectPoll() {
-            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket masih aktif, skip
+            if (Date.now() - _lastEnergyUpdate < 10000) return; // socket still active, skip
             fetch(_PHP_ENERGY_URL)
                 .then(function(r) {
                     if (!r.ok) { console.error('[PHP-poll] HTTP ' + r.status); return null; }
@@ -9780,29 +10826,29 @@ HTML_TEMPLATE = '''
                     _phpPollErr = 0;
                     var ac   = data.ac   || {};
                     var lamp = data.lamp || {};
-                    // Hitung pf karena PHP tidak kirim pf langsung
+                    // Calculate pf because PHP does not send pf directly
                     var acAp = parseFloat(ac.apparent_power||0);
                     var lpAp = parseFloat(lamp.apparent_power||0);
                     ac.pf   = acAp > 0 ? parseFloat((parseFloat(ac.active_power||0) / acAp).toFixed(3)) : 0;
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
-                    // Sesuaikan nama field: active_power → power, frekuensi → frequency
+                    // Adjust field names: active_power → power, frequency → frequency
                     ac.power       = ac.active_power;
-                    // total_energy dari DB sudah dalam kWh (tabel energy_kwh)
+                    // total_energy from DB is already in kWh (energy_kwh table)
                     ac.energy      = parseFloat(ac.total_energy || 0);
-                    ac.frequency   = ac.frekuensi;
-                    ac.voltage     = ac.tegangan;
+                    ac.frequency   = ac.frequency;
+                    ac.voltage     = ac.voltage;
                     ac.current     = ac.arus;
                     lamp.power     = lamp.active_power;
                     lamp.energy    = parseFloat(lamp.total_energy || 0);
-                    lamp.frequency = lamp.frekuensi;
-                    lamp.voltage   = lamp.tegangan;
+                    lamp.frequency = lamp.frequency;
+                    lamp.voltage   = lamp.voltage;
                     lamp.current   = lamp.arus;
                     _applyEnergyData(ac, lamp);
                 })
                 .catch(function(e) { _phpPollErr++; console.warn('[PHP-poll] error:', e); });
         }
         setInterval(_phpDirectPoll, 6000);
-        // Jalankan langsung 3 detik setelah load (tidak tunggu socket)
+        // Run immediately 3 seconds after load (no wait for socket)
         setTimeout(_phpDirectPoll, 3000);
 
         // ==================== SESSION STORAGE + SERVER STATE PERSISTENCE ====================
@@ -9820,7 +10866,7 @@ HTML_TEMPLATE = '''
                     var badge = document.getElementById('rec-status-badge');
                     if (badge) {
                         if (st.energy) {
-                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                             badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                         } else { _recUpdateBadge(); }
                     }
@@ -9828,14 +10874,14 @@ HTML_TEMPLATE = '''
                 if (!_tempActive) {
                     var tb = document.getElementById('temp-rec-badge');
                     if (tb && st.temp) {
-                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         tb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (tb && !st.temp) { _tempUpdateBadge(); }
                 }
                 if (!_luxActive) {
                     var lb = document.getElementById('lux-rec-badge');
                     if (lb && st.lux) {
-                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam (device lain)';
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording (other device)';
                         lb.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);';
                     } else if (lb && !st.lux) { _luxUpdateBadge(); }
                 }
@@ -9848,7 +10894,7 @@ HTML_TEMPLATE = '''
         var _recActive  = false;  // never auto-resume active state; user must press start
         var _recStartTs = null;
         var _recTimer   = null;
-        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lampu'
+        var _recFilter  = 'all';  // 'all' | 'AC' | 'Lamp'
 
         function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
 
@@ -9881,10 +10927,10 @@ HTML_TEMPLATE = '''
 
         function recSetFilter(f) {
             _recFilter = f;
-            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lampu:'rec-tab-lamp'};
+            var map = {all:'rec-tab-all', AC:'rec-tab-ac', Lamp:'rec-tab-lamp'};
             Object.keys(map).forEach(function(k) {
                 var el = document.getElementById(map[k]); if (!el) return;
-                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lampu'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
+                if (k === f) { el.style.background='#fff'; el.style.fontWeight='700'; el.style.color=k==='AC'?'#ef4444':k==='Lamp'?'#eab308':'#6366f1'; el.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'; }
                 else { el.style.background='transparent'; el.style.fontWeight='600'; el.style.color='var(--text-secondary)'; el.style.boxShadow='none'; }
             });
             _recUpdatePreview();
@@ -9894,7 +10940,7 @@ HTML_TEMPLATE = '''
             var badge = document.getElementById('rec-status-badge');
             if (!badge) return;
             if (_recActive) {
-                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Merekam';
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;animation:blink 1s infinite;"></i> Recording';
                 badge.style.cssText = 'padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);';
             } else {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -9909,7 +10955,7 @@ HTML_TEMPLATE = '''
             if (!tbody) return;
             var filtered = _recFilter === 'all' ? _recRows : _recRows.filter(function(r){ return r.device === _recFilter; });
             if (filtered.length === 0) {
-                var msg = _recRows.length > 0 ? 'Tidak ada data untuk filter <strong>' + _recFilter + '</strong>.' : 'Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.';
+                var msg = _recRows.length > 0 ? 'No data for filter <strong>' + _recFilter + '</strong>.' : 'No data yet. Click <strong>Start Record</strong> to begin.';
                 tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">' + msg + '</td></tr>';
                 var rngHide = document.getElementById('rec-date-range'); if (rngHide) rngHide.style.display = 'none';
                 return;
@@ -9924,7 +10970,7 @@ HTML_TEMPLATE = '''
                 return '<tr style="border-bottom:1px solid var(--border);">' +
                     '<td style="padding:6px 10px;white-space:nowrap;color:var(--text-secondary);">' + r.ts + '</td>' +
                     '<td style="padding:6px 10px;text-align:center;font-weight:600;color:' + (r.device==='AC'?'#ef4444':'#eab308') + ';">' + r.device + '</td>' +
-                    '<td style="padding:6px 10px;text-align:right;color:#6366f1;font-weight:600;">' + r.tegangan + '</td>' +
+                    '<td style="padding:6px 10px;text-align:right;color:#6366f1;font-weight:600;">' + r.voltage + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:#f59e0b;font-weight:600;">' + r.arus + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:#ef4444;font-weight:600;">' + r.daya + '</td>' +
                     '<td style="padding:6px 10px;text-align:right;color:#10b981;font-weight:600;">' + r.energi + '</td>' +
@@ -9951,25 +10997,25 @@ HTML_TEMPLATE = '''
             // AC row
             _recRows.push({
                 ts: ts, device: 'AC',
-                tegangan: _recFmt(ac.voltage || ac.tegangan),
+                voltage: _recFmt(ac.voltage || ac.voltage),
                 arus:     _recFmt(ac.current || ac.arus, 3),
                 daya:     _recFmt(ac.power   || ac.active_power, 2),
                 energi:   _recFmt(ac.energy  || ac.total_energy, 4),
                 reaktif:  _recFmt(ac.reactive_power, 2),
                 semu:     _recFmt(ac.apparent_power, 2),
-                freq:     _recFmt(ac.frequency || ac.frekuensi, 2),
+                freq:     _recFmt(ac.frequency || ac.frequency, 2),
                 pf:       _recFmt(ac.pf, 3),
             });
             // Lamp row
             _recRows.push({
-                ts: ts, device: 'Lampu',
-                tegangan: _recFmt(lamp.voltage || lamp.tegangan),
+                ts: ts, device: 'Lamp',
+                voltage: _recFmt(lamp.voltage || lamp.voltage),
                 arus:     _recFmt(lamp.current || lamp.arus, 3),
                 daya:     _recFmt(lamp.power   || lamp.active_power, 2),
                 energi:   _recFmt(lamp.energy  || lamp.total_energy, 4),
                 reaktif:  _recFmt(lamp.reactive_power, 2),
                 semu:     _recFmt(lamp.apparent_power, 2),
-                freq:     _recFmt(lamp.frequency || lamp.frekuensi, 2),
+                freq:     _recFmt(lamp.frequency || lamp.frequency, 2),
                 pf:       _recFmt(lamp.pf, 3),
             });
             _recUpdatePreview();
@@ -9989,7 +11035,7 @@ HTML_TEMPLATE = '''
             _recTimer = setInterval(_recTick, 1000);
             _recUpdateBadge();
             _recStatePush({energy: true});
-            showToast('Rekam data dimulai', 'success');
+            showToast('Recording started', 'success');
         }
 
         function energyRecStop() {
@@ -10002,7 +11048,7 @@ HTML_TEMPLATE = '''
             _recUpdateBadge();
             _recStatePush({energy: false});
             _recServerPush();
-            showToast('Rekaman dihentikan — ' + _recRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _recRows.length + ' rows saved', 'info');
         }
 
         function energyRecClear() {
@@ -10024,16 +11070,16 @@ HTML_TEMPLATE = '''
             _recUpdateBadge();
             _recUpdatePreview();
             var sb = document.getElementById('rec-sync-badge'); if (sb) { sb.innerHTML = '<i class="fas fa-cloud" style="margin-right:4px;font-size:9px;"></i>Sync'; sb.style.color='#6366f1'; sb.style.borderColor='rgba(99,102,241,0.2)'; }
-            showToast('Data rekaman dihapus', 'info');
+            showToast('Recording data cleared', 'info');
         }
 
         function energyExportCSV(device) {
-            if (_recRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
+            if (_recRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
             var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
-            if (rows.length === 0) { showToast('Tidak ada data untuk ' + device, 'error'); return; }
-            var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+            if (rows.length === 0) { showToast('No data for ' + device, 'error'); return; }
+            var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
             var body = rows.map(function(r) {
-                return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
+                return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
             }).join('\\n');
             var now = new Date();
@@ -10042,12 +11088,12 @@ HTML_TEMPLATE = '''
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(rows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(rows.length + ' rows exported: ' + fname, 'success');
         }
 
-        // Hook ke _applyEnergyData — rekam setiap 6 menit (360 detik)
+        // Hook to _applyEnergyData — record every 6 minutes (360 seconds)
         var _lastRecTime = 0;
-        var _REC_INTERVAL_MS = 360000; // 6 menit
+        var _REC_INTERVAL_MS = 360000; // 6 minutes
         var _origApply = _applyEnergyData;
         _applyEnergyData = function(ac, lamp) {
             _origApply(ac, lamp);
@@ -10057,7 +11103,7 @@ HTML_TEMPLATE = '''
             }
         };
 
-        // ==================== REKAM SUHU & HUMIDITY ====================
+        // ==================== RECORD TEMP & HUMIDITY ====================
         function _tempServerPush() {
             fetch('/api/rec/data?type=temp', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -10079,7 +11125,7 @@ HTML_TEMPLATE = '''
 
         var _tempRows = _ssLoad('_tempRows', []), _tempActive = false, _tempStartTs = 0;
         var _tempTimer = null, _lastTempRecTime = 0;
-        var _TEMP_REC_MS = 60000; // 1 menit
+        var _TEMP_REC_MS = 60000; // 1 minute
 
         function _tempFmt(v, d) { var n = parseFloat(v); return Number.isFinite(n) ? n.toFixed(d != null ? d : 1) : '--'; }
 
@@ -10090,7 +11136,11 @@ HTML_TEMPLATE = '''
             var t1   = document.getElementById('dash-ac-temp1')      ? document.getElementById('dash-ac-temp1').textContent      : '--';
             var t2   = document.getElementById('dash-ac-temp2')      ? document.getElementById('dash-ac-temp2').textContent      : '--';
             var t3   = document.getElementById('dash-ac-temp3')      ? document.getElementById('dash-ac-temp3').textContent      : '--';
-            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3 });
+            var setT = document.getElementById('dash-ac-temp')       ? document.getElementById('dash-ac-temp').textContent       : '--';
+            var fan  = document.getElementById('dash-ac-fan-label')  ? document.getElementById('dash-ac-fan-label').textContent  : '--';
+            var mode = document.getElementById('dash-ac-mode')       ? document.getElementById('dash-ac-mode').textContent       : '--';
+            var ctrl = document.getElementById('dash-ac-ctrl-mode')  ? document.getElementById('dash-ac-ctrl-mode').textContent  : '--';
+            _tempRows.push({ ts: ts, temp: temp, hum: hum, t1: t1, t2: t2, t3: t3, setT: setT, fan: fan, mode: mode, ctrl: ctrl });
             _tempUpdatePreview();
             var c = document.getElementById('temp-rec-count');
             if (c) c.textContent = _tempRows.length;
@@ -10114,7 +11164,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('temp-rec-badge');
             if (!b) return;
             if (_tempActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10126,7 +11176,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('temp-rec-preview');
             if (!tbody) return;
             if (_tempRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -10152,7 +11202,7 @@ HTML_TEMPLATE = '''
             _tempTimer = setInterval(_tempTick, 1000);
             _tempUpdateBadge();
             _recStatePush({temp: true});
-            showToast('Rekam suhu & humidity dimulai', 'success');
+            showToast('Temperature & humidity recording started', 'success');
         }
 
         function tempRecStop() {
@@ -10163,7 +11213,7 @@ HTML_TEMPLATE = '''
             _tempUpdateBadge();
             _recStatePush({temp: false});
             _tempServerPush();
-            showToast('Rekaman dihentikan — ' + _tempRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _tempRows.length + ' rows saved', 'info');
         }
 
         function tempRecClear() {
@@ -10175,21 +11225,21 @@ HTML_TEMPLATE = '''
             if (tS2) { tS2.disabled = false; tS2.style.opacity = '1'; }
             if (tE2) { tE2.disabled = true; tE2.style.opacity = '0.5'; }
             _tempUpdateBadge(); _tempUpdatePreview();
-            showToast('Data suhu dihapus', 'info');
+            showToast('Temperature data cleared', 'info');
         }
 
         function tempExportCSV() {
-            if (_tempRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
+            if (_tempRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
+            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
             var body = _tempRows.map(function(r) {
-                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3;
+                return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl;
             }).join('\\n');
             var now = new Date();
-            var fname = 'suhu_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
+            var fname = 'temp_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_tempRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(_tempRows.length + ' rows exported: ' + fname, 'success');
         }
 
         // ==================== REKAM LUX & BRIGHTNESS ====================
@@ -10214,7 +11264,7 @@ HTML_TEMPLATE = '''
 
         var _luxRows = _ssLoad('_luxRows', []), _luxActive = false, _luxStartTs = 0;
         var _luxTimer = null, _lastLuxRecTime = 0;
-        var _LUX_REC_MS = 60000; // 1 menit
+        var _LUX_REC_MS = 60000; // 1 minute
 
         function _luxAddRow() {
             var ts = new Date().toLocaleString('id-ID');
@@ -10247,7 +11297,7 @@ HTML_TEMPLATE = '''
             var b = document.getElementById('lux-rec-badge');
             if (!b) return;
             if (_luxActive) {
-                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Merekam...';
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;color:#ef4444;animation:pulse 1s infinite;"></i> Recording...';
                 b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#ef4444'; b.style.borderColor = 'rgba(239,68,68,0.3)';
             } else {
                 b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Idle';
@@ -10259,7 +11309,7 @@ HTML_TEMPLATE = '''
             var tbody = document.getElementById('lux-rec-preview');
             if (!tbody) return;
             if (_luxRows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">Belum ada data. Klik <strong>Mulai Rekam</strong> untuk memulai.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--text-secondary);">No data yet. Click <strong>Start Record</strong> to begin.</td></tr>';
                 return;
             }
             // Tampilkan 100 baris terbaru (scroll)
@@ -10286,7 +11336,7 @@ HTML_TEMPLATE = '''
             _luxTimer = setInterval(_luxTick, 1000);
             _luxUpdateBadge();
             _recStatePush({lux: true});
-            showToast('Rekam lux & brightness dimulai', 'success');
+            showToast('Lux & brightness recording started', 'success');
         }
 
         function luxRecStop() {
@@ -10297,7 +11347,7 @@ HTML_TEMPLATE = '''
             _luxUpdateBadge();
             _recStatePush({lux: false});
             _luxServerPush();
-            showToast('Rekaman dihentikan — ' + _luxRows.length + ' baris tersimpan', 'info');
+            showToast('Recording stopped — ' + _luxRows.length + ' rows saved', 'info');
         }
 
         function luxRecClear() {
@@ -10309,12 +11359,12 @@ HTML_TEMPLATE = '''
             if (lS2) { lS2.disabled = false; lS2.style.opacity = '1'; }
             if (lE2) { lE2.disabled = true; lE2.style.opacity = '0.5'; }
             _luxUpdateBadge(); _luxUpdatePreview();
-            showToast('Data lux dihapus', 'info');
+            showToast('Lux data cleared', 'info');
         }
 
         function luxExportCSV() {
-            if (_luxRows.length === 0) { showToast('Belum ada data yang direkam', 'error'); return; }
-            var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+            if (_luxRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
+            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
             var body = _luxRows.map(function(r) {
                 return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
             }).join('\\n');
@@ -10323,7 +11373,7 @@ HTML_TEMPLATE = '''
                         String(now.getDate()).padStart(2,'0') + '_' +
                         String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_luxRows.length + ' baris berhasil diekspor: ' + fname, 'success');
+            showToast(_luxRows.length + ' rows exported: ' + fname, 'success');
         }
 
         // ==================== OCCUPANCY DAILY RECORDING ====================
@@ -10346,7 +11396,7 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: _OCC_REC_LABEL,
                     datasets: [{
-                        label: 'Jumlah Orang',
+                        label: 'Person Count',
                         data: new Array(24).fill(null),
                         backgroundColor: 'rgba(168,85,247,0.5)',
                         borderColor: '#a855f7',
@@ -10358,12 +11408,12 @@ HTML_TEMPLATE = '''
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: {
-                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' orang' : 'Belum direkam'; } }
+                        callbacks: { label: function(c) { return c.raw !== null ? c.raw + ' persons' : 'Not recorded'; } }
                     }},
                     scales: {
                         x: { ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', maxRotation: 0 } },
                         y: { beginAtZero: true, ticks: { font: {size:10}, color: 'rgba(100,116,139,0.9)', stepSize: 1 },
-                             title: { display: true, text: 'Jumlah Orang', font: {size:10}, color: '#a855f7' } }
+                             title: { display: true, text: 'Person Count', font: {size:10}, color: '#a855f7' } }
                     }
                 }
             });
@@ -10412,14 +11462,14 @@ HTML_TEMPLATE = '''
                 filtered.forEach(function(r){ if (r.hour >= 0 && r.hour < 24) data[r.hour] = r.count; });
                 _occChart.data.labels = _OCC_REC_LABEL;
                 _occChart.data.datasets[0].data = data;
-                _occChart.data.datasets[0].label = 'Jumlah Orang (per jam)';
+                _occChart.data.datasets[0].label = 'Person Count (per hour)';
             } else {
                 var dayMap = {};
                 filtered.forEach(function(r){ var d = r.ts.substring(0,10); dayMap[d] = (dayMap[d]||0) + (r.count||0); });
                 var days = Object.keys(dayMap).sort();
                 _occChart.data.labels = days;
                 _occChart.data.datasets[0].data = days.map(function(d){ return dayMap[d]; });
-                _occChart.data.datasets[0].label = 'Total Orang per Hari';
+                _occChart.data.datasets[0].label = 'Total Persons per Day';
             }
             _occChart.update('none');
             _occUpdatePreview();
@@ -10430,7 +11480,7 @@ HTML_TEMPLATE = '''
             if (!tbody) return;
             var filtered = _occGetFilteredRows();
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Belum ada data untuk rentang ini&hellip;</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">No data for this range&hellip;</td></tr>';
                 return;
             }
             tbody.innerHTML = filtered.slice().reverse().map(function(r) {
@@ -10448,9 +11498,9 @@ HTML_TEMPLATE = '''
             var h = now.getHours();
             var today = now.toISOString().substring(0, 10);
             var dateHour = today + ' ' + String(h).padStart(2, '0');
-            // Sudah direkam untuk jam+tanggal ini?
+            // Already recorded for this hour+date?
             if (_occRows.some(function(r){ return r.ts.substring(0,13) === dateHour; })) return;
-            // Prune data lebih dari 30 hari
+            // Prune data older than 30 days
             var cutoff = new Date(now - 30*24*60*60*1000).toISOString().substring(0,10);
             _occRows = _occRows.filter(function(r){ return r.ts.substring(0,10) >= cutoff; });
             var countEl = document.getElementById('cam-count-display');
@@ -10463,7 +11513,7 @@ HTML_TEMPLATE = '''
             _occLastHour = h;
             _ssSave('_occRows', _occRows);
             _occRefreshChart();
-            showToast('Occupancy jam ' + String(h).padStart(2,'0') + ':00 direkam — ' + count + ' orang', 'info');
+            showToast('Occupancy at ' + String(h).padStart(2,'0') + ':00 recorded — ' + count + ' persons', 'info');
         }
 
         function occClear() {
@@ -10473,12 +11523,12 @@ HTML_TEMPLATE = '''
             _occUpdatePreview();
             var countEl = document.getElementById('occ-count'); if (countEl) countEl.textContent = '0';
             var totalEl = document.getElementById('occ-total-today'); if (totalEl) totalEl.textContent = '0';
-            showToast('Data occupancy dihapus', 'info');
+            showToast('Occupancy data cleared', 'info');
         }
 
         function occExportCSV() {
-            if (_occRows.length === 0) { showToast('Belum ada data occupancy', 'error'); return; }
-            var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+            if (_occRows.length === 0) { showToast('No occupancy data yet', 'error'); return; }
+            var header = 'Time,Hour,Person Count,Confidence\\n';
             var body = _occRows.map(function(r) {
                 return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
             }).join('\\n');
@@ -10486,7 +11536,7 @@ HTML_TEMPLATE = '''
             var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '.csv';
             downloadCSV(fname, header + body);
-            showToast(_occRows.length + ' data berhasil diekspor: ' + fname, 'success');
+            showToast(_occRows.length + ' data exported: ' + fname, 'success');
         }
 
         // Run occupancy check every 60 seconds; reset and record new hour
@@ -10500,7 +11550,7 @@ HTML_TEMPLATE = '''
                 var minsLeft = 59 - now.getMinutes();
                 var secsLeft = 59 - now.getSeconds();
                 var el = document.getElementById('occ-next-in');
-                if (el) el.textContent = minsLeft + ' mnt ' + String(secsLeft).padStart(2,'0') + ' dtk';
+                if (el) el.textContent = minsLeft + ' min ' + String(secsLeft).padStart(2,'0') + ' sec';
             } catch(e) {}
         }, 1000);
         // Also init chart once DOM is ready (delayed)
@@ -10531,16 +11581,37 @@ HTML_TEMPLATE = '''
             if (data.type === 'lamp') {
                 const now = new Date();
                 const timeStr = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                
-                const luxAvg = data.data.lux_avg || 0;
-                const brightAvg = data.data.brightness_avg || 0;
-                
-                if (charts.lampLux && charts.lampLux.data.labels.length < 50) {
+                const lamp = data.data;
+                const luxAvg    = parseFloat(lamp.lux_avg)    || 0;
+                const brightAvg = parseFloat(lamp.brightness_avg) || 0;
+                // local setText — does not depend on outer scope
+                const _set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+
+                // Update Lamp Dashboard lux dan brightness secara real-time
+                _set('dash-lux1',    (lamp.lux1    != null ? parseFloat(lamp.lux1)    : 0).toFixed(0));
+                _set('dash-lux2',    (lamp.lux2    != null ? parseFloat(lamp.lux2)    : 0).toFixed(0));
+                _set('dash-lux3',    (lamp.lux3    != null ? parseFloat(lamp.lux3)    : 0).toFixed(0));
+                _set('dash-lux-avg', luxAvg.toFixed(1));
+                _set('ctrl-lux1',    (lamp.lux1    != null ? parseFloat(lamp.lux1)    : 0).toFixed(0));
+                _set('ctrl-lux2',    (lamp.lux2    != null ? parseFloat(lamp.lux2)    : 0).toFixed(0));
+                _set('ctrl-lux3',    (lamp.lux3    != null ? parseFloat(lamp.lux3)    : 0).toFixed(0));
+                _set('dash-bright1', Math.round(parseFloat(lamp.brightness1) || 0));
+                _set('dash-bright2', Math.round(parseFloat(lamp.brightness2) || 0));
+
+                if (charts.lampLux) {
+                    if (charts.lampLux.data.labels.length >= 50) {
+                        charts.lampLux.data.labels.shift();
+                        charts.lampLux.data.datasets[0].data.shift();
+                    }
                     charts.lampLux.data.labels.push(timeStr);
                     charts.lampLux.data.datasets[0].data.push(luxAvg);
                     charts.lampLux.update('none');
                 }
-                if (charts.lampBright && charts.lampBright.data.labels.length < 50) {
+                if (charts.lampBright) {
+                    if (charts.lampBright.data.labels.length >= 50) {
+                        charts.lampBright.data.labels.shift();
+                        charts.lampBright.data.datasets[0].data.shift();
+                    }
                     charts.lampBright.data.labels.push(timeStr);
                     charts.lampBright.data.datasets[0].data.push(Math.round(brightAvg));
                     charts.lampBright.update('none');
@@ -10747,7 +11818,7 @@ HTML_TEMPLATE = '''
                 const autoOffTriggered = data.data.auto_off_triggered;
                 if (autoOffEl) {
                     if (autoOffTriggered) {
-                        autoOffEl.textContent = 'MATI';
+                        autoOffEl.textContent = 'OFF';
                         autoOffEl.style.color = '#ef4444';
                         if (autoOffLabel) autoOffLabel.textContent = 'AC already auto-OFF';
                     } else if (autoOffIn !== undefined && autoOffIn >= 0 && !personDetected) {
@@ -10779,11 +11850,21 @@ HTML_TEMPLATE = '''
             
             if (status === 'running') {
                 showToast(algo + ' optimization running...', 'success');
-                // Disable run buttons while running
                 document.querySelectorAll('.ml-param-grid button').forEach(btn => {
                     btn.disabled = true;
                     btn.style.opacity = '0.5';
                 });
+                // Reset PSO iteration table when new run starts
+                if (algo === 'PSO') {
+                    const tbody = document.getElementById('pso-iter-tbody');
+                    if (tbody) tbody.innerHTML = '';
+                    const chart = charts.psoFitness;
+                    if (chart) {
+                        chart.data.labels = [];
+                        chart.data.datasets.forEach(ds => ds.data = []);
+                        chart.update('none');
+                    }
+                }
             } else if (status === 'completed') {
                 var modeLabel = '';
                 if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
@@ -10797,6 +11878,15 @@ HTML_TEMPLATE = '''
                 if (data.ga_solution && data.ga_solution.mode) {
                     var modeEl = document.getElementById('ml-ga-mode');
                     if (modeEl) modeEl.textContent = data.ga_solution.mode;
+                    var rhEl = document.getElementById('ml-ga-rh');
+                    if (rhEl && data.ga_solution.set_rh != null) rhEl.textContent = data.ga_solution.set_rh;
+                }
+                // Directly update GA chart from socket payload (faster than waiting for refreshMLData fetch)
+                if (data.ga_history && data.ga_history.length > 0) {
+                    try { updateMLChart('gaFitness', data.ga_history, 'GA'); } catch(e) { console.warn('[ML] Direct GA chart update failed:', e); }
+                }
+                if (data.pso_history && data.pso_history.length > 0) {
+                    try { updateMLChart('psoFitness', data.pso_history, 'PSO'); } catch(e) { console.warn('[ML] Direct PSO chart update failed:', e); }
                 }
                 // Refresh ML data
                 refreshMLData();
@@ -10917,7 +12007,7 @@ HTML_TEMPLATE = '''
                 });
             } catch(e) {}
             try { initCharts(); } catch(e) { console.error('[ERROR] initCharts:', e); }
-            // ML charts initialized lazily on first showPage('ml-optimization') — canvas must be visible first
+            // ML charts initialized on first tab open via requestAnimationFrame (canvas must be visible first)
             // Restore recording previews from sessionStorage
             try { _recUpdatePreview(); } catch(e) {}
             try { _tempUpdatePreview(); } catch(e) {}
@@ -10941,7 +12031,7 @@ HTML_TEMPLATE = '''
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSA] MQTT TIDAK TERHUBUNG!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Tidak diketahui') + '\\n\\nKlik tombol "Test Frontend" atau "Test MQTT Broker" di bawah.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Unknown') + '\\n\\nClick "Test Frontend" or "Test MQTT Broker" button below.';
                         }
                     }
                 }).catch(function() {});
@@ -10998,7 +12088,7 @@ HTML_TEMPLATE = '''
                 _drpCallback = callback;
                 _drpAllRows  = rowsRef;
                 var sub = document.getElementById('drp-subtitle');
-                if (sub) sub.textContent = subtitle || 'Export data dalam rentang yang dipilih';
+                if (sub) sub.textContent = subtitle || 'Export data in the selected range';
                 var today = new Date().toISOString().substring(0,10);
                 var from30 = new Date(Date.now() - 29*24*60*60*1000).toISOString().substring(0,10);
                 var fromVal = from30;
@@ -11033,8 +12123,8 @@ HTML_TEMPLATE = '''
             window.drpConfirm = function() {
                 var from = document.getElementById('drp-from').value;
                 var to   = document.getElementById('drp-to').value;
-                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
-                if (from > to)    { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
+                if (!from || !to) { showToast('Please select a date range first', 'error'); return; }
+                if (from > to)    { showToast('Start date must be before end date', 'error'); return; }
                 var modal = document.getElementById('drp-modal');
                 modal.style.display = 'none';
                 modal.style.pointerEvents = 'none';
@@ -11053,65 +12143,65 @@ HTML_TEMPLATE = '''
 
             window.energyExportRange = function(device) {
                 showDateRangePicker(
-                    'Export rekaman energi' + (device && device !== 'all' ? ' (' + device + ')' : ' (Semua)'),
+                    'Export rekaman energi' + (device && device !== 'all' ? ' (' + device + ')' : ' (All)'),
                     _recRows,
                     function(from, to) {
                         var base = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
                         var rows = drpFilter(base, from, to);
-                        if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                        var header = 'Waktu,Perangkat,Tegangan (V),Arus (A),Daya Aktif (W),Energi (kWh),Daya Reaktif (VAR),Daya Semu (VA),Frekuensi (Hz),Power Factor\\n';
+                        if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                        var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
                         var body = rows.map(function(r) {
-                            return '"' + r.ts + '",' + r.device + ',' + r.tegangan + ',' + r.arus + ',' +
+                            return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                                    r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
                         }).join('\\n');
                         var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
-                        var fname = 'energy' + suffix + '_' + from + '_sd_' + to + '.csv';
+                        var fname = 'energy' + suffix + '_' + from + '_to_' + to + '.csv';
                         downloadCSV(fname, header + body);
-                        showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                        showToast(rows.length + ' rows exported: ' + fname, 'success');
                     }
                 );
             };
 
             window.tempExportRange = function() {
-                showDateRangePicker('Export rekaman suhu & humidity', _tempRows, function(from, to) {
+                showDateRangePicker('Export temperature & humidity recording', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C)\\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3; }).join('\\n');
-                    var fname = 'suhu_' + from + '_sd_' + to + '.csv';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\\n');
+                    var fname = 'temp_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' rows exported: ' + fname, 'success');
                 });
             };
 
             window.luxExportRange = function() {
                 showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
                     var rows = drpFilter(_luxRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
                     var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\\n');
-                    var fname = 'lux_' + from + '_sd_' + to + '.csv';
+                    var fname = 'lux_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' baris diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' rows exported: ' + fname, 'success');
                 });
             };
 
             window.occExportRange = function() {
                 showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
                     var rows = drpFilter(_occRows, from, to);
-                    if (rows.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    var header = 'Waktu,Jam,Jumlah Orang,Confidence\\n';
+                    if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    var header = 'Time,Hour,Person Count,Confidence\\n';
                     var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\\n');
-                    var fname = 'occupancy_' + from + '_sd_' + to + '.csv';
+                    var fname = 'occupancy_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
-                    showToast(rows.length + ' data diekspor: ' + fname, 'success');
+                    showToast(rows.length + ' data exported: ' + fname, 'success');
                 });
             };
 
             window.exportChartRange = function(chartName, valueLabel) {
                 var chart = charts[chartName];
                 if (!chart || !chart.data.labels || chart.data.labels.length === 0) {
-                    showToast('Tidak ada data untuk ' + chartName, 'error'); return;
+                    showToast('No data for ' + chartName, 'error'); return;
                 }
                 var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
                 showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
@@ -11123,9 +12213,9 @@ HTML_TEMPLATE = '''
                         var val = chart.data.datasets[0].data[i];
                         lines.push('"' + label + '",' + (val !== null && val !== undefined ? val : ''));
                     });
-                    if (lines.length === 0) { showToast('Tidak ada data untuk rentang ' + from + ' s/d ' + to, 'error'); return; }
-                    downloadCSV(chartName + '_' + from + '_sd_' + to + '.csv', header + lines.join('\\n') + '\\n');
-                    showToast(lines.length + ' poin diekspor', 'success');
+                    if (lines.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
+                    downloadCSV(chartName + '_' + from + '_to_' + to + '.csv', header + lines.join('\\n') + '\\n');
+                    showToast(lines.length + ' points exported', 'success');
                 });
             };
 
@@ -11161,16 +12251,16 @@ HTML_TEMPLATE = '''
                 var toEl   = document.getElementById('db-' + prefix + '-to');
                 var from = fromEl ? fromEl.value : '';
                 var to   = toEl   ? toEl.value   : '';
-                if (!from || !to) { showToast('Pilih rentang tanggal terlebih dahulu', 'error'); return; }
-                if (from > to) { showToast('Tanggal mulai harus sebelum tanggal akhir', 'error'); return; }
-                showToast('Mengambil data dari database...', 'success');
+                if (!from || !to) { showToast('Please select a date range first', 'error'); return; }
+                if (from > to) { showToast('Start date must be before end date', 'error'); return; }
+                showToast('Fetching data from database...', 'success');
                 var url = '/api/export/csv?type=' + type + '&from=' + from + '&to=' + to;
                 fetch(url).then(function(r) {
                     if (r.ok && r.headers.get('Content-Type') && r.headers.get('Content-Type').indexOf('text/csv') >= 0) {
                         return r.blob().then(function(blob) {
                             var a = document.createElement('a');
                             a.href = URL.createObjectURL(blob);
-                            var fname = type + '_' + from + '_sd_' + to + '.csv';
+                            var fname = type + '_' + from + '_to_' + to + '.csv';
                             a.download = fname;
                             document.body.appendChild(a);
                             a.click();
@@ -11179,7 +12269,7 @@ HTML_TEMPLATE = '''
                         });
                     } else {
                         return r.json().then(function(j) {
-                            showToast((j && j.error) ? j.error : 'Gagal export data', 'error');
+                            showToast((j && j.error) ? j.error : 'Failed to export data', 'error');
                         });
                     }
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
@@ -11193,29 +12283,29 @@ HTML_TEMPLATE = '''
     <div id="drp-modal" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
         <div style="background:var(--bg-card);border-radius:20px;padding:30px 28px 24px;min-width:310px;max-width:380px;width:90%;box-shadow:0 12px 48px rgba(0,0,0,0.25);border:1px solid var(--border);position:relative;">
             <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px;display:flex;align-items:center;gap:8px;">
-                <span style="font-size:20px;">&#128197;</span> Pilih Rentang Tanggal
+                <span style="font-size:20px;">&#128197;</span> Select Date Range
             </div>
-            <div id="drp-subtitle" style="font-size:12px;color:var(--text-secondary);margin-bottom:20px;">Export data dalam rentang yang dipilih</div>
+            <div id="drp-subtitle" style="font-size:12px;color:var(--text-secondary);margin-bottom:20px;">Export data in the selected range</div>
             <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:22px;">
                 <div>
-                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Dari Tanggal</label>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">From Date</label>
                     <input type="date" id="drp-from" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
                 </div>
                 <div>
-                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">Sampai Tanggal</label>
+                    <label style="font-size:11px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:5px;">To Date</label>
                     <input type="date" id="drp-to" style="width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;">
                 </div>
             </div>
             <!-- Shortcut buttons -->
             <div style="display:flex;gap:5px;margin-bottom:20px;flex-wrap:wrap;">
-                <button onclick="drpShortcut(1)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Hari ini</button>
-                <button onclick="drpShortcut(7)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">7 Hari</button>
-                <button onclick="drpShortcut(30)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">30 Hari</button>
-                <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Semua</button>
+                <button onclick="drpShortcut(1)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">Today</button>
+                <button onclick="drpShortcut(7)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">7 Days</button>
+                <button onclick="drpShortcut(30)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">30 Days</button>
+                <button onclick="drpShortcut(0)" style="padding:4px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:11px;cursor:pointer;">All</button>
             </div>
             <div style="display:flex;gap:10px;">
-                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Ekspor CSV</button>
-                <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Batal</button>
+                <button onclick="drpConfirm()" style="flex:1;padding:11px;border-radius:11px;border:none;background:linear-gradient(135deg,#6366f1,#4f46e5);color:#fff;font-size:13px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:6px;"></i>Export CSV</button>
+                <button onclick="drpCancel()" style="padding:11px 18px;border-radius:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;">Cancel</button>
             </div>
         </div>
     </div>
@@ -11254,8 +12344,10 @@ if __name__ == '__main__':
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
 
-    # Restore last GA/PSO results from InfluxDB (survive restarts)
-    print("  [RESTORE] Loading last optimization results from InfluxDB...")
+    # Restore last GA/PSO results — first from JSON file (has stats/history arrays),
+    # then supplement with InfluxDB (has latest scalar values)
+    print("  [RESTORE] Loading last optimization results...")
+    load_opt_results_file()
     restore_opt_results()
 
     # Start sensor fault detection thread
@@ -11277,6 +12369,6 @@ if __name__ == '__main__':
         })
         print("  [MySQL] Energy polling thread started")
     except Exception as _me:
-        print(f"  [MySQL] WARNING: mysql_energy tidak bisa dimuat: {_me}")
+        print(f"  [MySQL] WARNING: mysql_energy could not be loaded: {_me}")
 
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
