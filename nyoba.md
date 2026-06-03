@@ -5375,6 +5375,12 @@ HTML_TEMPLATE = '''
         <div class="nav-item" onclick="showPage('control-lamp')">
             <span>Lamp Control</span>
         </div>
+        <div class="nav-item" onclick="showPage('control-outlet')">
+            <span>Outlet Control</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
+            <span>Outlet Analysis</span>
+        </div>
         <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
             <span>ML Optimization</span>
         </div>
@@ -7197,6 +7203,208 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
         </div>
+
+        <!-- Outlet Control Page -->
+        <div id="control-outlet" class="page">
+            <div class="header">
+                <h1>Outlet Control Panel</h1>
+                <p>Smart power outlet control — ON/OFF per outlet via MQTT</p>
+            </div>
+
+            <!-- Outlet Status Summary -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px;margin-bottom:20px;">
+                <div class="stat-card" style="text-align:center;">
+                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 1</div>
+                    <div id="outlet1-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
+                    <div id="outlet1-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+                </div>
+                <div class="stat-card" style="text-align:center;">
+                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 2</div>
+                    <div id="outlet2-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
+                    <div id="outlet2-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+                </div>
+                <div class="stat-card" style="text-align:center;">
+                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 3</div>
+                    <div id="outlet3-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
+                    <div id="outlet3-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+                </div>
+                <div class="stat-card" style="text-align:center;">
+                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 4</div>
+                    <div id="outlet4-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
+                    <div id="outlet4-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+                </div>
+            </div>
+
+            <!-- Outlet ON/OFF Cards -->
+            <div class="control-panel">
+                <div class="control-title">Outlet Switches</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:16px;">
+
+                    <!-- Outlet 1 -->
+                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div id="outlet1-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 1</div>
+                            <div id="outlet1-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'ON')">ON</button>
+                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'OFF')">OFF</button>
+                        </div>
+                    </div>
+
+                    <!-- Outlet 2 -->
+                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div id="outlet2-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 2</div>
+                            <div id="outlet2-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(2,'ON')">ON</button>
+                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(2,'OFF')">OFF</button>
+                        </div>
+                    </div>
+
+                    <!-- Outlet 3 -->
+                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div id="outlet3-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 3</div>
+                            <div id="outlet3-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(3,'ON')">ON</button>
+                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(3,'OFF')">OFF</button>
+                        </div>
+                    </div>
+
+                    <!-- Outlet 4 -->
+                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div id="outlet4-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 4</div>
+                            <div id="outlet4-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(4,'ON')">ON</button>
+                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(4,'OFF')">OFF</button>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- All OFF button -->
+                <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+                    <button class="btn btn-danger" style="flex:1;padding:14px;font-size:14px;border-radius:10px;font-weight:700;" onclick="outletAllOff()">ALL OUTLETS OFF</button>
+                    <button class="btn btn-success" style="flex:1;padding:14px;font-size:14px;border-radius:10px;font-weight:700;" onclick="outletAllOn()">ALL OUTLETS ON</button>
+                </div>
+
+                <div style="margin-top:14px;font-size:12px;color:var(--text-secondary);text-align:center;">
+                    MQTT topic: <code style="background:rgba(37,99,235,0.1);padding:2px 7px;border-radius:4px;color:#2563eb;">smartroom/outlet/control</code>
+                </div>
+            </div>
+        </div>
+
+        <!-- Outlet Analysis Page -->
+        <div id="outlet-analysis" class="page">
+            <div class="header">
+                <h1>Outlet Analysis</h1>
+                <p>Power consumption monitoring per outlet over time</p>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Total Power</span>
+                        <div class="stat-icon" style="background:rgba(37,99,235,0.15);color:#2563eb;"><i class="fas fa-bolt"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-total-power" style="color:#2563eb;">--</span><small style="font-size:13px;color:var(--text-secondary);">W</small></div>
+                    <div class="stat-change">All outlets combined</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Today Energy</span>
+                        <div class="stat-icon" style="background:rgba(14,165,233,0.15);color:#0ea5e9;"><i class="fas fa-chart-bar"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-today-kwh" style="color:#0ea5e9;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
+                    <div class="stat-change">Energy used today</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Active Outlets</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15);color:#3b82f6;"><i class="fas fa-plug"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-active-count" style="color:#3b82f6;">--</span><small style="font-size:13px;color:var(--text-secondary);">/4</small></div>
+                    <div class="stat-change">Currently ON</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Peak Power</span>
+                        <div class="stat-icon" style="background:rgba(30,64,175,0.15);color:#1e40af;"><i class="fas fa-arrow-up"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-peak-power" style="color:#1e40af;">--</span><small style="font-size:13px;color:var(--text-secondary);">W</small></div>
+                    <div class="stat-change">Peak in selected period</div>
+                </div>
+            </div>
+
+            <!-- Power Chart -->
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Outlet Power Usage (W)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportOutletCSV()" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn active" id="outlet-range-1h" onclick="loadOutletAnalytics('1h',this)">1h</button>
+                        <button class="chart-option-btn" id="outlet-range-6h" onclick="loadOutletAnalytics('6h',this)">6h</button>
+                        <button class="chart-option-btn" id="outlet-range-24h" onclick="loadOutletAnalytics('24h',this)">24h</button>
+                        <button class="chart-option-btn" id="outlet-range-7d" onclick="loadOutletAnalytics('7d',this)">7d</button>
+                    </div>
+                </div>
+                <canvas id="outletPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- Energy Consumption Chart -->
+            <div class="chart-container" style="margin-top:18px;">
+                <div class="chart-header">
+                    <div class="chart-title">Energy Consumption per Outlet (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" id="outlet-kwh-24h" onclick="loadOutletKwhChart('24h',this)">24h</button>
+                        <button class="chart-option-btn" id="outlet-kwh-7d" onclick="loadOutletKwhChart('7d',this)">7d</button>
+                        <button class="chart-option-btn" id="outlet-kwh-30d" onclick="loadOutletKwhChart('30d',this)">30d</button>
+                    </div>
+                </div>
+                <canvas id="outletKwhChart" height="80"></canvas>
+            </div>
+
+            <!-- Per-Outlet Breakdown -->
+            <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;">
+                <div style="padding:16px;border-radius:14px;border:1px solid rgba(37,99,235,0.2);background:rgba(37,99,235,0.04);">
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 1</div>
+                    <div style="font-size:22px;font-weight:700;color:#2563eb;"><span id="oa-o1-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o1-kwh" style="font-weight:600;color:#2563eb;">--</span> kWh</div>
+                    <div id="oa-o1-bar" style="height:4px;border-radius:2px;background:rgba(37,99,235,0.15);margin-top:8px;"><div id="oa-o1-bar-fill" style="height:100%;border-radius:2px;background:#2563eb;width:0%;"></div></div>
+                </div>
+                <div style="padding:16px;border-radius:14px;border:1px solid rgba(14,165,233,0.2);background:rgba(14,165,233,0.04);">
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 2</div>
+                    <div style="font-size:22px;font-weight:700;color:#0ea5e9;"><span id="oa-o2-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o2-kwh" style="font-weight:600;color:#0ea5e9;">--</span> kWh</div>
+                    <div id="oa-o2-bar" style="height:4px;border-radius:2px;background:rgba(14,165,233,0.15);margin-top:8px;"><div id="oa-o2-bar-fill" style="height:100%;border-radius:2px;background:#0ea5e9;width:0%;"></div></div>
+                </div>
+                <div style="padding:16px;border-radius:14px;border:1px solid rgba(59,130,246,0.2);background:rgba(59,130,246,0.04);">
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 3</div>
+                    <div style="font-size:22px;font-weight:700;color:#3b82f6;"><span id="oa-o3-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o3-kwh" style="font-weight:600;color:#3b82f6;">--</span> kWh</div>
+                    <div id="oa-o3-bar" style="height:4px;border-radius:2px;background:rgba(59,130,246,0.15);margin-top:8px;"><div id="oa-o3-bar-fill" style="height:100%;border-radius:2px;background:#3b82f6;width:0%;"></div></div>
+                </div>
+                <div style="padding:16px;border-radius:14px;border:1px solid rgba(30,64,175,0.2);background:rgba(30,64,175,0.04);">
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 4</div>
+                    <div style="font-size:22px;font-weight:700;color:#1e40af;"><span id="oa-o4-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o4-kwh" style="font-weight:600;color:#1e40af;">--</span> kWh</div>
+                    <div id="oa-o4-bar" style="height:4px;border-radius:2px;background:rgba(30,64,175,0.15);margin-top:8px;"><div id="oa-o4-bar-fill" style="height:100%;border-radius:2px;background:#1e40af;width:0%;"></div></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Toast Notification -->
@@ -7247,7 +7455,7 @@ HTML_TEMPLATE = '''
 
         // ==================== ROLE-BASED ACCESS CONTROL ====================
         var userRole = 'admin'; // default until /api/auth/role responds
-        var ADMIN_PAGES = ['ac-analytics','lamp-analytics','camera','energy','ml-optimization','logs','occupancy-feedback'];
+        var ADMIN_PAGES = ['ac-analytics','lamp-analytics','camera','energy','ml-optimization','logs','occupancy-feedback','outlet-analysis'];
 
         function applyRoleRestrictions(role, username) {
             userRole = role;
@@ -8630,6 +8838,182 @@ HTML_TEMPLATE = '''
                     }
                 }, 120);
             }
+            if (pageId === 'control-outlet') {
+                try { refreshOutletStatus(); } catch(e) { console.error('[NAV] outlet status error:', e); }
+            }
+            if (pageId === 'outlet-analysis') {
+                requestAnimationFrame(function() {
+                    try { initOutletCharts(); } catch(e) { console.error('[NAV] outlet chart init error:', e); }
+                    try { loadOutletAnalytics('1h', document.getElementById('outlet-range-1h')); } catch(e) {}
+                    try { loadOutletKwhChart('24h', document.getElementById('outlet-kwh-24h')); } catch(e) {}
+                    try { refreshOutletStatus(); } catch(e) {}
+                });
+            }
+        }
+
+        // ==================== OUTLET CONTROL ====================
+        var outletStates = {1:'OFF', 2:'OFF', 3:'OFF', 4:'OFF'};
+        var outletCharts = {};
+
+        function outletControl(num, state) {
+            fetch('/api/outlet/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({outlet: num, state: state})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'ok' || data.success) {
+                    updateOutletUI(num, state);
+                    showToast('Outlet ' + num + ' turned ' + state, state === 'ON' ? 'success' : 'info');
+                } else {
+                    showToast('Outlet ' + num + ' command failed: ' + (data.message || 'unknown error'), 'error');
+                }
+            })
+            .catch(e => showToast('Outlet control error: ' + e.message, 'error'));
+        }
+
+        function outletAllOff() {
+            [1,2,3,4].forEach(function(n) { outletControl(n, 'OFF'); });
+        }
+
+        function outletAllOn() {
+            [1,2,3,4].forEach(function(n) { outletControl(n, 'ON'); });
+        }
+
+        function updateOutletUI(num, state) {
+            outletStates[num] = state;
+            var dot = document.getElementById('outlet'+num+'-dot');
+            var badge = document.getElementById('outlet'+num+'-status-badge');
+            var isOn = state === 'ON';
+            if (dot) { dot.style.background = isOn ? '#2563eb' : '#1e40af'; }
+            if (badge) {
+                badge.textContent = state;
+                badge.style.background = isOn ? 'rgba(37,99,235,0.18)' : 'rgba(30,64,175,0.15)';
+                badge.style.color = isOn ? '#2563eb' : '#1e40af';
+            }
+            // Update active count
+            var activeCount = Object.values(outletStates).filter(function(s){ return s==='ON'; }).length;
+            var el = document.getElementById('outlet-active-count');
+            if (el) el.textContent = activeCount;
+        }
+
+        function refreshOutletStatus() {
+            fetch('/api/outlet/status')
+            .then(r => r.json())
+            .then(data => {
+                if (!data || !data.outlets) return;
+                data.outlets.forEach(function(o) {
+                    updateOutletUI(o.id, o.state);
+                    var pw = document.getElementById('outlet'+o.id+'-power');
+                    if (pw) pw.textContent = (o.power !== undefined ? o.power : '--') + 'W';
+                    var oaPw = document.getElementById('oa-o'+o.id+'-power');
+                    if (oaPw) oaPw.textContent = (o.power !== undefined ? o.power : '--');
+                    var oaKwh = document.getElementById('oa-o'+o.id+'-kwh');
+                    if (oaKwh) oaKwh.textContent = (o.energy !== undefined ? o.energy.toFixed(3) : '--');
+                });
+                if (data.total_power !== undefined) {
+                    var tp = document.getElementById('outlet-total-power');
+                    if (tp) tp.textContent = data.total_power;
+                }
+                if (data.today_kwh !== undefined) {
+                    var tk = document.getElementById('outlet-today-kwh');
+                    if (tk) tk.textContent = data.today_kwh.toFixed(3);
+                }
+                if (data.peak_power !== undefined) {
+                    var pk = document.getElementById('outlet-peak-power');
+                    if (pk) pk.textContent = data.peak_power;
+                }
+                // Update progress bars
+                var maxPower = Math.max.apply(null, (data.outlets || []).map(function(o){ return o.power || 0; })) || 1;
+                (data.outlets || []).forEach(function(o) {
+                    var fill = document.getElementById('oa-o'+o.id+'-bar-fill');
+                    if (fill) fill.style.width = (Math.min(100, ((o.power||0)/maxPower)*100)).toFixed(1) + '%';
+                });
+            })
+            .catch(function(){});
+        }
+
+        function loadOutletAnalytics(range, btn) {
+            document.querySelectorAll('[id^="outlet-range-"]').forEach(function(b){ b.classList.remove('active'); });
+            if (btn) btn.classList.add('active');
+            fetch('/api/outlet/history?range=' + range)
+            .then(r => r.json())
+            .then(data => {
+                if (!outletCharts.power) { initOutletCharts(); }
+                var ch = outletCharts.power;
+                if (!ch || !data.labels) return;
+                ch.data.labels = data.labels;
+                ['outlet1','outlet2','outlet3','outlet4'].forEach(function(k, i) {
+                    if (ch.data.datasets[i] && data[k]) ch.data.datasets[i].data = data[k];
+                });
+                ch.update();
+            })
+            .catch(function(){});
+        }
+
+        function loadOutletKwhChart(range, btn) {
+            document.querySelectorAll('[id^="outlet-kwh-"]').forEach(function(b){ b.classList.remove('active'); });
+            if (btn) btn.classList.add('active');
+            fetch('/api/outlet/energy?range=' + range)
+            .then(r => r.json())
+            .then(data => {
+                if (!outletCharts.kwh) { initOutletCharts(); }
+                var ch = outletCharts.kwh;
+                if (!ch || !data.labels) return;
+                ch.data.labels = data.labels;
+                ['outlet1','outlet2','outlet3','outlet4'].forEach(function(k, i) {
+                    if (ch.data.datasets[i] && data[k]) ch.data.datasets[i].data = data[k];
+                });
+                ch.update();
+            })
+            .catch(function(){});
+        }
+
+        function initOutletCharts() {
+            var baseColors = ['#2563eb','#0ea5e9','#3b82f6','#1e40af'];
+            var canvasPower = document.getElementById('outletPowerChart');
+            var canvasKwh = document.getElementById('outletKwhChart');
+            var makeDatasets = function(label_prefix, alpha) {
+                return [1,2,3,4].map(function(i) {
+                    return {
+                        label: 'Outlet ' + i,
+                        data: [],
+                        borderColor: baseColors[i-1],
+                        backgroundColor: baseColors[i-1].replace(')', ', ' + alpha + ')').replace('rgb', 'rgba').replace('#', 'rgba(') || baseColors[i-1],
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.3,
+                        pointRadius: 2
+                    };
+                });
+            };
+            var chartOpts = {
+                responsive: true, maintainAspectRatio: true,
+                plugins: { legend: { labels: { color: 'var(--text-primary)', font: { size: 11 } } } },
+                scales: {
+                    x: { ticks: { color: 'var(--text-secondary)', maxRotation: 0, font: { size: 10 } }, grid: { color: 'rgba(37,99,235,0.08)' } },
+                    y: { ticks: { color: 'var(--text-secondary)', font: { size: 10 } }, grid: { color: 'rgba(37,99,235,0.08)' } }
+                }
+            };
+            try {
+                if (canvasPower) {
+                    if (outletCharts.power) outletCharts.power.destroy();
+                    outletCharts.power = new Chart(canvasPower.getContext('2d'), {
+                        type: 'line', data: { labels: [], datasets: makeDatasets('Outlet', 0.15) }, options: JSON.parse(JSON.stringify(chartOpts))
+                    });
+                }
+                if (canvasKwh) {
+                    if (outletCharts.kwh) outletCharts.kwh.destroy();
+                    outletCharts.kwh = new Chart(canvasKwh.getContext('2d'), {
+                        type: 'bar', data: { labels: [], datasets: makeDatasets('Outlet', 0.7) }, options: JSON.parse(JSON.stringify(chartOpts))
+                    });
+                }
+            } catch(e) { console.error('[Outlet] Chart init error:', e); }
+        }
+
+        function exportOutletCSV() {
+            window.open('/api/outlet/export/csv', '_blank');
         }
 
         // ==================== ML OPTIMIZATION ====================
@@ -12076,6 +12460,14 @@ HTML_TEMPLATE = '''
                     var energyPage = document.getElementById('energy');
                     if (energyPage && energyPage.classList.contains('active')) {
                         loadAllEnergyCharts();
+                    }
+                    var outletCtrlPage = document.getElementById('control-outlet');
+                    if (outletCtrlPage && outletCtrlPage.classList.contains('active')) {
+                        try { refreshOutletStatus(); } catch(e) {}
+                    }
+                    var outletAnalPage = document.getElementById('outlet-analysis');
+                    if (outletAnalPage && outletAnalPage.classList.contains('active')) {
+                        try { refreshOutletStatus(); } catch(e) {}
                     }
                 } catch(e) {}
             }, 8000);
