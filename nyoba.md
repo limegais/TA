@@ -3734,7 +3734,7 @@ def energy_history():
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
     # Map device to InfluxDB tag value
-    device_tag = 'mysql_ac' if device == 'ac' else 'mysql_lamp'
+    device_tag = {'ac': 'mysql_ac', 'lamp': 'mysql_lamp', 'outlet': 'mysql_outlet'}.get(device, 'mysql_ac')
     p = period_map[period]
 
     try:
@@ -6228,8 +6228,8 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
 
-                <!-- AC + Lamp columns -->
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+                <!-- AC + Outlet + Lamp columns -->
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;">
                     <!-- ── AC ── -->
                     <div style="padding:18px 20px;border-right:1px solid rgba(30,64,175,0.15);">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
@@ -6289,10 +6289,69 @@ HTML_TEMPLATE = '''
                         <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-ac-ts">--</span></div>
                     </div>
 
+                    <!-- ── Outlet ── -->
+                    <div style="padding:18px 20px;border-right:1px solid rgba(5,150,105,0.15);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#059669;"><i class="fas fa-plug" style="margin-right:6px;"></i>Outlet (id_kwh=2)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(5,150,105,0.1);color:#059669;border:1px solid rgba(5,150,105,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#059669;line-height:1;transition:color 0.3s;"><span id="outlet-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(5,150,105,0.12);overflow:hidden;">
+                                <div id="eu-outlet-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#059669,#34d399);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 1.0 kW max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-outlet-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(5,150,105,0.04);border:1px solid rgba(5,150,105,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-outlet-pf">--</span>
+                                <span id="eu-outlet-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-outlet-ts">--</span></div>
+                    </div>
+
                     <!-- ── Lamp ── -->
                     <div style="padding:18px 20px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lamp (id_kwh=2)</div>
+                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lamp (id_kwh=3)</div>
                             <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(234,179,8,0.1);color:#eab308;border:1px solid rgba(234,179,8,0.2);">Live</div>
                         </div>
                         <!-- Big power -->
@@ -6386,7 +6445,7 @@ HTML_TEMPLATE = '''
                 </div>
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title">Current &mdash; AC <span style="color:#0ea5e9;">&#9632;</span> &amp; Lamp <span style="color:#0ea5e9;">&#9632;</span> (A)</div>
+                        <div class="chart-title">Current &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> (A)</div>
                     </div>
                     <canvas id="mysqlCurrentChart" height="80"></canvas>
                 </div>
@@ -6399,16 +6458,19 @@ HTML_TEMPLATE = '''
                 <!-- Power -->
                 <div class="chart-container">
                     <div class="chart-header">
-                        <div class="chart-title">Active Power &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Lamp <span style="color:#3b82f6;">&#9632;</span> (kW)</div>
+                        <div class="chart-title">Active Power &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (kW)</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '1h', this)">1h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '6h', this)">6h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">30d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">12 Bln</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '5y', this)">5 Thn</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '24h', this)">Daily</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">Weekly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">Monthly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">Annual</button>
                         </div>
+                    </div>
+                    <div class="chart-visibility-toggles" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;padding:6px 10px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:12px;">
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
                     </div>
                     <canvas id="energyPowerChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
@@ -6417,7 +6479,10 @@ HTML_TEMPLATE = '''
                         <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text);">--</strong></span>
-                        <span style="color:#3b82f6;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:#059669;font-weight:600;margin-left:10px;">Outlet</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="outlet-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="outlet-power-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#eab308;font-weight:600;margin-left:10px;">Lamp</span>
                         <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text);">--</strong></span>
                     </div>
@@ -6427,13 +6492,18 @@ HTML_TEMPLATE = '''
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
                     <div class="chart-container">
                         <div class="chart-header">
-                            <div class="chart-title">Voltage &mdash; AC (V)</div>
+                            <div class="chart-title">Voltage &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> (V)</div>
                             <div class="chart-options">
-                                <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '1h', this)">1h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '6h', this)">6h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '24h', this)">24h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">7d</button>
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '24h', this)">Daily</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">Weekly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '30d', this)">Monthly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '12mo', this)">Annual</button>
                             </div>
+                        </div>
+                        <div class="chart-visibility-toggles" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px;padding:5px 8px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:11px;">
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
                         </div>
                         <canvas id="energyVoltageChart" height="100"></canvas>
                         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text-secondary);">
@@ -6445,20 +6515,29 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="chart-container">
                         <div class="chart-header">
-                            <div class="chart-title">Current &mdash; AC <span style="color:#0ea5e9;">&#9632;</span> &amp; Lamp <span style="color:#0ea5e9;">&#9632;</span> (A)</div>
+                            <div class="chart-title">Current &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (A)</div>
                             <div class="chart-options">
-                                <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '1h', this)">1h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '6h', this)">6h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '24h', this)">24h</button>
-                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">7d</button>
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '24h', this)">Daily</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">Weekly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '30d', this)">Monthly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '12mo', this)">Annual</button>
                             </div>
+                        </div>
+                        <div class="chart-visibility-toggles" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px;padding:5px 8px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:11px;">
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
                         </div>
                         <canvas id="energyCurrentChart" height="100"></canvas>
                         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;">
-                            <span style="color:#0ea5e9;font-weight:600;">AC</span>
+                            <span style="color:#1e40af;font-weight:600;">AC</span>
                             <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text);">--</strong></span>
                             <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text);">--</strong></span>
-                            <span style="color:#0ea5e9;font-weight:600;margin-left:8px;">Lamp</span>
+                            <span style="color:#059669;font-weight:600;margin-left:8px;">Outlet</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="outlet-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="outlet-current-avg" style="color:var(--text);">--</strong></span>
+                            <span style="color:#eab308;font-weight:600;margin-left:8px;">Lamp</span>
                             <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text);">--</strong></span>
                             <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text);">--</strong></span>
                         </div>
@@ -6468,27 +6547,36 @@ HTML_TEMPLATE = '''
                 <!-- kWh -->
                 <div class="chart-container" style="margin-top:16px;">
                     <div class="chart-header">
-                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#3b82f6;">&#9632;</span> &amp; Lamp <span style="color:#2563eb;">&#9632;</span> (kWh)</div>
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (kWh)</div>
                         <div class="chart-options">
-                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">24h</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">7d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">30d</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">12 Bln</button>
-                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '5y', this)">5 Thn</button>
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">Daily</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">Weekly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">Monthly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">Annual</button>
                         </div>
+                    </div>
+                    <div class="chart-visibility-toggles" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;padding:6px 10px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:12px;">
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
                     </div>
                     <canvas id="energyKwhChart" height="80"></canvas>
                     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
-                        <span style="color:#3b82f6;font-weight:600;">AC</span>
+                        <span style="color:#1e40af;font-weight:600;">AC</span>
                         <span style="color:var(--text-secondary);">Last Interval: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
-                        <span style="color:#2563eb;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:#059669;font-weight:600;margin-left:10px;">Outlet</span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="outlet-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="outlet-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#eab308;font-weight:600;margin-left:10px;">Lamp</span>
                         <span style="color:var(--text-secondary);">Last Interval: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
                         <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
                     </div>
                 </div>
 
             </div>
+
 
 
             <!-- ===== DAILY SUMMARY ===== -->
@@ -7714,30 +7802,38 @@ HTML_TEMPLATE = '''
                 type: 'line', options: makeEnergyOpts('W'),
                 data: { labels: [], datasets: [
                     { label: 'AC Power (W)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Power (W)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'Outlet Power (W)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Power (W)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Total Power (W)', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.08)', tension: 0.4, fill: false, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderDash: [5,3] }
                 ]}
             });
 
             charts.energyVoltage = new Chart(document.getElementById('energyVoltageChart'), {
                 type: 'line', options: makeEnergyOpts('V'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Voltage (V)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Voltage (V)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Outlet Voltage (V)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Voltage (V)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2 }
                 ]}
             });
 
             charts.energyCurrent = new Chart(document.getElementById('energyCurrentChart'), {
                 type: 'line', options: makeEnergyOpts('A'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Current (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 2 },
-                    { label: 'Lamp Current (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 2 }
+                    { label: 'AC Current (A)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Outlet Current (A)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Lamp Current (A)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.1)', tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2 },
+                    { label: 'Total Current (A)', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.08)', tension: 0.4, fill: false, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderDash: [5,3] }
                 ]}
             });
 
             charts.energyKwh = new Chart(document.getElementById('energyKwhChart'), {
                 type: 'line', options: makeEnergyOpts('kWh'),
                 data: { labels: [], datasets: [
-                    { label: 'AC Energy (kWh)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                    { label: 'AC Energy (kWh)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Outlet Energy (kWh)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Lamp Energy (kWh)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                    { label: 'Total Energy (kWh)', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] }
                 ]}
             });
 
@@ -7765,8 +7861,9 @@ HTML_TEMPLATE = '''
                 data: {
                     labels: [],
                     datasets: [
-                        { label: 'AC (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true },
-                        { label: 'Lamp (A)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
+                        { label: 'AC (A)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true },
+                        { label: 'Outlet (A)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true },
+                        { label: 'Lamp (A)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.1)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }
                     ]
                 },
                 options: {
@@ -8128,7 +8225,7 @@ HTML_TEMPLATE = '''
         }
 
         // Track current period per field so auto-refresh doesn't reset user selection
-        var _activePeriod = { power: '1h', voltage: '1h', current: '1h', energy_kwh: '24h' };
+        var _activePeriod = { power: '24h', voltage: '24h', current: '24h', energy_kwh: '24h' };
 
         // Energy is computed by integrating high-resolution Power data 
         // to avoid the 1kWh low-resolution stepping from the raw cumulative sensor.
@@ -8150,28 +8247,31 @@ HTML_TEMPLATE = '''
             if (!chartName) return;
 
             var fetchField = field;
-            // Fetch AC and Lamp in parallel
+            // Fetch AC, Outlet, and Lamp in parallel
             Promise.all([
                 fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=ac').then(r => r.json()),
+                fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=outlet').then(r => r.json()),
                 fetch('/api/energy/history?field=' + fetchField + '&period=' + period + '&device=lamp').then(r => r.json())
             ])
             .then(function(results) {
                 var acResult = results[0];
-                var lampResult = results[1];
+                var outletResult = results[1];
+                var lampResult = results[2];
                 var acData = acResult.data || [];
+                var outletData = outletResult.data || [];
                 var lampData = lampResult.data || [];
                 var chart = charts[chartName];
 
                 if (chart && chart.data && chart.data.datasets) {
                     var acValues = acData.map(function(d){ return parseFloat(d.value || 0); });
+                    var outletValues = outletData.map(function(d){ return parseFloat(d.value || 0); });
                     var lampValues = lampData.map(function(d){ return parseFloat(d.value || 0); });
                     var acLabels = acData.map(function(d){ return d.time; });
+                    var outletLabels = outletData.map(function(d){ return d.time; });
                     var lampLabels = lampData.map(function(d){ return d.time; });
                     
                     if (field === 'energy_kwh') {
-                        // energy_kwh is cumulative — compute delta per interval:
-                        // delta[i] = cumulative[i+1] - cumulative[i]
-                        // Example: 10:00=100.00, 10:05=100.05 → delta = 0.05 kWh
+                        // energy_kwh is cumulative — compute delta per interval
                         function computeDeltas(cumValues) {
                             var deltas = [];
                             for (var i = 1; i < cumValues.length; i++) {
@@ -8188,25 +8288,25 @@ HTML_TEMPLATE = '''
                             return rangeLabels;
                         }
 
-                        // Store raw cumulative for tooltip detail
                         var acCumRaw = acValues.slice();
+                        var outletCumRaw = outletValues.slice();
                         var lampCumRaw = lampValues.slice();
                         acValues = computeDeltas(acValues);
+                        outletValues = computeDeltas(outletValues);
                         lampValues = computeDeltas(lampValues);
 
-                        // Bar chart for monthly (12mo) and yearly (5y), line chart for others
-                        var useBarChart = (period === '12mo' || period === '5y');
+                        var useBarChart = (period === '12mo');
                         if (useBarChart) {
-                            // Simple labels: "Jan 2026", "2025", etc.
                             acLabels = acLabels.slice(1);
+                            outletLabels = outletLabels.slice(1);
                             lampLabels = lampLabels.slice(1);
                         } else {
-                            // Range labels: "10:00→10:05"
                             acLabels = buildRangeLabels(acLabels);
+                            outletLabels = buildRangeLabels(outletLabels);
                             lampLabels = buildRangeLabels(lampLabels);
                         }
 
-                        // Recreate chart if type needs to change (line ↔ bar)
+                        // Recreate chart if type needs to change (line <-> bar)
                         var targetType = useBarChart ? 'bar' : 'line';
                         if (chart.config.type !== targetType) {
                             chart.destroy();
@@ -8230,27 +8330,30 @@ HTML_TEMPLATE = '''
                                         }
                                     }),
                                     data: { labels: [], datasets: [
-                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(59,130,246,0.6)', borderColor: '#3b82f6', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 },
-                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(37,99,235,0.6)', borderColor: '#2563eb', borderWidth: 1, borderRadius: 4, barPercentage: 0.7, categoryPercentage: 0.8 }
+                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(30,64,175,0.6)', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
+                                        { label: 'Outlet (kWh)', data: [], backgroundColor: 'rgba(5,150,105,0.6)', borderColor: '#059669', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
+                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(234,179,8,0.6)', borderColor: '#eab308', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
+                                        { label: 'Total (kWh)', data: [], backgroundColor: 'rgba(124,58,237,0.4)', borderColor: '#7c3aed', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 }
                                     ]}
                                 });
                             } else {
                                 chart = new Chart(canvas, {
                                     type: 'line', options: makeEnergyOpts('kWh'),
                                     data: { labels: [], datasets: [
-                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                        { label: 'Outlet Energy (kWh)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                        { label: 'Total Energy (kWh)', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] }
                                     ]}
                                 });
                             }
                             charts[chartName] = chart;
                         }
 
-                        // Attach cumulative data to chart for tooltip access
                         chart._kwhCumAc = acCumRaw;
+                        chart._kwhCumOutlet = outletCumRaw;
                         chart._kwhCumLamp = lampCumRaw;
 
-                        // Override tooltip to show subtraction formula
                         chart.options.plugins.tooltip.callbacks.title = function(items) {
                             if (!items || !items[0]) return '';
                             var lbl = items[0].label || '';
@@ -8260,7 +8363,7 @@ HTML_TEMPLATE = '''
                             var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
                             var delta = ctx.parsed.y;
                             var idx = ctx.dataIndex;
-                            var cumArr = ctx.datasetIndex === 0 ? chart._kwhCumAc : chart._kwhCumLamp;
+                            var cumArr = [chart._kwhCumAc, chart._kwhCumOutlet, chart._kwhCumLamp, null][ctx.datasetIndex];
                             if (cumArr && cumArr.length > idx + 1) {
                                 var prev = cumArr[idx].toFixed(4);
                                 var curr = cumArr[idx + 1].toFixed(4);
@@ -8269,16 +8372,31 @@ HTML_TEMPLATE = '''
                             return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
                         };
                     }
+
+                    // Compute Total values (AC + Outlet + Lamp)
+                    var maxLen = Math.max(acValues.length, outletValues.length, lampValues.length);
+                    var totalValues = [];
+                    for (var ti = 0; ti < maxLen; ti++) {
+                        totalValues.push((acValues[ti] || 0) + (outletValues[ti] || 0) + (lampValues[ti] || 0));
+                    }
                     
-                    chart.data.labels = acLabels;
+                    chart.data.labels = acLabels.length > 0 ? acLabels : (outletLabels.length > 0 ? outletLabels : lampLabels);
                     chart.data.datasets[0].data = acValues;
-                    // Only update lamp dataset if chart has 2nd dataset (power, current, kwh; not voltage)
-                    if (chart.data.datasets[1]) {
-                        chart.data.datasets[1].data = lampValues;
-                        updateLampEnergyStats(field, lampValues.filter(function(v){ return Number.isFinite(v); }));
+
+                    // Voltage chart: datasets = [AC, Outlet, Lamp] (no Total)
+                    if (field === 'voltage') {
+                        if (chart.data.datasets[1]) chart.data.datasets[1].data = outletValues;
+                        if (chart.data.datasets[2]) chart.data.datasets[2].data = lampValues;
+                    } else {
+                        // Power, Current, kWh: datasets = [AC, Outlet, Lamp, Total]
+                        if (chart.data.datasets[1]) chart.data.datasets[1].data = outletValues;
+                        if (chart.data.datasets[2]) chart.data.datasets[2].data = lampValues;
+                        if (chart.data.datasets[3]) chart.data.datasets[3].data = totalValues;
                     }
                     chart.update('none');
                     updateEnergyStats(field, acValues.filter(function(v){ return Number.isFinite(v); }));
+                    updateOutletEnergyStats(field, outletValues.filter(function(v){ return Number.isFinite(v); }));
+                    updateLampEnergyStats(field, lampValues.filter(function(v){ return Number.isFinite(v); }));
                 } else {
                     drawEnergyFallback(field, acData);
                 }
@@ -8288,7 +8406,7 @@ HTML_TEMPLATE = '''
                 var noDataId = 'nodata-' + canvasId;
                 var existingOverlay = document.getElementById(noDataId);
                 if (existingOverlay) existingOverlay.remove();
-                if (acData.length === 0 && canvasId) {
+                if (acData.length === 0 && outletData.length === 0 && lampData.length === 0 && canvasId) {
                     var canvas = document.getElementById(canvasId);
                     if (canvas && canvas.parentElement) {
                         var overlay = document.createElement('div');
@@ -8301,6 +8419,34 @@ HTML_TEMPLATE = '''
                 }
             })
             .catch(function(e){ console.error('Energy history error:', e); });
+        }
+
+        // ── toggleDataset: show/hide chart datasets via visibility checkboxes ──
+        function toggleDataset(chartName, datasetIndex, checkbox) {
+            var chart = charts[chartName];
+            if (!chart || !chart.data || !chart.data.datasets[datasetIndex]) return;
+            chart.data.datasets[datasetIndex].hidden = !checkbox.checked;
+            chart.update('none');
+        }
+
+        function updateOutletEnergyStats(field, values) {
+            if (!values || values.length === 0) return;
+            var avg = values.reduce(function(a,b){ return a+b; }, 0) / values.length;
+            var latest = values[values.length - 1];
+            var unit = {power:'kW', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
+            var fmt = function(v) {
+                return field === 'energy_kwh'
+                    ? v.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1')
+                    : v.toFixed(2);
+            };
+            var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
+            if (field === 'power') { setEl('outlet-power-latest', latest); setEl('outlet-power-avg', avg); }
+            else if (field === 'current') { setEl('outlet-current-latest', latest); setEl('outlet-current-avg', avg); }
+            else if (field === 'energy_kwh') {
+                var total = values.reduce(function(a,b){ return a+b; }, 0);
+                setEl('outlet-kwh-latest', latest);
+                setEl('outlet-kwh-avg', total);
+            }
         }
 
         function updateLampEnergyStats(field, values) {
