@@ -8363,6 +8363,7 @@ HTML_TEMPLATE = '''
                     if (field === 'energy_kwh') {
                         function computeDeltas(cumValues) {
                             var deltas = [];
+                            if (cumValues.length <= 1) return cumValues.slice();
                             for (var i = 1; i < cumValues.length; i++) {
                                 var diff = cumValues[i] - cumValues[i - 1];
                                 deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
@@ -8371,6 +8372,7 @@ HTML_TEMPLATE = '''
                         }
                         function buildRangeLabels(labels) {
                             var rangeLabels = [];
+                            if (labels.length <= 1) return labels.slice();
                             for (var i = 1; i < labels.length; i++) {
                                 rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
                             }
@@ -8387,18 +8389,14 @@ HTML_TEMPLATE = '''
                         // For bar chart periods, use simple labels; for line use range labels
                         var useBarChart = (period === '7d' || period === '30d' || period === '12mo');
                         if (useBarChart) {
-                            acLabels = acLabels.slice(1);
-                            outletLabels = outletLabels.slice(1);
-                            lampLabels = lampLabels.slice(1);
+                            if (acLabels.length > 1) acLabels = acLabels.slice(1);
+                            if (outletLabels.length > 1) outletLabels = outletLabels.slice(1);
+                            if (lampLabels.length > 1) lampLabels = lampLabels.slice(1);
                         } else {
                             acLabels = buildRangeLabels(acLabels);
                             outletLabels = buildRangeLabels(outletLabels);
                             lampLabels = buildRangeLabels(lampLabels);
                         }
-
-                        chart._kwhCumAc = acCumRaw;
-                        chart._kwhCumOutlet = outletCumRaw;
-                        chart._kwhCumLamp = lampCumRaw;
                     }
 
                     // ── Determine chart type: Daily (24h) = line, others = bar ──
@@ -8442,12 +8440,22 @@ HTML_TEMPLATE = '''
                             }
                         }
                         
-                        chart = new Chart(canvas, {
-                            type: targetType,
-                            options: baseOpts,
-                            data: { labels: [], datasets: datasetsToUse }
-                        });
-                        charts[chartName] = chart;
+                        try {
+                            chart = new Chart(canvas, {
+                                type: targetType,
+                                options: baseOpts,
+                                data: { labels: [], datasets: datasetsToUse }
+                            });
+                            charts[chartName] = chart;
+                        } catch (err) {
+                            console.error('Chart.js recreation error:', err);
+                        }
+                    }
+
+                    if (field === 'energy_kwh') {
+                        chart._kwhCumAc = acCumRaw;
+                        chart._kwhCumOutlet = outletCumRaw;
+                        chart._kwhCumLamp = lampCumRaw;
                     }
 
                     // Compute Total values (AC + Outlet + Lamp)
