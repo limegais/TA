@@ -8408,9 +8408,13 @@ HTML_TEMPLATE = '''
 
                     // Recreate chart if type needs to change (line <-> bar)
                     if (chart.config.type !== targetType) {
+                        charts[chartName] = null;   // clear stale reference BEFORE destroy
                         chart.destroy();
                         var canvasId = energyCanvasMap[field];
                         var canvas = document.getElementById(canvasId);
+                        if (!canvas) { console.error('Energy canvas not found:', canvasId); return; }
+                        // Wipe any leftover Chart.js state on the canvas element
+                        if (canvas.chartInstance) { try { canvas.chartInstance.destroy(); } catch(e){} }
                         var baseOpts = makeEnergyOpts(unit);
                         var datasetsToUse;
 
@@ -8439,7 +8443,7 @@ HTML_TEMPLATE = '''
                                 datasetsToUse.push({ label: 'Total (' + unit + ')', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] });
                             }
                         }
-                        
+
                         try {
                             chart = new Chart(canvas, {
                                 type: targetType,
@@ -8447,8 +8451,11 @@ HTML_TEMPLATE = '''
                                 data: { labels: [], datasets: datasetsToUse }
                             });
                             charts[chartName] = chart;
+                            // Force resize so canvas fills its container after recreation
+                            try { chart.resize(); } catch(e) {}
                         } catch (err) {
                             console.error('Chart.js recreation error:', err);
+                            return;  // abort — cannot update a chart that failed to create
                         }
                     }
 
@@ -8478,6 +8485,8 @@ HTML_TEMPLATE = '''
                         if (chart.data.datasets[2]) chart.data.datasets[2].data = lampValues;
                         if (chart.data.datasets[3]) chart.data.datasets[3].data = totalValues;
                     }
+                    // Ensure canvas is properly sized before rendering (important after type switch)
+                    try { if (typeof chart.resize === 'function') chart.resize(); } catch(e) {}
                     chart.update('none');
                     updateEnergyStats(field, acValues.filter(function(v){ return Number.isFinite(v); }));
                     updateOutletEnergyStats(field, outletValues.filter(function(v){ return Number.isFinite(v); }));
