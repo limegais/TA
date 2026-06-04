@@ -3180,14 +3180,60 @@ def export_csv_from_db():
     except ValueError:
         return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
 
-    valid_types = ('energy_ac', 'energy_lamp', 'temp', 'lux', 'occupancy')
+    valid_types = ('energy_ac', 'energy_lamp', 'energy_outlet', 'energy_total', 'temp', 'lux', 'occupancy')
     if dtype not in valid_types:
         return jsonify({'error': f'Invalid type. Options: {", ".join(valid_types)}'}), 400
 
+    # ── Energy Total: fetch AC + Outlet + Lamp, merge into one CSV ────────────
+    if dtype == 'energy_total':
+        all_rows = []
+        for id_kwh, dev_label in [(1, 'AC'), (2, 'Outlet'), (3, 'Lamp')]:
+            try:
+                rows_dev = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
+                for r in (rows_dev or []):
+                    r['_device'] = dev_label
+                    all_rows.append(r)
+            except Exception:
+                pass
+        if not all_rows:
+            return jsonify({'error': f'No data for any device in MySQL for range {from_dt} to {to_dt}'}), 404
+        # Sort by timestamp then device
+        all_rows.sort(key=lambda r: (r.get('timestamp', ''), r.get('_device', '')))
+        output = io.StringIO()
+        writer = _csv.writer(output)
+        writer.writerow(['Timestamp', 'Device', 'Voltage (V)', 'Current (A)', 'Active Power (W)',
+                         'Reactive Power (VAR)', 'Apparent Power (VA)', 'Power Factor',
+                         'Frequency (Hz)', 'Energy (kWh)'])
+        for r in all_rows:
+            ap = float(r.get('apparent_power') or 0)
+            p  = float(r.get('active_power') or 0)
+            pf = round(p / ap, 3) if ap > 0.001 else 0.0
+            writer.writerow([
+                r.get('timestamp', ''),
+                r.get('_device', ''),
+                r.get('voltage', ''),
+                r.get('current', ''),
+                r.get('active_power', ''),
+                r.get('reactive_power', ''),
+                r.get('apparent_power', ''),
+                pf,
+                r.get('frequency', ''),
+                r.get('energy_kwh', ''),
+            ])
+        csv_bytes = output.getvalue().encode('utf-8-sig')
+        fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+        return Response(
+            csv_bytes,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename="{fname}"'}
+        )
+
     # ── Energy: fetch from MySQL via PHP (complete data source) ──────────────
-    if dtype in ('energy_ac', 'energy_lamp'):
-        id_kwh   = 1 if dtype == 'energy_ac' else 3
-        dev_name = 'AC' if dtype == 'energy_ac' else 'Lamp'
+    if dtype in ('energy_ac', 'energy_lamp', 'energy_outlet'):
+        id_kwh_map = {'energy_ac': 1, 'energy_outlet': 2, 'energy_lamp': 3}
+        dev_name_map = {'energy_ac': 'AC', 'energy_outlet': 'Outlet', 'energy_lamp': 'Lamp'}
+        id_kwh   = id_kwh_map[dtype]
+        dev_name = dev_name_map[dtype]
         try:
             mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt)
         except Exception as ex:
@@ -3689,18 +3735,31 @@ def energy_export_csv():
         if device in ('lamp', 'all') and data.get('lamp'):
             rows.append(_row(data['lamp'], 'Lamp'))
 
-    # Buat CSV
+    # Buat CSV — human-readable headers, 1 data = 1 kolom, BOM for Excel
     output = io.StringIO()
-    fields = ['timestamp','device','voltage','current','active_power','energy_kwh','frequency','pf','reactive_power','semu']
-    writer = csv_mod.DictWriter(output, fieldnames=fields)
-    writer.writeheader()
-    writer.writerows(rows)
-    csv_text = output.getvalue()
+    fields = ['timestamp','device','voltage','current','active_power','reactive_power','semu','pf','frequency','energy_kwh']
+    header_labels = {
+        'timestamp': 'Timestamp',
+        'device': 'Device',
+        'voltage': 'Voltage (V)',
+        'current': 'Current (A)',
+        'active_power': 'Active Power (W)',
+        'reactive_power': 'Reactive Power (VAR)',
+        'semu': 'Apparent Power (VA)',
+        'pf': 'Power Factor',
+        'frequency': 'Frequency (Hz)',
+        'energy_kwh': 'Energy (kWh)',
+    }
+    writer = csv_mod.writer(output)
+    writer.writerow([header_labels.get(f, f) for f in fields])
+    for r in rows:
+        writer.writerow([r.get(f, '') for f in fields])
+    csv_bytes = output.getvalue().encode('utf-8-sig')  # BOM so Excel reads correctly
 
     from flask import Response
     now_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     return Response(
-        csv_text,
+        csv_bytes,
         mimetype='text/csv',
         headers={'Content-Disposition': f'attachment; filename=energy_{device}_{now_str}.csv'}
     )
@@ -3719,11 +3778,11 @@ def energy_history():
     period_map = {
         '1h':   {'range': '-1h',   'window': '1m'},
         '6h':   {'range': '-6h',   'window': '5m'},
-        '24h':  {'range': '-24h',  'window': '5m'},
-        '7d':   {'range': '-7d',   'window': '1h'},
-        '30d':  {'range': '-30d',  'window': '6h'},
-        '12mo': {'range': '-12mo', 'window': '1mo'},  # monthly: last 12 months
-        '5y':   {'range': '-5y',   'window': '1y'},   # yearly: last 5 years
+        '24h':  {'range': '-24h',  'window': '1h'},    # 24 titik (per jam)
+        '7d':   {'range': '-7d',   'window': '1d'},    # 7 titik (per hari)
+        '30d':  {'range': '-30d',  'window': '1d'},    # 30 titik (per hari)
+        '12mo': {'range': '-12mo', 'window': '1mo'},   # 12 titik (per bulan)
+        '5y':   {'range': '-5y',   'window': '1y'},    # yearly: last 5 years
     }
 
     if period not in period_map:
@@ -3740,10 +3799,14 @@ def energy_history():
     try:
         _, _, query_api = _get_influx_client()
 
-        if period in ('1h', '6h', '24h'):
+        if period in ('1h', '6h'):
             time_format = '%H:%M'
-        elif period in ('7d', '30d'):
-            time_format = '%m/%d %H:%M'
+        elif period == '24h':
+            time_format = '%H:00'   # jam bulat: 00:00, 01:00, ..., 23:00
+        elif period == '7d':
+            time_format = '%a %d/%m'   # Mon 02/06, Tue 03/06, ...
+        elif period == '30d':
+            time_format = '%d/%m'      # 05/05, 06/05, ..., 03/06
         elif period == '12mo':
             time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
         else:  # 5y
@@ -6666,10 +6729,19 @@ HTML_TEMPLATE = '''
                         style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#1e40af,#1d4ed8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
                         <i class="fas fa-download"></i> Export AC
                     </button>
+                    <button onclick="dbExportCSV('energy_outlet')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Outlet
+                    </button>
                     <button onclick="dbExportCSV('energy_lamp')"
                         style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
                         <i class="fas fa-download"></i> Export Lamp
                     </button>
+                    <button onclick="dbExportCSV('energy_total')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Total
+                    </button>
+
                     <button onclick="dbExportSetToday('energy')"
                         style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
                         Today
@@ -8230,7 +8302,7 @@ HTML_TEMPLATE = '''
         // Energy is computed by integrating high-resolution Power data 
         // to avoid the 1kWh low-resolution stepping from the raw cumulative sensor.
         var _periodMins = {
-            '1h': 1, '6h': 5, '24h': 10, '7d': 60, '30d': 360, '12mo': 10080, '5y': 43200
+            '1h': 1, '6h': 5, '24h': 60, '7d': 1440, '30d': 1440, '12mo': 43200, '5y': 525600
         };
 
         function loadEnergyHistory(field, period, btnElement) {
@@ -8270,8 +8342,8 @@ HTML_TEMPLATE = '''
                     var outletLabels = outletData.map(function(d){ return d.time; });
                     var lampLabels = lampData.map(function(d){ return d.time; });
                     
+                    // energy_kwh is cumulative — compute delta per interval
                     if (field === 'energy_kwh') {
-                        // energy_kwh is cumulative — compute delta per interval
                         function computeDeltas(cumValues) {
                             var deltas = [];
                             for (var i = 1; i < cumValues.length; i++) {
@@ -8295,7 +8367,8 @@ HTML_TEMPLATE = '''
                         outletValues = computeDeltas(outletValues);
                         lampValues = computeDeltas(lampValues);
 
-                        var useBarChart = (period === '12mo');
+                        // For bar chart periods, use simple labels; for line use range labels
+                        var useBarChart = (period === '7d' || period === '30d' || period === '12mo');
                         if (useBarChart) {
                             acLabels = acLabels.slice(1);
                             outletLabels = outletLabels.slice(1);
@@ -8306,54 +8379,71 @@ HTML_TEMPLATE = '''
                             lampLabels = buildRangeLabels(lampLabels);
                         }
 
-                        // Recreate chart if type needs to change (line <-> bar)
-                        var targetType = useBarChart ? 'bar' : 'line';
-                        if (chart.config.type !== targetType) {
-                            chart.destroy();
-                            var canvas = document.getElementById('energyKwhChart');
-                            if (useBarChart) {
-                                chart = new Chart(canvas, {
-                                    type: 'bar',
-                                    options: Object.assign({}, makeEnergyOpts('kWh'), {
-                                        plugins: Object.assign({}, makeEnergyOpts('kWh').plugins, {
-                                            legend: { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } },
-                                            tooltip: { mode: 'index', intersect: false,
-                                                backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff', bodyColor: '#bfdbfe',
-                                                borderColor: 'rgba(148,163,184,0.35)', borderWidth: 1, displayColors: true,
-                                                callbacks: { title: function(){return '';}, label: function(){return '';} }
-                                            }
-                                        }),
-                                        scales: {
-                                            x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, font: { size: 11 } } },
-                                            y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' },
-                                                 title: { display: true, text: 'kWh', color: '#94a3b8', font: { size: 11 } } }
-                                        }
-                                    }),
-                                    data: { labels: [], datasets: [
-                                        { label: 'AC (kWh)', data: [], backgroundColor: 'rgba(30,64,175,0.6)', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
-                                        { label: 'Outlet (kWh)', data: [], backgroundColor: 'rgba(5,150,105,0.6)', borderColor: '#059669', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
-                                        { label: 'Lamp (kWh)', data: [], backgroundColor: 'rgba(234,179,8,0.6)', borderColor: '#eab308', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
-                                        { label: 'Total (kWh)', data: [], backgroundColor: 'rgba(124,58,237,0.4)', borderColor: '#7c3aed', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 }
-                                    ]}
-                                });
-                            } else {
-                                chart = new Chart(canvas, {
-                                    type: 'line', options: makeEnergyOpts('kWh'),
-                                    data: { labels: [], datasets: [
-                                        { label: 'AC Energy (kWh)', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                                        { label: 'Outlet Energy (kWh)', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                                        { label: 'Lamp Energy (kWh)', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', tension: 0.3, fill: true, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
-                                        { label: 'Total Energy (kWh)', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] }
-                                    ]}
-                                });
-                            }
-                            charts[chartName] = chart;
-                        }
-
                         chart._kwhCumAc = acCumRaw;
                         chart._kwhCumOutlet = outletCumRaw;
                         chart._kwhCumLamp = lampCumRaw;
+                    }
 
+                    // ── Determine chart type: Daily (24h) = line, others = bar ──
+                    var useBarForAll = (period === '7d' || period === '30d' || period === '12mo');
+                    var targetType = useBarForAll ? 'bar' : 'line';
+                    var unitMap = { power: 'kW', voltage: 'V', current: 'A', energy_kwh: 'kWh' };
+                    var unit = unitMap[field] || '';
+                    var hasTotal = (field !== 'voltage');  // Voltage has no Total dataset
+
+                    // Recreate chart if type needs to change (line <-> bar)
+                    if (chart.config.type !== targetType) {
+                        chart.destroy();
+                        var canvasId = energyCanvasMap[field];
+                        var canvas = document.getElementById(canvasId);
+                        if (useBarForAll) {
+                            var barDatasets = [
+                                { label: 'AC (' + unit + ')', data: [], backgroundColor: 'rgba(30,64,175,0.6)', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
+                                { label: 'Outlet (' + unit + ')', data: [], backgroundColor: 'rgba(5,150,105,0.6)', borderColor: '#059669', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
+                                { label: 'Lamp (' + unit + ')', data: [], backgroundColor: 'rgba(234,179,8,0.6)', borderColor: '#eab308', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 }
+                            ];
+                            if (hasTotal) {
+                                barDatasets.push({ label: 'Total (' + unit + ')', data: [], backgroundColor: 'rgba(124,58,237,0.4)', borderColor: '#7c3aed', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 });
+                            }
+                            chart = new Chart(canvas, {
+                                type: 'bar',
+                                options: Object.assign({}, makeEnergyOpts(unit), {
+                                    plugins: Object.assign({}, makeEnergyOpts(unit).plugins, {
+                                        legend: { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } },
+                                        tooltip: { mode: 'index', intersect: false,
+                                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff', bodyColor: '#bfdbfe',
+                                            borderColor: 'rgba(148,163,184,0.35)', borderWidth: 1, displayColors: true,
+                                            callbacks: { title: function(items){ return items && items[0] ? items[0].label : ''; }, label: function(ctx){ var ds = ctx.dataset && ctx.dataset.label ? ctx.dataset.label : ''; return ds + ': ' + ctx.parsed.y.toFixed(field === 'energy_kwh' ? 5 : 2) + ' ' + unit; } }
+                                        }
+                                    }),
+                                    scales: {
+                                        x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, font: { size: 11 } } },
+                                        y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' },
+                                             title: { display: true, text: unit, color: '#94a3b8', font: { size: 11 } } }
+                                    }
+                                }),
+                                data: { labels: [], datasets: barDatasets }
+                            });
+                        } else {
+                            // Line chart (Daily / 24h)
+                            var lineDatasets = [
+                                { label: 'AC (' + unit + ')', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                { label: 'Outlet (' + unit + ')', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
+                                { label: 'Lamp (' + unit + ')', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
+                            ];
+                            if (hasTotal) {
+                                lineDatasets.push({ label: 'Total (' + unit + ')', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] });
+                            }
+                            chart = new Chart(canvas, {
+                                type: 'line', options: makeEnergyOpts(unit),
+                                data: { labels: [], datasets: lineDatasets }
+                            });
+                        }
+                        charts[chartName] = chart;
+                    }
+
+                    // kWh tooltip with cumulative breakdown
+                    if (field === 'energy_kwh') {
                         chart.options.plugins.tooltip.callbacks.title = function(items) {
                             if (!items || !items[0]) return '';
                             var lbl = items[0].label || '';
@@ -12783,8 +12873,8 @@ HTML_TEMPLATE = '''
                 if (fi) fi.value = _dbDateNdAgo(30); if (ti) ti.value = _dbDateToday();
             };
             window.dbExportCSV = function(type) {
-                // prefix mapping: energy_ac -> energy, energy_lamp -> energy
-                var prefix = (type === 'energy_ac' || type === 'energy_lamp') ? 'energy' : type;
+                // prefix mapping: all energy types share the same date inputs (db-energy-from / db-energy-to)
+                var prefix = (type === 'energy_ac' || type === 'energy_lamp' || type === 'energy_outlet' || type === 'energy_total') ? 'energy' : type;
                 var fromEl = document.getElementById('db-' + prefix + '-from');
                 var toEl   = document.getElementById('db-' + prefix + '-to');
                 var from = fromEl ? fromEl.value : '';
