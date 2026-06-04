@@ -2,7 +2,7 @@ from flask import Flask, render_template_string, jsonify, request, Response, ses
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -3812,10 +3812,124 @@ def energy_history():
         else:  # 5y
             time_format = '%Y'      # 2024, 2025, 2026, ...
 
+        def _add_months(dt, months):
+            month_index = dt.month - 1 + months
+            year = dt.year + month_index // 12
+            month = month_index % 12 + 1
+            return dt.replace(year=year, month=month, day=1)
+
+        def _to_flux_time(dt):
+            return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+        def _fixed_bucket_spec(extra_baseline=False):
+            """Return fixed local bucket starts so charts always show the requested count."""
+            now = datetime.now()
+            if period == '24h':
+                end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                starts = [end - timedelta(hours=i) for i in range(24, 0, -1)]
+                prev_start = starts[0] - timedelta(hours=1)
+                window = '1h'
+            elif period == '7d':
+                end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                starts = [end - timedelta(days=i) for i in range(7, 0, -1)]
+                prev_start = starts[0] - timedelta(days=1)
+                window = '1d'
+            elif period == '30d':
+                end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                starts = [end - timedelta(days=i) for i in range(30, 0, -1)]
+                prev_start = starts[0] - timedelta(days=1)
+                window = '1d'
+            elif period == '12mo':
+                this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                end = _add_months(this_month, 1)
+                starts = [_add_months(end, -i) for i in range(12, 0, -1)]
+                prev_start = _add_months(starts[0], -1)
+                window = '1mo'
+            else:
+                return None
+
+            if extra_baseline:
+                starts = [prev_start] + starts
+            return {'starts': starts, 'start': starts[0], 'end': end, 'window': window}
+
+        def _bucket_key(dt):
+            if period == '24h':
+                return dt.replace(minute=0, second=0, microsecond=0)
+            if period in ('7d', '30d'):
+                return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            if period == '12mo':
+                return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            return dt
+
+        def _runtime_bucket_values(field_name, spec):
+            buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
+            rows = [r for r in buf if r.get('ts') and spec['start'] <= r['ts'] < spec['end']]
+            if not rows:
+                return {}
+
+            grouped = {}
+            for row in rows:
+                key = _bucket_key(row['ts'])
+                grouped.setdefault(key, []).append(row)
+
+            values = {}
+            for key, items in grouped.items():
+                if field_name == 'energy_kwh':
+                    latest = max(items, key=lambda r: r.get('ts'))
+                    values[key] = float(latest.get(field_name, 0) or 0)
+                else:
+                    vals = [float(r.get(field_name, 0) or 0) for r in items]
+                    values[key] = sum(vals) / len(vals) if vals else 0.0
+            return values
+
+        def _points_from_fixed_buckets(field_name, values_by_bucket, spec):
+            dec = 5 if field_name == 'energy_kwh' else 2
+            starts = spec['starts']
+
+            if field_name == 'energy_kwh':
+                first_available = next((values_by_bucket[s] for s in starts if s in values_by_bucket), 0.0)
+                last_value = first_available
+                points = []
+                for start in starts:
+                    if start in values_by_bucket:
+                        last_value = values_by_bucket[start]
+                    points.append({'time': start.strftime(time_format), 'value': round(float(last_value), dec)})
+                return points
+
+            return [
+                {'time': start.strftime(time_format), 'value': round(float(values_by_bucket.get(start, 0.0)), dec)}
+                for start in starts
+            ]
+
         def query_field_points(field_name):
             # energy_kwh is cumulative — use last() per window so final value
             # of each interval is taken (not average), so JS can diff between points
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
+            fixed_spec = _fixed_bucket_spec(extra_baseline=(field_name == 'energy_kwh'))
+            if fixed_spec:
+                query = f'''
+                from(bucket: "{INFLUX_BUCKET}")
+                  |> range(start: time(v: "{_to_flux_time(fixed_spec['start'])}"), stop: time(v: "{_to_flux_time(fixed_spec['end'])}"))
+                  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+                  |> filter(fn: (r) => r["_field"] == "{field_name}")
+                  |> filter(fn: (r) => r["device"] == "{device_tag}")
+                  |> aggregateWindow(every: {fixed_spec['window']}, fn: {agg_fn}, createEmpty: false, timeSrc: "_start")
+                  |> yield(name: "{agg_fn}")
+                '''
+                result = query_api.query(query=query)
+                values_by_bucket = {}
+                expected_starts = set(fixed_spec['starts'])
+                for table in result:
+                    for record in table.records:
+                        rec_time = record.get_time().astimezone().replace(tzinfo=None)
+                        key = _bucket_key(rec_time)
+                        if key in expected_starts:
+                            values_by_bucket[key] = float(record.get_value())
+
+                if not values_by_bucket:
+                    values_by_bucket = _runtime_bucket_values(field_name, fixed_spec)
+
+                return _points_from_fixed_buckets(field_name, values_by_bucket, fixed_spec)
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
