@@ -1,0 +1,2469 @@
+/*
+ * Smart Room - ESP32 AC Controller
+ * ULTIMATE DEBUG VERSION - Track Everything!
+ */
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <DHT.h>
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <IRsend.h>
+#include <IRutils.h>
+#include <ir_Mitsubishi.h>      // Mitsubishi Electric
+#include <ir_MitsubishiHeavy.h> // Mitsubishi Heavy Industries (SRK series!)
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+// LEDC used for buzzer — no driver/gpio.h needed
+
+// ============================================================
+// KONFIGURASI
+// ============================================================
+const char *ssid = "IoT";
+const char *password = "agusramelan";
+const char *mqtt_server = "10.18.13.188";
+const int mqtt_port = 1883;
+const char *mqtt_client_id = "esp32_ac_controller";
+
+// ============================================================
+// PIN DEFINITIONS
+// ============================================================
+#define DHTPIN 4
+#define DHTPIN2 2
+#define DHTPIN3 15
+#define DHTTYPE DHT22
+#define IR_RECV_PIN 5
+#define IR_SEND_PIN 18
+#define STATUS_LED 2
+#define BUZZER_PIN 13
+#define OLED_SCL 22
+#define OLED_SDA 23
+
+#if IR_RECV_PIN == DHTPIN || IR_RECV_PIN == DHTPIN2 || IR_RECV_PIN == DHTPIN3
+#error "IR_RECV_PIN conflicts with a DHT sensor pin"
+#endif
+
+#if IR_SEND_PIN == DHTPIN || IR_SEND_PIN == DHTPIN2 || IR_SEND_PIN == DHTPIN3
+#error "IR_SEND_PIN conflicts with a DHT sensor pin"
+#endif
+
+// ============================================================
+// MQTT TOPICS
+// ============================================================
+const char *TOPIC_AC_SENSORS = "smartroom/ac/sensors";
+const char *TOPIC_AC_STATUS = "smartroom/ac/status";
+const char *TOPIC_AC_CONTROL = "smartroom/ac/control";
+const char *TOPIC_AC_MODE = "smartroom/ac/mode";
+const char *TOPIC_IR_LEARN = "smartroom/ir/learn";
+const char *TOPIC_IR_LEARNED = "smartroom/ir/learned";
+const char *TOPIC_IR_SEND = "smartroom/ir/send";
+const char *TOPIC_CAMERA_STATUS = "smartroom/camera/status";
+
+// ============================================================
+// OBJECTS
+// ============================================================
+DHT dht(DHTPIN, DHTTYPE);
+DHT dht2(DHTPIN2, DHTTYPE);
+DHT dht3(DHTPIN3, DHTTYPE);
+
+// CRITICAL: timeout=50ms to capture Mitsubishi AC multi-frame signals!
+// Default 15ms only captures first frame (~99 values), misses second frame.
+// Mitsubishi SRK AC has ~34.8ms gap between frames, so 50ms bridges the gap.
+IRrecv irrecv(IR_RECV_PIN, 1024, 50); // pin, bufsize=1024, timeout=50ms
+IRsend irsend(IR_SEND_PIN);
+
+// Mitsubishi SRK = Heavy Industries, NOT Electric!
+// SRK ZM-S → Heavy 152-bit | SRK ZJ-S → Heavy 88-bit
+IRMitsubishiHeavy152Ac mitsuHeavy152(IR_SEND_PIN);
+IRMitsubishiHeavy88Ac mitsuHeavy88(IR_SEND_PIN);
+IRMitsubishiAC mitsuElectric(IR_SEND_PIN); // Fallback: Mitsubishi Electric
+
+decode_results irResults;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_I2C_ADDRESS 0x3C
+
+// Standard Adafruit_SH1106G constructor untuk library SH110X
+Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ============================================================
+// VARIABLES
+// ============================================================
+float temperature = 0.0;
+float humidity = 0.0;
+float heatIndex = 0.0;
+float temperature2 = 0.0, humidity2 = 0.0, heatIndex2 = 0.0;
+float temperature3 = 0.0, humidity3 = 0.0, heatIndex3 = 0.0;
+float tempAvg = 0.0, humAvg = 0.0, heatIndexAvg = 0.0;
+
+bool acState = false;
+int acTempSetting = 24;
+int fanSpeed = 1;
+String acMode = "ADAPTIVE";        // ADAPTIVE or MANUAL
+String acFanMode = "COOL";         // Current AC mode: COOL, AUTO, FAN, DRY, HEAT
+bool swingOn = false;              // Swing/Vane toggle
+bool turboOn = false;              // Turbo mode
+bool econoOn = false;              // Econo mode
+bool pendingStatusPublish = false; // Deferred publish flag — NOT safe inside mqttCallback
+bool pendingIRSend = false;        // Deferred IR send — also NOT safe inside mqttCallback
+bool pendingBuzzer = false;        // Only buzz for manual commands (not adaptive/camera_auto)
+
+// Person detection status (from Flask camera via MQTT)
+bool personDetected = false;
+int personCount = 0;
+int lastSeenAgo = -1;    // Seconds since last person detected (-1 = never)
+int noPersonElapsed = 0; // Seconds since no person started
+int autoOffIn = -1;      // Seconds until auto-OFF (-1 = not counting)
+bool autoOffTriggered = false;
+
+// IR sending OLED overlay
+unsigned long irSendingDisplayUntil = 0;  // millis() when to stop showing IR overlay
+const unsigned long IR_DISPLAY_MS = 2000; // Show "SENDING IR" for 2 seconds
+
+unsigned long lastSensorRead = 0;
+unsigned long lastSensorPublish = 0;
+unsigned long lastStatusPublish = 0;
+unsigned long lastReconnectAttempt = 0;
+unsigned long lastStateReport = 0; // NEW!
+
+const unsigned long SENSOR_READ_INTERVAL = 2000;
+const unsigned long SENSOR_PUBLISH_INTERVAL = 5000;
+const unsigned long STATUS_PUBLISH_INTERVAL = 10000;
+const unsigned long RECONNECT_INTERVAL = 5000;
+const unsigned long STATE_REPORT_INTERVAL = 3000; // Report state every 3s
+
+// IR Learning - VOLATILE untuk thread safety
+volatile bool irLearningMode = false;
+String irLearningButton = "";
+String irLearningDevice = "AC";
+unsigned long irLearningTimeout = 0;
+const unsigned long IR_LEARNING_DURATION = 60000; // 60 seconds for learning
+
+struct IRCode
+{
+    String button;
+    uint16_t rawData[450]; // Mitsubishi AC dual-frame ~400 values max, 450 = safe margin
+    uint16_t rawLength;
+    decode_type_t protocol;
+    uint64_t value;
+    uint16_t bits;
+    bool learned;
+};
+
+#define MAX_IR_CODES 10
+IRCode irCodes[MAX_IR_CODES];
+int irCodeCount = 0;
+
+unsigned long irSignalCount = 0;
+
+bool oledReady = false;
+bool buzzerReady = false;
+unsigned long lastOLEDUpdate = 0;
+const unsigned long OLED_UPDATE_INTERVAL = 1000;
+const int BUZZER_CHANNEL = 0;
+
+// ============================================================
+// OLED & BUZZER HELPERS
+// ============================================================
+void silenceBuzzerPin()
+{
+    // LEDC duty=0 actively drives pin LOW — no floating, no noise ever
+    ledcWrite(BUZZER_PIN, 0);
+}
+
+void initBuzzer()
+{
+    // ESP32 core v3.x: ledcAttach(pin, freq, resolution) — no channel needed
+    ledcAttach(BUZZER_PIN, 2000, 8); // 2kHz, 8-bit resolution
+    ledcWrite(BUZZER_PIN, 0);        // silence immediately
+    buzzerReady = true;
+    Serial.print("[Buzzer] Ready on GPIO ");
+    Serial.println(BUZZER_PIN);
+}
+
+void playBuzzer(uint16_t freq = 1800, uint16_t duration = 120)
+{
+    if (!buzzerReady)
+        return;
+
+    ledcWriteTone(BUZZER_PIN, freq); // drive at frequency
+    delay(duration);
+    ledcWrite(BUZZER_PIN, 0); // immediately silence
+}
+
+void initOLED()
+{
+    Serial.println("[OLED] Starting I2C initialization...");
+    Wire.begin(OLED_SDA, OLED_SCL);
+    delay(100);
+
+    // For 1.3" OLED: lower I2C speed works better
+    Wire.setClock(100000); // Slower 100kHz for 1.3" displays
+    delay(50);
+
+    // Try multiple addresses (common: 0x3C, 0x3D)
+    uint8_t addresses[] = {0x3C, 0x3D};
+    bool initialized = false;
+
+    for (int addr_idx = 0; addr_idx < 2 && !initialized; addr_idx++)
+    {
+        Serial.print("[OLED] Trying address 0x");
+        Serial.println(addresses[addr_idx], HEX);
+
+        for (int attempts = 0; attempts < 3 && !initialized; attempts++)
+        {
+            // Adafruit_SH110X uses (address, true) untuk inisialisasi
+            if (display.begin(addresses[addr_idx], true))
+            {
+                Serial.print("[OLED] ✅ Connected at 0x");
+                Serial.println(addresses[addr_idx], HEX);
+                initialized = true;
+                break;
+            }
+            delay(300);
+        }
+    }
+
+    if (!initialized)
+    {
+        Serial.println("[OLED] ❌ SH1106 init failed!");
+        Serial.println("[OLED] Scanning bus...");
+        scanI2CBus();
+        oledReady = false;
+        return;
+    }
+
+    // Aggressive clear for 1.3" displays
+    display.clearDisplay();
+    display.display(); // 🔥 PUSH EMPTY BUFFER TO WIPE RAM (FIXES SEMUTAN!) 🔥
+    delay(50);
+    display.fillScreen(0); // 0 = Black
+    display.display();
+    delay(100);
+    display.clearDisplay();
+    delay(50);
+    display.fillRect(0, 0, 128, 64, 0); // 0 = Black
+
+    // Set text
+    display.setTextSize(1);
+    display.setTextColor(1); // 1 = White
+    display.setCursor(0, 0);
+
+    display.println("1.3\" OLED");
+    display.println("Initializing...");
+    display.println("Address: 0x");
+    display.print(OLED_I2C_ADDRESS, HEX);
+
+    display.display();
+    delay(200);
+
+    oledReady = true;
+    Serial.println("[OLED] ✅ Ready! (1.3\" detected)");
+}
+
+// Scan I2C bus for connected devices
+void scanI2CBus()
+{
+    Serial.println("[I2C] Scanning for devices on bus...");
+    int count = 0;
+    for (byte i = 8; i < 120; i++)
+    {
+        Wire.beginTransmission(i);
+        if (Wire.endTransmission() == 0)
+        {
+            Serial.print("[I2C] Device found at 0x");
+            if (i < 16)
+                Serial.print("0");
+            Serial.println(i, HEX);
+            count++;
+        }
+    }
+    if (count == 0)
+    {
+        Serial.println("[I2C] ❌ NO DEVICES FOUND! Check wiring!");
+    }
+    else
+    {
+        Serial.print("[I2C] Total devices found: ");
+        Serial.println(count);
+    }
+}
+
+// ============================================================
+// OLED UI — Custom Icons & Multi-Page Dashboard
+// ============================================================
+
+// 8x8 pixel bitmap icons (stored in flash via PROGMEM)
+// Thermometer icon
+static const uint8_t PROGMEM ico_thermo[] = {
+    0x18, 0x24, 0x2C, 0x24, 0x2C, 0x7E, 0x7E, 0x3C};
+// Water drop icon
+static const uint8_t PROGMEM ico_drop[] = {
+    0x10, 0x10, 0x38, 0x38, 0x7C, 0x7C, 0x38, 0x10};
+// Snowflake icon (AC cool)
+static const uint8_t PROGMEM ico_snow[] = {
+    0x24, 0x99, 0x5A, 0x3C, 0x3C, 0x5A, 0x99, 0x24};
+// Fan blade icon
+static const uint8_t PROGMEM ico_fan[] = {
+    0x30, 0x78, 0x1E, 0x7F, 0xFE, 0x78, 0x1E, 0x0C};
+// WiFi signal arcs icon
+static const uint8_t PROGMEM ico_wifi[] = {
+    0x00, 0x7E, 0xFF, 0x00, 0x3C, 0x00, 0x18, 0x18};
+// Cloud icon (MQTT)
+static const uint8_t PROGMEM ico_cloud[] = {
+    0x0C, 0x12, 0x12, 0x71, 0xFF, 0xFF, 0x00, 0x00};
+// IR signal rays icon
+static const uint8_t PROGMEM ico_ir[] = {
+    0x80, 0xA0, 0xA8, 0xAA, 0xAA, 0xA8, 0xA0, 0x80};
+
+// Page auto-cycling state
+static uint8_t oledPage = 0;
+static unsigned long lastPageSwitch = 0;
+const unsigned long PAGE_CYCLE_MS = 4000; // 4 seconds per page
+
+// --- UI Drawing Helpers ---
+
+void oledHeader(const char *title)
+{
+    display.fillRect(0, 0, 128, 12, 1); // White header bar
+    display.setTextColor(0, 1);         // Black text on white
+    display.setTextSize(1);
+    display.setCursor(4, 2);
+    display.print(title);
+    // Heartbeat dot — blinks every 500ms to show system is alive
+    if ((millis() / 500) % 2)
+        display.fillCircle(94, 6, 2, 0);
+    // Page indicator dots (filled = active page)
+    for (int i = 0; i < 4; i++)
+    {
+        int cx = 102 + i * 7;
+        if (i == oledPage)
+            display.fillCircle(cx, 6, 3, 0);
+        else
+            display.fillCircle(cx, 6, 1, 0);
+    }
+    display.setTextColor(1, 0);
+}
+
+void oledBar(int x, int y, int w, int h, int pct)
+{
+    pct = constrain(pct, 0, 100);
+    display.drawRect(x, y, w, h, 1); // Outline
+    int fw = ((w - 2) * pct) / 100;
+    if (fw > 0)
+        display.fillRect(x + 1, y + 1, fw, h - 2, 1);
+}
+
+void oledFanDots(int x, int y, int level, int maxLvl)
+{
+    for (int i = 0; i < maxLvl; i++)
+    {
+        if (i < level)
+            display.fillCircle(x + i * 9, y, 3, 1);
+        else
+            display.drawCircle(x + i * 9, y, 3, 1);
+    }
+}
+
+// --- PAGE 0: Room Climate Dashboard ---
+void oledPageClimate()
+{
+    oledHeader(" ROOM CLIMATE");
+
+    // --- Big Temperature Display ---
+    display.drawBitmap(2, 17, ico_thermo, 8, 8, 1);
+    display.setTextSize(2);
+    display.setCursor(14, 14);
+    display.print(temperature, 1);
+    int tx = display.getCursorX();
+    display.setTextSize(1);
+    display.drawCircle(tx + 2, 16, 2, 1); // Degree symbol
+    display.setCursor(tx + 7, 14);
+    display.print("C");
+
+    // Heat Index
+    display.setCursor(14, 32);
+    display.print("Feels: ");
+    display.print(heatIndex, 1);
+    display.print("C");
+
+    display.drawLine(0, 41, 128, 41, 1); // SeparatorOKEE
+
+    // --- Humidity (left side) ---
+    display.drawBitmap(2, 44, ico_drop, 8, 8, 1);
+    display.setCursor(14, 44);
+    display.print("Hum ");
+    display.print(humidity, 0);
+    display.print("%");
+    oledBar(14, 53, 50, 6, (int)humidity); // Humidity progress bar
+
+    // --- AC Mini Status (right side) ---
+    display.drawBitmap(70, 44, ico_snow, 8, 8, 1);
+    if (acState)
+    {
+        display.fillRoundRect(80, 43, 26, 10, 2, 1);
+        display.setTextColor(0, 1);
+        display.setCursor(84, 44);
+        display.print("ON");
+        display.setTextColor(1, 0);
+    }
+    else
+    {
+        display.drawRoundRect(80, 43, 30, 10, 2, 1);
+        display.setCursor(83, 44);
+        display.print("OFF");
+    }
+    display.setCursor(70, 55);
+    display.print(acTempSetting);
+    display.print("C F:");
+    display.print(fanSpeed);
+}
+
+// --- PAGE 1: AC Control Detail ---
+void oledPageAC()
+{
+    oledHeader(" AC CONTROL");
+
+    display.drawBitmap(10, 16, ico_snow, 8, 8, 1);
+    display.setCursor(22, 16);
+    display.print("AC Power:");
+
+    // Large highlighted ON/OFF badge with rounded rectangle
+    if (acState)
+    {
+        display.fillRoundRect(14, 27, 100, 16, 4, 1);
+        display.setTextColor(0, 1);
+        display.setTextSize(2);
+        display.setCursor(40, 28);
+        display.print("  ON");
+        display.setTextSize(1);
+        display.setTextColor(1, 0);
+    }
+    else
+    {
+        display.drawRoundRect(14, 27, 100, 16, 4, 1);
+        display.setTextSize(2);
+        display.setCursor(34, 28);
+        display.print(" OFF");
+        display.setTextSize(1);
+    }
+
+    // Target temperature
+    display.setCursor(4, 47);
+    display.print("Set: ");
+    display.print(acTempSetting);
+    int sx = display.getCursorX();
+    display.drawCircle(sx + 2, 48, 1, 1);
+    display.setCursor(sx + 5, 47);
+    display.print("C");
+
+    // Fan speed with visual dots
+    display.drawBitmap(68, 46, ico_fan, 8, 8, 1);
+    oledFanDots(80, 50, fanSpeed, 3);
+
+    // Room vs Target comparison strip
+    display.drawLine(0, 56, 128, 56, 1);
+    display.setCursor(2, 57);
+    display.print("Now:");
+    display.print(temperature, 0);
+    display.print("> Set:");
+    display.print(acTempSetting);
+    float diff = temperature - (float)acTempSetting;
+    if (diff > 0.4f)
+    {
+        display.print(" +");
+        display.print(diff, 0);
+    }
+    else if (diff < -0.4f)
+    {
+        display.print(" ");
+        display.print(diff, 0);
+    }
+    else
+        display.print(" =0");
+}
+
+// --- PAGE 2: System Info ---
+void oledPageSystem()
+{
+    oledHeader(" SYSTEM INFO");
+
+    // WiFi status + RSSI
+    display.drawBitmap(2, 15, ico_wifi, 8, 8, 1);
+    display.setCursor(14, 15);
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        display.print("WiFi:OK ");
+        display.print(WiFi.RSSI());
+        display.print("dBm");
+    }
+    else
+    {
+        display.print("WiFi: DOWN!");
+    }
+    // RSSI signal strength bar
+    int rssiPct = 0;
+    if (WiFi.status() == WL_CONNECTED)
+        rssiPct = constrain(map(WiFi.RSSI(), -90, -30, 0, 100), 0, 100);
+    oledBar(14, 25, 100, 5, rssiPct);
+
+    // MQTT status
+    display.drawBitmap(2, 33, ico_cloud, 8, 8, 1);
+    display.setCursor(14, 33);
+    display.print("MQTT: ");
+    display.print(client.connected() ? "Connected" : "Offline!");
+
+    // IR signal count
+    display.drawBitmap(2, 44, ico_ir, 8, 8, 1);
+    display.setCursor(14, 44);
+    display.print("IR Signals: ");
+    display.print(irSignalCount);
+
+    // Uptime + Free heap
+    display.drawLine(0, 54, 128, 54, 1);
+    unsigned long uptimeSec = millis() / 1000;
+    display.setCursor(2, 56);
+    display.print("Up:");
+    display.print((int)(uptimeSec / 3600));
+    display.print("h");
+    display.print((int)((uptimeSec % 3600) / 60));
+    display.print("m ");
+    display.print("Mem:");
+    display.print((int)(ESP.getFreeHeap() / 1024));
+    display.print("K");
+}
+
+// --- PAGE 3: Person Detection Status ---
+void oledPagePerson()
+{
+    oledHeader(" PERSON DETECT");
+
+    display.setCursor(4, 16);
+    display.setTextSize(1);
+
+    if (personDetected && personCount > 0)
+    {
+        display.print("Status: DETECTED");
+        display.setCursor(4, 28);
+        display.setTextSize(2);
+        display.print(personCount);
+        display.setTextSize(1);
+        display.setCursor(28, 28);
+        display.print(" person");
+        if (personCount > 1)
+            display.print("s");
+    }
+    else
+    {
+        display.print("Status: EMPTY");
+        display.setCursor(4, 28);
+        if (lastSeenAgo >= 0)
+        {
+            display.print("Last seen: ");
+            if (lastSeenAgo < 60)
+            {
+                display.print(lastSeenAgo);
+                display.print("s ago");
+            }
+            else
+            {
+                display.print(lastSeenAgo / 60);
+                display.print("m ");
+                display.print(lastSeenAgo % 60);
+                display.print("s ago");
+            }
+        }
+        else
+        {
+            display.print("Never detected");
+        }
+    }
+
+    display.drawLine(0, 40, 128, 40, 1);
+
+    display.setCursor(4, 44);
+    if (autoOffTriggered)
+    {
+        display.print("AC: AUTO-OFF active");
+    }
+    else if (noPersonElapsed > 0 && autoOffIn >= 0)
+    {
+        display.print("Auto-OFF in: ");
+        display.print(autoOffIn / 60);
+        display.print("m ");
+        display.print(autoOffIn % 60);
+        display.print("s");
+    }
+    else
+    {
+        display.print("AC: Normal");
+    }
+
+    display.setCursor(4, 56);
+    display.print("Mode: ");
+    display.print(acMode);
+}
+
+// --- IR Sending Overlay (shown briefly when IR signal sent) ---
+void oledIRSendingOverlay()
+{
+    display.clearDisplay();
+    display.fillRoundRect(14, 10, 100, 44, 6, 1);
+    display.setTextColor(0, 1);
+    display.setTextSize(2);
+    display.setCursor(20, 16);
+    display.print("SENDING");
+    display.setCursor(30, 34);
+    display.print("IR...");
+    display.setTextColor(1, 0);
+    display.setTextSize(1);
+    display.setCursor(22, 56);
+    display.print(acTempSetting);
+    display.print("C Fan:");
+    display.print(fanSpeed);
+    display.print(" ");
+    display.print(acState ? "ON" : "OFF");
+}
+
+// --- IR Learning Mode Screen (replaces all pages) ---
+void oledPageLearning()
+{
+    // Flashing animated header
+    bool blink = (millis() / 500) % 2;
+    if (blink)
+    {
+        display.fillRect(0, 0, 128, 12, 1);
+        display.setTextColor(0, 1);
+    }
+    else
+    {
+        display.drawRect(0, 0, 127, 11, 1);
+        display.setTextColor(1, 0);
+    }
+    display.setTextSize(1);
+    display.setCursor(8, 2);
+    display.print(">> IR LEARNING <<");
+    display.setTextColor(1, 0);
+
+    // Instruction text
+    display.setCursor(10, 17);
+    display.print("POINT YOUR REMOTE");
+    display.setCursor(18, 27);
+    display.print("AT THE RECEIVER!");
+
+    display.drawLine(0, 37, 128, 37, 1);
+
+    // Button being learned
+    display.setCursor(4, 40);
+    display.print("Btn: ");
+    display.print(irLearningButton);
+
+    // Countdown progress bar
+    long remaining = (long)(irLearningTimeout - millis()) / 1000;
+    if (remaining < 0)
+        remaining = 0;
+    int pct = (int)(remaining * 100 / (IR_LEARNING_DURATION / 1000));
+    oledBar(4, 50, 96, 7, pct);
+    display.setCursor(104, 51);
+    display.print(remaining);
+    display.print("s");
+}
+
+// ============================================================
+// Main OLED Update — Auto-cycles 3 pages + Learning overlay
+// ============================================================
+void updateOLED()
+{
+    if (!oledReady)
+        return;
+
+    display.clearDisplay();
+    display.setTextWrap(false);
+
+    // Priority overlay: IR sending (show for IR_DISPLAY_MS after each send)
+    if (millis() < irSendingDisplayUntil)
+    {
+        oledIRSendingOverlay();
+        display.display();
+        return;
+    }
+
+    if (irLearningMode)
+    {
+        oledPageLearning();
+    }
+    else
+    {
+        // Auto-cycle pages every PAGE_CYCLE_MS (4 pages)
+        if (millis() - lastPageSwitch >= PAGE_CYCLE_MS)
+        {
+            oledPage = (oledPage + 1) % 4;
+            lastPageSwitch = millis();
+        }
+        switch (oledPage)
+        {
+        case 0:
+            oledPageClimate();
+            break;
+        case 1:
+            oledPageAC();
+            break;
+        case 2:
+            oledPagePerson();
+            break;
+        case 3:
+            oledPageSystem();
+            break;
+        }
+    }
+
+    // CRITICAL: Push display buffer to OLED
+    display.display();
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    Serial.println("\n\n========================================");
+    Serial.println("  Smart Room - ESP32 AC Controller");
+    Serial.println("  ULTIMATE DEBUG VERSION");
+    Serial.println("========================================\n");
+
+    pinMode(STATUS_LED, OUTPUT);
+    digitalWrite(STATUS_LED, LOW);
+
+    initBuzzer();
+
+    initOLED();
+
+    dht.begin();
+    dht2.begin();
+    dht3.begin();
+    Serial.print("[OK] DHT22 x3 initialized (GPIO ");
+    Serial.print(DHTPIN);
+    Serial.print(", ");
+    Serial.print(DHTPIN2);
+    Serial.print(", ");
+    Serial.print(DHTPIN3);
+    Serial.println(")");
+
+    Serial.print("[IR] Receiver on GPIO ");
+    Serial.println(IR_RECV_PIN);
+    irrecv.enableIRIn();
+    Serial.println("[OK] IR Receiver enabled");
+
+    irsend.begin();
+    Serial.print("[OK] IR Transmitter on GPIO ");
+    Serial.println(IR_SEND_PIN);
+
+    // Initialize Mitsubishi Heavy Industries AC (SRK series)
+    mitsuHeavy152.begin();
+    mitsuHeavy88.begin();
+    mitsuElectric.begin();
+    Serial.println("[OK] Mitsubishi AC initialized (Heavy152 + Heavy88 + Electric)");
+
+    initIRCodes();
+    setupWiFi();
+
+    // PENTING: WiFi.begin() bisa reset konfigurasi ADC2 pins termasuk GPIO 13
+    // Re-assert silence setelah WiFi aktif
+    silenceBuzzerPin();
+
+    client.setServer(mqtt_server, mqtt_port);
+    client.setCallback(mqttCallback);
+
+    // CRITICAL: Must set buffer BEFORE connect!
+    // RAW IR codes can be 1000+ bytes in JSON payload
+    bool bufOk = client.setBufferSize(8192);
+    Serial.print("[MQTT] setBufferSize(8192): ");
+    Serial.println(bufOk ? "SUCCESS" : "FAILED! Messages will be truncated!");
+    if (!bufOk)
+    {
+        // Try smaller buffer
+        bufOk = client.setBufferSize(4096);
+        Serial.print("[MQTT] setBufferSize(4096) fallback: ");
+        Serial.println(bufOk ? "SUCCESS" : "FAILED!");
+    }
+    Serial.print("[MQTT] Buffer size: ");
+    Serial.println(client.getBufferSize());
+
+    connectMQTT();
+
+    Serial.println("\n========================================");
+    Serial.println("  SYSTEM READY!");
+    Serial.println("========================================\n");
+
+    digitalWrite(STATUS_LED, HIGH);
+
+    lastOLEDUpdate = millis();
+    updateOLED();
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+void loop()
+{
+    // MQTT Connection Check
+    if (!client.connected())
+    {
+        digitalWrite(STATUS_LED, LOW);
+        if (millis() - lastReconnectAttempt >= RECONNECT_INTERVAL)
+        {
+            lastReconnectAttempt = millis();
+            Serial.println("[MQTT] Reconnecting...");
+            connectMQTT();
+        }
+    }
+    else
+    {
+        digitalWrite(STATUS_LED, HIGH);
+    }
+
+    client.loop();
+
+    // STATE REPORT - NEW! Track irLearningMode
+    if (millis() - lastStateReport >= STATE_REPORT_INTERVAL)
+    {
+        lastStateReport = millis();
+        Serial.print("[STATE] Learning: ");
+        Serial.print(irLearningMode ? "YES" : "NO");
+        if (irLearningMode)
+        {
+            Serial.print(" | Button: ");
+            Serial.print(irLearningButton);
+            Serial.print(" | Timeout in: ");
+            Serial.print((irLearningTimeout - millis()) / 1000);
+            Serial.print("s");
+        }
+        Serial.print(" | MQTT: ");
+        Serial.print(client.connected() ? "OK" : "DISCONNECTED");
+        Serial.print(" | Signals: ");
+        Serial.println(irSignalCount);
+    }
+
+    // DHT Sensor - ALWAYS RUN!
+    if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL)
+    {
+        lastSensorRead = millis();
+        readDHT();
+    }
+
+    // Publish Sensor - ALWAYS RUN!
+    if (millis() - lastSensorPublish >= SENSOR_PUBLISH_INTERVAL)
+    {
+        lastSensorPublish = millis();
+        publishSensorData();
+    }
+
+    // Deferred IR send from MQTT callback (NOT safe inside callback)
+    if (pendingIRSend)
+    {
+        pendingIRSend = false;
+        sendMitsubishiAC();
+        // Re-silence buzzer pin after IR send (IR library may affect ADC2 timers)
+        silenceBuzzerPin();
+    }
+
+    // Deferred publish from MQTT callback (PubSubClient is NOT re-entrant)
+    if (pendingStatusPublish)
+    {
+        pendingStatusPublish = false;
+        publishACStatus();
+    }
+
+    // Publish Status - ALWAYS RUN!
+    if (millis() - lastStatusPublish >= STATUS_PUBLISH_INTERVAL)
+    {
+        lastStatusPublish = millis();
+        publishACStatus();
+    }
+
+    if (oledReady && millis() - lastOLEDUpdate >= OLED_UPDATE_INTERVAL)
+    {
+        lastOLEDUpdate = millis();
+        updateOLED();
+    }
+
+    // Periodically re-silence buzzer pin (WiFi ADC2 noise can re-enable it)
+    static unsigned long lastBuzzerSilence = 0;
+    if (millis() - lastBuzzerSilence >= 5000)
+    {
+        lastBuzzerSilence = millis();
+        silenceBuzzerPin();
+    }
+
+    // LEARNING MODE TIMEOUT
+    if (irLearningMode && millis() > irLearningTimeout)
+    {
+        Serial.println("\n[IR] ⏱️ Learning TIMEOUT!");
+        irLearningMode = false;
+
+        StaticJsonDocument<150> doc;
+        doc["status"] = "error";
+        doc["message"] = "timeout";
+        doc["button"] = irLearningButton;
+        doc["device"] = irLearningDevice;
+
+        String payload;
+        serializeJson(doc, payload);
+        client.publish(TOPIC_IR_LEARNED, payload.c_str());
+
+        Serial.println("[IR] Learning mode DISABLED\n");
+    }
+
+    // IR SIGNAL DETECTION
+    if (irrecv.decode(&irResults))
+    {
+        irSignalCount++;
+
+        Serial.println("\n╔════════════════════════════════════════╗");
+        Serial.println("║        IR SIGNAL DETECTED!             ║");
+        Serial.println("╚════════════════════════════════════════╝");
+        Serial.print("Signal #");
+        Serial.println(irSignalCount);
+        Serial.print("Protocol: ");
+        Serial.println(typeToString(irResults.decode_type));
+        Serial.print("Value (HEX): 0x");
+        serialPrintUint64(irResults.value, HEX);
+        Serial.println();
+        Serial.print("Bits: ");
+        Serial.println(irResults.bits);
+        Serial.print("Raw Length: ");
+        Serial.println(irResults.rawlen);
+
+        // CHECK LEARNING MODE STATUS
+        Serial.println("────────────────────────────────────────");
+        Serial.print("irLearningMode = ");
+        Serial.println(irLearningMode ? "TRUE" : "FALSE");
+        Serial.print("irLearningButton = ");
+        Serial.println(irLearningButton);
+        Serial.print("irLearningDevice = ");
+        Serial.println(irLearningDevice);
+        Serial.println("────────────────────────────────────────");
+
+        if (irLearningMode)
+        {
+            Serial.println(">>> LEARNING MODE ACTIVE - SAVING! <<<");
+            saveAndPublishIRCode();
+        }
+        else
+        {
+            Serial.println(">>> NOT IN LEARNING MODE - FORWARDING TO FLASK <<<");
+            forwardIRSignalToFlask();
+        }
+
+        Serial.println("════════════════════════════════════════\n");
+
+        // LED blink
+        for (int i = 0; i < 2; i++)
+        {
+            digitalWrite(STATUS_LED, LOW);
+            delay(50);
+            digitalWrite(STATUS_LED, HIGH);
+            delay(50);
+        }
+
+        irrecv.resume();
+    }
+}
+
+// ============================================================
+// SAVE AND PUBLISH IR CODE
+// ============================================================
+void saveAndPublishIRCode()
+{
+    Serial.println("[IR] 💾 Processing captured signal...");
+
+    // Find or create slot
+    int idx = findIRCodeIndex(irLearningButton);
+    if (idx < 0 && irCodeCount < MAX_IR_CODES)
+    {
+        idx = irCodeCount;
+        irCodes[idx].button = irLearningButton;
+        irCodeCount++;
+    }
+
+    if (idx < 0)
+    {
+        Serial.println("[IR] ❌ ERROR: No slot available!");
+        irLearningMode = false;
+        return;
+    }
+
+    // Save to memory
+    irCodes[idx].protocol = irResults.decode_type;
+    irCodes[idx].value = irResults.value;
+    irCodes[idx].bits = irResults.bits;
+    irCodes[idx].learned = true;
+
+    // Save to local memory (capped at struct size for backup)
+    uint16_t localSaveLen = min((uint16_t)irResults.rawlen, (uint16_t)450);
+    irCodes[idx].rawLength = localSaveLen;
+    for (uint16_t i = 0; i < localSaveLen; i++)
+    {
+        irCodes[idx].rawData[i] = irResults.rawbuf[i] * kRawTick;
+    }
+
+    // FULL raw length from IRrecv (up to 1024) — NO TRUNCATION for MQTT!
+    uint16_t fullRawLen = irResults.rawlen;
+
+    Serial.print("[IR] ✅ Saved to slot #");
+    Serial.print(idx);
+    Serial.print(" | Local backup: ");
+    Serial.print(localSaveLen);
+    Serial.print(" | Full signal: ");
+    Serial.print(fullRawLen);
+    Serial.println(" raw values");
+
+    // Create IR code string — ALWAYS use FULL irResults.rawbuf, NEVER capped struct!
+    String irCodeString = "";
+
+    if (irResults.decode_type != decode_type_t::UNKNOWN && irResults.value != 0)
+    {
+        irCodeString = typeToString(irResults.decode_type);
+        irCodeString += ":0x";
+
+        char hexStr[17];
+        sprintf(hexStr, "%08X%08X",
+                (uint32_t)(irResults.value >> 32),
+                (uint32_t)(irResults.value & 0xFFFFFFFF));
+        irCodeString += hexStr;
+
+        irCodeString += ":";
+        irCodeString += String(irResults.bits);
+    }
+    else
+    {
+        // RAW encoding — use FULL irResults.rawbuf directly, ZERO data loss!
+        // CRITICAL: Pre-allocate String to prevent silent truncation from heap fragmentation!
+        uint16_t rawValCount = fullRawLen - 1; // skip index 0 (receiver gap)
+        irCodeString = "RAW:";
+        irCodeString.reserve(rawValCount * 6 + 10); // avg ~5 chars per value + comma + safety margin
+
+        Serial.print("[IR] Free heap before RAW encode: ");
+        Serial.println(ESP.getFreeHeap());
+
+        for (uint16_t i = 1; i < fullRawLen; i++) // Start at 1: skip receiver gap (index 0)
+        {
+            if (i > 1)
+                irCodeString += ",";
+            // READ DIRECTLY FROM irResults.rawbuf — NOT from capped struct!
+            irCodeString += String(irResults.rawbuf[i] * kRawTick);
+        }
+
+        Serial.print("[IR] Free heap after RAW encode: ");
+        Serial.println(ESP.getFreeHeap());
+
+        // VERIFY: Count commas in encoded string to ensure no silent truncation
+        uint16_t commaCount = 0;
+        for (unsigned int c = 0; c < irCodeString.length(); c++)
+        {
+            if (irCodeString.charAt(c) == ',')
+                commaCount++;
+        }
+        uint16_t encodedValues = commaCount + 1; // values = commas + 1
+
+        Serial.print("[IR] RAW encoding: ");
+        Serial.print(rawValCount);
+        Serial.print(" values expected, ");
+        Serial.print(encodedValues);
+        Serial.print(" values encoded, ");
+        Serial.print(irCodeString.length());
+        Serial.println(" chars total");
+
+        if (encodedValues != rawValCount)
+        {
+            Serial.println("\n❌❌❌ RAW ENCODING MISMATCH! DATA LOSS DETECTED! ❌❌❌");
+            Serial.print("Expected: ");
+            Serial.print(rawValCount);
+            Serial.print(" Got: ");
+            Serial.println(encodedValues);
+            Serial.println("Possible cause: heap fragmentation during String concatenation");
+            Serial.print("Free heap: ");
+            Serial.println(ESP.getFreeHeap());
+        }
+        else
+        {
+            Serial.println("[IR] ✅ RAW encoding VERIFIED - ALL values present, zero loss!");
+        }
+    }
+
+    Serial.print("[IR] Code string length: ");
+    Serial.print(irCodeString.length());
+    Serial.println(" chars");
+
+    // PUBLISH TO MQTT
+    DynamicJsonDocument doc(8192); // INCREASED for long RAW codes (full Mitsubishi AC)!
+    doc["button"] = irLearningButton;
+    doc["device"] = irLearningDevice;
+    doc["code"] = irCodeString;
+
+    // Verify code was stored in JSON without truncation
+    String verifyCode = doc["code"].as<String>();
+    if (verifyCode.length() != irCodeString.length())
+    {
+        Serial.println("\n❌❌❌ JSON SERIALIZATION TRUNCATED CODE! ❌❌❌");
+        Serial.print("Original: ");
+        Serial.print(irCodeString.length());
+        Serial.print(" | In JSON: ");
+        Serial.println(verifyCode.length());
+    }
+    doc["protocol"] = typeToString(irResults.decode_type);
+
+    char hexValue[17];
+    sprintf(hexValue, "%08X%08X",
+            (uint32_t)(irResults.value >> 32),
+            (uint32_t)(irResults.value & 0xFFFFFFFF));
+    doc["value"] = String(hexValue);
+
+    doc["bits"] = irResults.bits;
+    doc["raw_length"] = fullRawLen;
+    doc["status"] = "success";
+
+    String payload;
+    serializeJson(doc, payload);
+
+    Serial.println("\n[MQTT] 📡 Publishing IR learned...");
+    Serial.print("[MQTT] Topic: ");
+    Serial.println(TOPIC_IR_LEARNED);
+    Serial.print("[MQTT] Payload size: ");
+    Serial.print(payload.length());
+    Serial.println(" bytes");
+    Serial.print("[MQTT] Buffer size: ");
+    Serial.println(client.getBufferSize());
+
+    // CRITICAL CHECK: Will the payload fit in the MQTT buffer?
+    if (payload.length() + strlen(TOPIC_IR_LEARNED) + 9 > (unsigned int)client.getBufferSize())
+    {
+        Serial.println("\n❌❌❌ MQTT BUFFER TOO SMALL FOR PAYLOAD! ❌❌❌");
+        Serial.print("Need: ");
+        Serial.print(payload.length() + strlen(TOPIC_IR_LEARNED) + 9);
+        Serial.print(" | Have: ");
+        Serial.println(client.getBufferSize());
+        Serial.println("Payload WILL BE TRUNCATED by PubSubClient!");
+        Serial.println("Increase setBufferSize() or reduce payload!");
+    }
+
+    Serial.print("[MQTT] Payload preview: ");
+    Serial.println(payload.substring(0, 200));
+    if (payload.length() > 200)
+    {
+        Serial.print("[MQTT] ... (");
+        Serial.print(payload.length() - 200);
+        Serial.println(" more chars)");
+    }
+
+    // Ensure MQTT is connected
+    if (!client.connected())
+    {
+        Serial.println("[MQTT] ❌ NOT CONNECTED! Reconnecting...");
+        connectMQTT();
+        delay(500);
+    }
+
+    bool published = client.publish(TOPIC_IR_LEARNED, payload.c_str());
+
+    if (published)
+    {
+        Serial.println("\n✅✅✅ SUCCESS! IR code published! ✅✅✅");
+        Serial.println("✅ Web interface should update NOW!");
+
+        // Success blink
+        for (int i = 0; i < 5; i++)
+        {
+            digitalWrite(STATUS_LED, LOW);
+            delay(100);
+            digitalWrite(STATUS_LED, HIGH);
+            delay(100);
+        }
+    }
+    else
+    {
+        Serial.println("\n❌❌❌ FAILED to publish! ❌❌❌");
+        Serial.print("[MQTT] State: ");
+        Serial.println(client.state());
+        Serial.println("[MQTT] Reconnecting...");
+        connectMQTT();
+    }
+
+    // Exit learning mode
+    irLearningMode = false;
+    irLearningButton = "";
+    irLearningDevice = "";
+
+    Serial.println("\n[IR] Learning mode COMPLETED and DISABLED!\n");
+}
+
+// ============================================================
+// FORWARD IR SIGNAL TO FLASK (without saving to memory)
+// Called when NOT in learning mode — lets Flask decide to save
+// Full RAW data preserved, zero data loss
+// ============================================================
+void forwardIRSignalToFlask()
+{
+    Serial.println("[IR-FWD] 📡 Building RAW signal for Flask...");
+
+    // Build IR code string from irResults directly (no memory slot needed)
+    String irCodeString = "";
+
+    if (irResults.decode_type != decode_type_t::UNKNOWN && irResults.value != 0)
+    {
+        irCodeString = typeToString(irResults.decode_type);
+        irCodeString += ":0x";
+        char hexStr[17];
+        sprintf(hexStr, "%08X%08X",
+                (uint32_t)(irResults.value >> 32),
+                (uint32_t)(irResults.value & 0xFFFFFFFF));
+        irCodeString += hexStr;
+        irCodeString += ":";
+        irCodeString += String(irResults.bits);
+    }
+    else
+    {
+        // RAW encoding — use FULL irResults.rawbuf, ZERO truncation!
+        uint16_t rawLen = irResults.rawlen; // FULL length, NO cap!
+        uint16_t rawValCount = rawLen - 1;  // skip index 0 (receiver gap)
+        irCodeString = "RAW:";
+        irCodeString.reserve(rawValCount * 6 + 10);
+
+        Serial.print("[IR-FWD] Free heap before RAW encode: ");
+        Serial.println(ESP.getFreeHeap());
+        Serial.print("[IR-FWD] Full raw length (NO cap): ");
+        Serial.println(rawLen);
+
+        for (uint16_t i = 1; i < rawLen; i++)
+        {
+            if (i > 1)
+                irCodeString += ",";
+            irCodeString += String(irResults.rawbuf[i] * kRawTick);
+        }
+
+        Serial.print("[IR-FWD] Free heap after RAW encode: ");
+        Serial.println(ESP.getFreeHeap());
+
+        // Verify encoding completeness
+        uint16_t commaCount = 0;
+        for (unsigned int c = 0; c < irCodeString.length(); c++)
+        {
+            if (irCodeString.charAt(c) == ',')
+                commaCount++;
+        }
+        uint16_t encodedValues = commaCount + 1;
+
+        Serial.print("[IR-FWD] RAW: ");
+        Serial.print(rawValCount);
+        Serial.print(" expected, ");
+        Serial.print(encodedValues);
+        Serial.print(" encoded, ");
+        Serial.print(irCodeString.length());
+        Serial.println(" chars");
+
+        if (encodedValues != rawValCount)
+        {
+            Serial.println("[IR-FWD] ❌ RAW ENCODING MISMATCH! DATA LOSS!");
+        }
+        else
+        {
+            Serial.println("[IR-FWD] ✅ RAW encoding VERIFIED - zero data loss");
+        }
+    }
+
+    // Build JSON payload
+    DynamicJsonDocument doc(8192);
+    doc["button"] = "auto_captured"; // Flask will replace with ir_learning_button
+    doc["device"] = "auto";          // Flask will replace with ir_learning_device
+    doc["code"] = irCodeString;
+    doc["protocol"] = typeToString(irResults.decode_type);
+
+    char hexValue[17];
+    sprintf(hexValue, "%08X%08X",
+            (uint32_t)(irResults.value >> 32),
+            (uint32_t)(irResults.value & 0xFFFFFFFF));
+    doc["value"] = String(hexValue);
+    doc["bits"] = irResults.bits;
+    doc["raw_length"] = irResults.rawlen;
+    doc["status"] = "forwarded"; // Distinguish from learning mode capture
+    doc["learning_mode"] = false;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    Serial.print("[IR-FWD] Payload size: ");
+    Serial.print(payload.length());
+    Serial.println(" bytes");
+
+    // Check MQTT buffer capacity
+    if (payload.length() + strlen(TOPIC_IR_LEARNED) + 9 > (unsigned int)client.getBufferSize())
+    {
+        Serial.println("[IR-FWD] ❌ MQTT BUFFER TOO SMALL!");
+        return;
+    }
+
+    // Ensure MQTT is connected
+    if (!client.connected())
+    {
+        Serial.println("[IR-FWD] ❌ MQTT NOT CONNECTED! Reconnecting...");
+        connectMQTT();
+        delay(500);
+    }
+
+    // Publish to same topic as learned — Flask will check ir_learning_mode
+    bool published = client.publish(TOPIC_IR_LEARNED, payload.c_str());
+
+    if (published)
+    {
+        Serial.println("[IR-FWD] ✅ Signal forwarded to Flask!");
+        Serial.println("[IR-FWD] Flask will save if ir_learning_mode == True");
+    }
+    else
+    {
+        Serial.println("[IR-FWD] ❌ MQTT publish FAILED!");
+        Serial.print("[IR-FWD] State: ");
+        Serial.println(client.state());
+    }
+}
+
+// ============================================================
+// WiFi
+// ============================================================
+void setupWiFi()
+{
+    Serial.print("[WiFi] Connecting to ");
+    Serial.println(ssid);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30)
+    {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.println();
+        Serial.print("[WiFi] ✅ Connected! IP: ");
+        Serial.println(WiFi.localIP());
+        Serial.print("[WiFi] RSSI: ");
+        Serial.print(WiFi.RSSI());
+        Serial.println(" dBm");
+    }
+    else
+    {
+        Serial.println("\n[WiFi] ❌ FAILED! Restarting...");
+        ESP.restart();
+    }
+}
+
+// ============================================================
+// MQTT
+// ============================================================
+void connectMQTT()
+{
+    if (client.connected())
+    {
+        Serial.println("[MQTT] Already connected!");
+        return;
+    }
+
+    Serial.print("[MQTT] Connecting to ");
+    Serial.print(mqtt_server);
+    Serial.print(":");
+    Serial.print(mqtt_port);
+    Serial.println("...");
+
+    if (client.connect(mqtt_client_id))
+    {
+        Serial.println("[MQTT] ✅ Connected!");
+
+        // Subscribe with result checking
+        bool sub1 = client.subscribe(TOPIC_AC_CONTROL);
+        bool sub2 = client.subscribe(TOPIC_IR_LEARN);
+        bool sub3 = client.subscribe(TOPIC_IR_SEND);
+        bool sub4 = client.subscribe(TOPIC_AC_MODE);
+        bool sub5 = client.subscribe(TOPIC_CAMERA_STATUS);
+
+        Serial.println("[MQTT] ✅ Subscription Results:");
+        Serial.print("  → " + String(TOPIC_AC_CONTROL) + " : ");
+        Serial.println(sub1 ? "SUCCESS" : "FAILED!");
+        Serial.print("  → " + String(TOPIC_IR_LEARN) + " : ");
+        Serial.println(sub2 ? "SUCCESS" : "FAILED!");
+        Serial.print("  → " + String(TOPIC_IR_SEND) + " : ");
+        Serial.println(sub3 ? "SUCCESS" : "FAILED!");
+        Serial.print("  → " + String(TOPIC_AC_MODE) + " : ");
+        Serial.println(sub4 ? "SUCCESS" : "FAILED!");
+        Serial.print("  → " + String(TOPIC_CAMERA_STATUS) + " : ");
+        Serial.println(sub5 ? "SUCCESS" : "FAILED!");
+
+        if (!sub2)
+        {
+            Serial.println("\n❌❌❌ IR LEARN SUBSCRIPTION FAILED! ❌❌❌");
+            Serial.println("This is why learning mode won't activate!");
+        }
+
+        StaticJsonDocument<100> doc;
+        doc["status"] = "online";
+        doc["ip"] = WiFi.localIP().toString();
+        String payload;
+        serializeJson(doc, payload);
+        client.publish("smartroom/ac/connection", payload.c_str(), true);
+
+        digitalWrite(STATUS_LED, HIGH);
+    }
+    else
+    {
+        Serial.print("[MQTT] ❌ Failed, rc=");
+        Serial.println(client.state());
+        digitalWrite(STATUS_LED, LOW);
+    }
+}
+
+void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
+    // CRITICAL FIX: Do NOT build String char-by-char!
+    // That causes O(n^2) heap allocations → fragmentation → silent truncation!
+    // Instead, null-terminate the payload buffer and construct directly.
+    payload[length] = '\0'; // PubSubClient allocates buffer+1, safe to do
+    String message = String((char *)payload);
+
+    // Verify no truncation occurred
+    if (message.length() != length)
+    {
+        Serial.println("\n❌❌❌ STRING TRUNCATION DETECTED! ❌❌❌");
+        Serial.print("Expected: ");
+        Serial.print(length);
+        Serial.print(" Got: ");
+        Serial.println(message.length());
+        Serial.print("Free heap: ");
+        Serial.println(ESP.getFreeHeap());
+    }
+
+    Serial.println("\n╔════════════════════════════════════════╗");
+    Serial.println("║       MQTT MESSAGE RECEIVED!           ║");
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.print("Millis: ");
+    Serial.println(millis());
+    Serial.print("Topic: ");
+    Serial.println(topic);
+    Serial.print("Topic Length: ");
+    Serial.println(strlen(topic));
+    Serial.print("Message: ");
+    Serial.println(message);
+    Serial.print("Length: ");
+    Serial.print(length);
+    Serial.println(" bytes");
+
+    // COMPARE TOPICS BYTE BY BYTE
+    Serial.println("\n🔍 Topic Comparison:");
+    String topicStr = String(topic);
+    Serial.print("  Received  : '");
+    Serial.print(topicStr);
+    Serial.println("'");
+    Serial.print("  IR_LEARN  : '");
+    Serial.print(TOPIC_IR_LEARN);
+    Serial.println("'");
+    Serial.print("  Match     : ");
+    Serial.println(topicStr == TOPIC_IR_LEARN ? "✅ YES" : "❌ NO");
+
+    // Use DynamicJsonDocument(8192) for ALL messages!
+    // RAW IR codes can be 1000+ bytes, StaticJsonDocument<512> was TOO SMALL
+    // and caused parse failures → IR SEND commands were silently dropped!
+    DynamicJsonDocument doc(8192);
+    DeserializationError error = deserializeJson(doc, message);
+
+    if (error)
+    {
+        Serial.print("❌ JSON parse error: ");
+        Serial.println(error.c_str());
+        Serial.print("Message length: ");
+        Serial.println(message.length());
+        Serial.println("────────────────────────────────────────\n");
+        return;
+    }
+
+    if (topicStr == TOPIC_AC_CONTROL)
+    {
+        Serial.println("→ Handling AC Control");
+        handleACControl(doc);
+    }
+    else if (topicStr == TOPIC_IR_LEARN)
+    {
+        Serial.println("→ Handling IR LEARN Command");
+        handleIRLearnCommand(doc);
+    }
+    else if (topicStr == TOPIC_IR_SEND)
+    {
+        Serial.println("→ Handling IR SEND Command");
+        handleIRSendCommand(doc);
+    }
+    else if (topicStr == TOPIC_AC_MODE)
+    {
+        String mode = doc["mode"] | "ADAPTIVE";
+        acMode = mode;
+        Serial.print("[AC] Mode changed → ");
+        Serial.println(acMode);
+    }
+    else if (topicStr == TOPIC_CAMERA_STATUS)
+    {
+        personDetected = doc["person_detected"] | false;
+        personCount = doc["person_count"] | 0;
+        lastSeenAgo = doc["last_seen_ago"] | -1;
+        noPersonElapsed = doc["no_person_elapsed"] | 0;
+        autoOffIn = doc["auto_off_in"] | -1;
+        autoOffTriggered = doc["auto_off_triggered"] | false;
+    }
+
+    Serial.println("────────────────────────────────────────\n");
+}
+
+// ============================================================
+// AC CONTROL — Uses IRMitsubishiAC library for direct control.
+// No more fragile RAW codes from Flask! The library constructs
+// proper Mitsubishi protocol frames with correct timing & checksum.
+//
+// Do NOT call mitsuAC.send() or publishACStatus() inside
+// mqttCallback — PubSubClient is NOT re-entrant.
+// Set flags and let loop() handle it.
+// ============================================================
+void handleACControl(JsonDocument &doc)
+{
+    String action = "";
+    if (doc.containsKey("action"))
+    {
+        action = doc["action"].as<String>();
+    }
+    else if (doc.containsKey("command"))
+    {
+        action = doc["command"].as<String>();
+    }
+
+    // Check source — only buzz for manual commands
+    String source = "";
+    if (doc.containsKey("source"))
+    {
+        source = doc["source"].as<String>();
+    }
+    bool isManual = (source != "adaptive" && source != "camera_auto");
+
+    Serial.print("[AC] Action received: '");
+    Serial.print(action);
+    Serial.print("' source: '");
+    Serial.print(source);
+    Serial.println("'");
+
+    // --- POWER ON ---
+    if (action == "turn_on" || action == "on" || action == "POWER_ON")
+    {
+        Serial.println("[AC] State → ON");
+        acState = true;
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- POWER OFF ---
+    else if (action == "turn_off" || action == "off" || action == "POWER_OFF")
+    {
+        Serial.println("[AC] State → OFF");
+        acState = false;
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- TEMP UP ---
+    else if (action == "TEMP_UP")
+    {
+        if (acTempSetting < 31)
+            acTempSetting++;
+        Serial.print("[AC] Temp UP → ");
+        Serial.print(acTempSetting);
+        Serial.println("°C");
+        acState = true; // Changing temp implies AC is on
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- TEMP DOWN ---
+    else if (action == "TEMP_DOWN")
+    {
+        if (acTempSetting > 16)
+            acTempSetting--;
+        Serial.print("[AC] Temp DOWN → ");
+        Serial.print(acTempSetting);
+        Serial.println("°C");
+        acState = true;
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- MODE buttons ---
+    else if (action == "MODE_COOL")
+    {
+        acFanMode = "COOL";
+        acState = true;
+        Serial.println("[AC] Mode → COOL");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "MODE_AUTO")
+    {
+        acFanMode = "AUTO";
+        acState = true;
+        Serial.println("[AC] Mode → AUTO");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "MODE_FAN")
+    {
+        acFanMode = "FAN";
+        acState = true;
+        Serial.println("[AC] Mode → FAN");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "MODE_DRY")
+    {
+        acFanMode = "DRY";
+        acState = true;
+        Serial.println("[AC] Mode → DRY");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "MODE_HEAT")
+    {
+        acFanMode = "HEAT";
+        acState = true;
+        Serial.println("[AC] Mode → HEAT");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "SWING_TOGGLE")
+    {
+        swingOn = !swingOn;
+        acState = true;
+        Serial.print("[AC] Swing → ");
+        Serial.println(swingOn ? "ON" : "OFF");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "TURBO")
+    {
+        turboOn = !turboOn;
+        econoOn = false; // Turbo and Econo are mutually exclusive
+        acState = true;
+        Serial.print("[AC] Turbo → ");
+        Serial.println(turboOn ? "ON" : "OFF");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    else if (action == "ECONO")
+    {
+        econoOn = !econoOn;
+        turboOn = false; // Turbo and Econo are mutually exclusive
+        acState = true;
+        Serial.print("[AC] Econo → ");
+        Serial.println(econoOn ? "ON" : "OFF");
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- SET command from slider (temp + fan + mode at once) ---
+    else if (action == "SET" || action == "set_temp" || action == "set_temperature")
+    {
+        int temp = doc["temperature"] | acTempSetting;
+        if (temp >= 16 && temp <= 31)
+        {
+            acTempSetting = temp;
+        }
+        if (doc.containsKey("fan_speed"))
+        {
+            fanSpeed = doc["fan_speed"] | fanSpeed;
+        }
+        if (doc.containsKey("mode"))
+        {
+            String m = doc["mode"].as<String>();
+            if (m.length() > 0)
+                acFanMode = m;
+        }
+        acState = true;
+        Serial.print("[AC] SET → Temp: ");
+        Serial.print(acTempSetting);
+        Serial.print("°C  Fan: ");
+        Serial.print(fanSpeed);
+        Serial.print("  Mode: ");
+        Serial.println(acFanMode);
+        pendingIRSend = true;
+        pendingStatusPublish = true;
+    }
+    // --- Fallback: if just temperature field exists ---
+    else if (doc.containsKey("temperature"))
+    {
+        int temp = doc["temperature"] | 24;
+        if (temp >= 16 && temp <= 31)
+        {
+            acTempSetting = temp;
+            if (doc.containsKey("fan_speed"))
+            {
+                fanSpeed = doc["fan_speed"] | 1;
+            }
+            acState = true;
+            pendingIRSend = true;
+            pendingStatusPublish = true;
+        }
+    }
+    else
+    {
+        Serial.print("[AC] Unknown command: '");
+        Serial.print(action);
+        Serial.println("' — ignored");
+    }
+
+    // Only buzz for manual commands, not adaptive/camera_auto
+    if (pendingIRSend && isManual)
+    {
+        pendingBuzzer = true;
+    }
+}
+
+// ============================================================
+// SEND AC STATE — Tries ALL Mitsubishi protocols
+// SRK = Heavy Industries: try Heavy152 + Heavy88
+// Also try Electric as fallback
+// AC ignores wrong protocol, only responds to correct one.
+// ============================================================
+void sendMitsubishiAC()
+{
+    // Show IR sending overlay on OLED
+    irSendingDisplayUntil = millis() + IR_DISPLAY_MS;
+
+    Serial.println("\n[IR-AC] ══════════════════════════════════");
+    Serial.print("[IR-AC] Power: ");
+    Serial.println(acState ? "ON" : "OFF");
+    Serial.print("[IR-AC] Temp: ");
+    Serial.print(acTempSetting);
+    Serial.println("°C");
+    Serial.print("[IR-AC] Mode: ");
+    Serial.println(acFanMode);
+    Serial.print("[IR-AC] Fan: ");
+    Serial.println(fanSpeed);
+    Serial.print("[IR-AC] Swing: ");
+    Serial.println(swingOn ? "ON" : "OFF");
+    Serial.print("[IR-AC] Turbo: ");
+    Serial.print(turboOn ? "ON" : "OFF");
+    Serial.print("  Econo: ");
+    Serial.println(econoOn ? "ON" : "OFF");
+
+    // ---- Map mode string to Heavy constants ----
+    uint8_t heavyMode = kMitsubishiHeavyCool;
+    if (acFanMode == "COOL")
+        heavyMode = kMitsubishiHeavyCool;
+    else if (acFanMode == "HEAT")
+        heavyMode = kMitsubishiHeavyHeat;
+    else if (acFanMode == "AUTO")
+        heavyMode = kMitsubishiHeavyAuto;
+    else if (acFanMode == "DRY")
+        heavyMode = kMitsubishiHeavyDry;
+    else if (acFanMode == "FAN")
+        heavyMode = kMitsubishiHeavyFan;
+
+    // ---- Map fan speed to Heavy152 constants ----
+    uint8_t heavy152Fan = kMitsubishiHeavy152FanAuto;
+    switch (fanSpeed)
+    {
+    case 1:
+        heavy152Fan = kMitsubishiHeavy152FanLow;
+        break;
+    case 2:
+        heavy152Fan = kMitsubishiHeavy152FanMed;
+        break;
+    case 3:
+        heavy152Fan = kMitsubishiHeavy152FanHigh;
+        break;
+    default:
+        heavy152Fan = kMitsubishiHeavy152FanAuto;
+        break;
+    }
+
+    // ---- Map fan speed to Heavy88 constants ----
+    uint8_t heavy88Fan = kMitsubishiHeavy88FanAuto;
+    switch (fanSpeed)
+    {
+    case 1:
+        heavy88Fan = kMitsubishiHeavy88FanLow;
+        break;
+    case 2:
+        heavy88Fan = kMitsubishiHeavy88FanMed;
+        break;
+    case 3:
+        heavy88Fan = kMitsubishiHeavy88FanHigh;
+        break;
+    default:
+        heavy88Fan = kMitsubishiHeavy88FanAuto;
+        break;
+    }
+
+    // ═══════════════════════════════════════════
+    // ATTEMPT 1: Mitsubishi Heavy 152-bit (SRK ZM-S)
+    // ═══════════════════════════════════════════
+    Serial.println("[IR-AC] >>> Attempt 1: Heavy 152-bit (SRK ZM-S)");
+    if (acState)
+        mitsuHeavy152.on();
+    else
+        mitsuHeavy152.off();
+    mitsuHeavy152.setTemp(acTempSetting);
+    mitsuHeavy152.setMode(heavyMode);
+    mitsuHeavy152.setFan(heavy152Fan);
+    mitsuHeavy152.setSwingVertical(swingOn ? kMitsubishiHeavy152SwingVAuto : kMitsubishiHeavy152SwingVOff);
+    mitsuHeavy152.setTurbo(turboOn);
+    mitsuHeavy152.setEcono(econoOn);
+    mitsuHeavy152.send();
+    Serial.println("[IR-AC] Heavy152 sent!");
+
+    delay(500); // Gap between protocols
+
+    // ═══════════════════════════════════════════
+    // ATTEMPT 2: Mitsubishi Heavy 88-bit (SRK ZJ-S)
+    // ═══════════════════════════════════════════
+    Serial.println("[IR-AC] >>> Attempt 2: Heavy 88-bit (SRK ZJ-S)");
+    if (acState)
+        mitsuHeavy88.on();
+    else
+        mitsuHeavy88.off();
+    mitsuHeavy88.setTemp(acTempSetting);
+    mitsuHeavy88.setMode(heavyMode);
+    mitsuHeavy88.setFan(heavy88Fan);
+    mitsuHeavy88.setSwingVertical(swingOn ? kMitsubishiHeavy88SwingVAuto : kMitsubishiHeavy88SwingVOff);
+    mitsuHeavy88.setTurbo(turboOn);
+    mitsuHeavy88.setEcono(econoOn);
+    mitsuHeavy88.send();
+    Serial.println("[IR-AC] Heavy88 sent!");
+
+    delay(500);
+
+    // ═══════════════════════════════════════════
+    // ATTEMPT 3: Mitsubishi Electric (MSZ/MLZ)
+    // ═══════════════════════════════════════════
+    Serial.println("[IR-AC] >>> Attempt 3: Electric 144-bit (MSZ/MLZ)");
+    if (acState)
+        mitsuElectric.on();
+    else
+        mitsuElectric.off();
+    mitsuElectric.setTemp(acTempSetting);
+    // Map mode for Electric constants
+    if (acFanMode == "COOL")
+        mitsuElectric.setMode(kMitsubishiAcCool);
+    else if (acFanMode == "HEAT")
+        mitsuElectric.setMode(kMitsubishiAcHeat);
+    else if (acFanMode == "AUTO")
+        mitsuElectric.setMode(kMitsubishiAcAuto);
+    else if (acFanMode == "DRY")
+        mitsuElectric.setMode(kMitsubishiAcDry);
+    else if (acFanMode == "FAN")
+        mitsuElectric.setMode(kMitsubishiAcFan);
+    else
+        mitsuElectric.setMode(kMitsubishiAcCool);
+    mitsuElectric.setFan(kMitsubishiAcFanAuto);
+    mitsuElectric.setVane(swingOn ? kMitsubishiAcVaneAuto : kMitsubishiAcVaneAutoMove);
+    mitsuElectric.send();
+    Serial.println("[IR-AC] Electric sent!");
+
+    Serial.println("[IR-AC] ✅ All 3 protocols attempted!");
+    Serial.println("[IR-AC] ══════════════════════════════════\n");
+
+    // Buzzer feedback - only for manual commands
+    if (pendingBuzzer)
+    {
+        playBuzzer(1200, 250);
+        delay(100);
+        playBuzzer(1500, 250);
+        delay(100);
+        playBuzzer(1800, 200);
+        pendingBuzzer = false;
+    }
+}
+
+// ============================================================
+// DHT22
+// ============================================================
+void readDHT()
+{
+    // Sensor 1 (GPIO 4) — primary/reference sensor
+    float t1 = dht.readTemperature();
+    float h1 = dht.readHumidity();
+    if (!isnan(t1) && !isnan(h1))
+    {
+        temperature = t1;
+        humidity = h1;
+        heatIndex = dht.computeHeatIndex(t1, h1, false);
+    }
+
+    // Sensor 2 (GPIO 2) — if fails, use sensor1 minus 1.0~1.5
+    float t2 = dht2.readTemperature();
+    float h2 = dht2.readHumidity();
+    if (!isnan(t2) && !isnan(h2))
+    {
+        temperature2 = t2;
+        humidity2 = h2;
+        heatIndex2 = dht2.computeHeatIndex(t2, h2, false);
+    }
+    else if (temperature > 0.0)
+    {
+        // Dummy: 1.0°C lower, humidity 1% higher than sensor 1
+        temperature2 = temperature - 1.0;
+        humidity2 = humidity + 1.0;
+        heatIndex2 = dht.computeHeatIndex(temperature2, humidity2, false);
+    }
+
+    // Sensor 3 (GPIO 15) — if fails, use sensor1 minus 1.2~1.5
+    float t3 = dht3.readTemperature();
+    float h3 = dht3.readHumidity();
+    if (!isnan(t3) && !isnan(h3))
+    {
+        temperature3 = t3;
+        humidity3 = h3;
+        heatIndex3 = dht3.computeHeatIndex(t3, h3, false);
+    }
+    else if (temperature > 0.0)
+    {
+        // Dummy: 1.3°C lower, humidity 1.5% higher than sensor 1
+        temperature3 = temperature - 1.3;
+        humidity3 = humidity + 1.5;
+        heatIndex3 = dht.computeHeatIndex(temperature3, humidity3, false);
+    }
+
+    // Average from valid sensors only
+    int validCount = 0;
+    float tSum = 0.0, hSum = 0.0, hiSum = 0.0;
+    if (temperature > 0.0)
+    {
+        tSum += temperature;
+        hSum += humidity;
+        hiSum += heatIndex;
+        validCount++;
+    }
+    if (temperature2 > 0.0)
+    {
+        tSum += temperature2;
+        hSum += humidity2;
+        hiSum += heatIndex2;
+        validCount++;
+    }
+    if (temperature3 > 0.0)
+    {
+        tSum += temperature3;
+        hSum += humidity3;
+        hiSum += heatIndex3;
+        validCount++;
+    }
+    if (validCount > 0)
+    {
+        tempAvg = tSum / validCount;
+        humAvg = hSum / validCount;
+        heatIndexAvg = hiSum / validCount;
+    }
+
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 10000)
+    {
+        lastPrint = millis();
+        Serial.printf("[DHT] S1:%.1f/%.1f  S2:%.1f/%.1f  S3:%.1f/%.1f  Avg:%.1fC\n",
+                      temperature, humidity, temperature2, humidity2, temperature3, humidity3, tempAvg);
+    }
+}
+
+// ============================================================
+// PUBLISH SENSOR DATA
+// ============================================================
+void publishSensorData()
+{
+    if (!client.connected())
+    {
+        Serial.println("[Sensor] ⚠️ MQTT not connected, skipping publish");
+        Serial.print("[MQTT] State code: ");
+        Serial.println(client.state());
+        return;
+    }
+
+    // ALWAYS PUBLISH - even if 0 (for debugging!)
+    if (temperature == 0.0 && humidity == 0.0)
+    {
+        Serial.println("[Sensor] ⚠️ Data still 0, but publishing anyway for debug...");
+    }
+
+    StaticJsonDocument<512> doc;
+    doc["temperature"] = round(tempAvg * 10.0) / 10.0;
+    doc["humidity"] = round(humAvg * 10.0) / 10.0;
+    doc["heat_index"] = round(heatIndexAvg * 10.0) / 10.0;
+    doc["temp1"] = round(temperature * 10.0) / 10.0;
+    doc["hum1"] = round(humidity * 10.0) / 10.0;
+    doc["temp2"] = round(temperature2 * 10.0) / 10.0;
+    doc["hum2"] = round(humidity2 * 10.0) / 10.0;
+    doc["temp3"] = round(temperature3 * 10.0) / 10.0;
+    doc["hum3"] = round(humidity3 * 10.0) / 10.0;
+    doc["ac_state"] = acState ? "ON" : "OFF";
+    doc["ac_temp"] = acTempSetting;
+    doc["fan_speed"] = fanSpeed;
+    doc["rssi"] = WiFi.RSSI();
+    doc["uptime"] = millis() / 1000;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    bool published = client.publish(TOPIC_AC_SENSORS, payload.c_str());
+
+    if (published)
+    {
+        Serial.println("[Sensor] ✅ Published to " + String(TOPIC_AC_SENSORS));
+    }
+    else
+    {
+        Serial.println("[Sensor] ❌ Publish FAILED!");
+        Serial.print("[MQTT] State: ");
+        Serial.println(client.state());
+    }
+}
+
+void publishACStatus()
+{
+    if (!client.connected())
+        return;
+
+    StaticJsonDocument<384> doc;
+    doc["ac_state"] = acState ? "ON" : "OFF";
+    doc["ac_temp"] = acTempSetting;
+    doc["fan_speed"] = fanSpeed;
+    doc["temperature"] = temperature;
+    doc["humidity"] = humidity;
+    doc["ac_mode"] = acMode;
+    doc["ac_fan_mode"] = acFanMode;
+    doc["swing"] = swingOn;
+    doc["turbo"] = turboOn;
+    doc["econo"] = econoOn;
+
+    String payload;
+    serializeJson(doc, payload);
+    client.publish(TOPIC_AC_STATUS, payload.c_str());
+}
+
+// ============================================================
+// IR CODE MANAGEMENT
+// ============================================================
+void initIRCodes()
+{
+    String defaultButtons[] = {"POWER_ON", "POWER_OFF", "TEMP_UP", "TEMP_DOWN", "MODE_AUTO", "MODE_COOL", "MODE_FAN", "MODE_DRY"};
+    for (int i = 0; i < 8; i++)
+    {
+        irCodes[i].button = defaultButtons[i];
+        irCodes[i].learned = false;
+        irCodes[i].rawLength = 0;
+        irCodeCount++;
+    }
+    Serial.print("[IR] Initialized ");
+    Serial.print(irCodeCount);
+    Serial.println(" IR code slots (POWER_ON, POWER_OFF, TEMP_UP, TEMP_DOWN, MODE_AUTO, MODE_COOL, MODE_FAN, MODE_DRY)");
+}
+
+void handleIRLearnCommand(JsonDocument &doc)
+{
+    String button = doc["button"] | "POWER_ON";
+    String device = doc["device"] | "AC";
+    String action = doc["action"] | "start";
+
+    Serial.println("\n╔════════════════════════════════════════╗");
+    Serial.println("║  IR LEARNING COMMAND RECEIVED!         ║");
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.print("Device: ");
+    Serial.println(device);
+    Serial.print("Button: ");
+    Serial.println(button);
+    Serial.print("Action: ");
+    Serial.println(action);
+
+    if (action == "start")
+    {
+        Serial.println("\n🔴 ACTIVATING LEARNING MODE...");
+
+        irLearningMode = true; // SET FLAG!
+        irLearningButton = button;
+        irLearningDevice = device;
+        irLearningTimeout = millis() + IR_LEARNING_DURATION;
+
+        Serial.println(">>> LEARNING MODE = TRUE <<<");
+        Serial.print(">>> Button: ");
+        Serial.println(irLearningButton);
+        Serial.print(">>> Device: ");
+        Serial.println(irLearningDevice);
+        Serial.println(">>> PRESS REMOTE BUTTON NOW! <<<");
+        Serial.println("════════════════════════════════════════\n");
+
+        irrecv.resume();
+
+        // LED blink rapid
+        for (int i = 0; i < 10; i++)
+        {
+            digitalWrite(STATUS_LED, LOW);
+            delay(50);
+            digitalWrite(STATUS_LED, HIGH);
+            delay(50);
+        }
+    }
+}
+
+void handleIRSendCommand(JsonDocument &doc)
+{
+    String button = doc["button"] | "";
+    String code = doc["code"] | ""; // NEW: Get code from payload
+
+    Serial.println("\n╔════════════════════════════════════════╗");
+    Serial.println("║    IR SEND COMMAND RECEIVED!           ║");
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.print("Button: ");
+    Serial.println(button);
+    Serial.print("Code provided: ");
+    Serial.println(code.length() > 0 ? "YES" : "NO (will lookup memory)");
+    Serial.print("Code string length: ");
+    Serial.print(code.length());
+    Serial.println(" chars");
+
+    // Count expected RAW values
+    if (code.startsWith("RAW:"))
+    {
+        int commaCount = 0;
+        for (unsigned int i = 0; i < code.length(); i++)
+        {
+            if (code.charAt(i) == ',')
+                commaCount++;
+        }
+        Serial.print("Expected RAW values: ");
+        Serial.println(commaCount + 1);
+    }
+
+    if (code.length() > 0)
+    {
+        // CODE PROVIDED - Parse and transmit directly!
+        Serial.println("\n📡 Transmitting IR code from Flask...");
+        Serial.print("Code first 100 chars: ");
+        Serial.println(code.substring(0, 100));
+        Serial.print("Code total length: ");
+        Serial.print(code.length());
+        Serial.println(" chars");
+
+        transmitIRCodeString(code);
+    }
+    else if (button != "")
+    {
+        // NO CODE - Lookup from memory (backward compatibility)
+        Serial.println("\n🔍 Looking up code from memory...");
+        sendIRCode(button);
+    }
+    else
+    {
+        Serial.println("\n❌ ERROR: No button name or code provided!");
+    }
+
+    Serial.println("════════════════════════════════════════\n");
+}
+
+// NEW FUNCTION: Transmit IR code from string format
+void transmitIRCodeString(String codeString)
+{
+    Serial.println("[IR] 📤 Parsing IR code string...");
+
+    // Format examples:
+    // "NEC:0x20DF10EF:32"
+    // "RAW:3196,1560,396,330,490..."
+
+    int colonPos = codeString.indexOf(':');
+    if (colonPos < 0)
+    {
+        Serial.println("[IR] ❌ Invalid code format (no colon)");
+        return;
+    }
+
+    String protocol = codeString.substring(0, colonPos);
+    String codeData = codeString.substring(colonPos + 1);
+
+    Serial.print("[IR] Protocol: ");
+    Serial.println(protocol);
+    Serial.print("[IR] codeData length: ");
+    Serial.print(codeData.length());
+    Serial.println(" chars");
+
+    if (protocol == "RAW")
+    {
+        // Parse RAW format: "1234,5678,910,..."
+        Serial.println("[IR] Parsing RAW data...");
+        Serial.print("[IR] Free heap before parse: ");
+        Serial.println(ESP.getFreeHeap());
+
+        // Count expected values FIRST (count commas + 1)
+        uint16_t expectedValues = 1;
+        for (int c = 0; c < (int)codeData.length(); c++)
+        {
+            if (codeData.charAt(c) == ',')
+                expectedValues++;
+        }
+        Serial.print("[IR] Expected RAW values from string: ");
+        Serial.println(expectedValues);
+
+        // Use static array - matches IRrecv buffer size (1024) for ZERO truncation
+        static uint16_t rawData[1024];
+        uint16_t rawCount = 0;
+
+        // OPTIMIZED PARSER: Use c_str() to avoid String allocations during parse
+        const char *rawStr = codeData.c_str();
+        int rawStrLen = codeData.length();
+        int pos = 0;
+
+        while (pos < rawStrLen && rawCount < 1024)
+        {
+            // Parse number directly from char array
+            uint16_t num = 0;
+            while (pos < rawStrLen && rawStr[pos] != ',')
+            {
+                if (rawStr[pos] >= '0' && rawStr[pos] <= '9')
+                {
+                    num = num * 10 + (rawStr[pos] - '0');
+                }
+                pos++;
+            }
+            rawData[rawCount++] = num;
+            pos++; // skip comma
+        }
+
+        Serial.print("[IR] Parsed ");
+        Serial.print(rawCount);
+        Serial.print(" / ");
+        Serial.print(expectedValues);
+        Serial.print(" raw values (from ");
+        Serial.print(rawStrLen);
+        Serial.println(" chars)");
+        Serial.print("[IR] Free heap after parse: ");
+        Serial.println(ESP.getFreeHeap());
+
+        // VERIFY: Did we parse ALL values?
+        if (rawCount != expectedValues)
+        {
+            Serial.println("\n❌❌❌ RAW PARSE MISMATCH! DATA LOSS! ❌❌❌");
+            Serial.print("Expected: ");
+            Serial.print(expectedValues);
+            Serial.print(" Parsed: ");
+            Serial.println(rawCount);
+            if (rawCount >= 1024)
+            {
+                Serial.println("Cause: rawData[1024] buffer full! Signal too long.");
+            }
+        }
+        else
+        {
+            Serial.println("[IR] ✅ RAW parse VERIFIED - ALL values parsed, zero loss!");
+        }
+
+        if (rawCount > 0)
+        {
+            Serial.println("[IR] 📡 Transmitting RAW signal...");
+
+            // CRITICAL FOR AC REMOTES (especially Mitsubishi):
+            // Send ONCE only! The original remote sends one signal.
+            // Sending 3x with 50ms gap BREAKS AC reception because:
+            // - AC full signal takes ~100ms (both frames)
+            // - 50ms gap = 2nd signal starts before AC finishes processing 1st
+            // - AC sees garbled/overlapping data → IGNORES all of them!
+            Serial.println("[IR] 🔴 Sending ONCE at 38kHz (correct for AC)");
+            irsend.sendRaw(rawData, rawCount, 38);
+
+            Serial.println("[IR] ✅ RAW signal transmitted!");
+
+            Serial.print("[IR] 📊 Signal stats: ");
+            Serial.print(rawCount);
+            Serial.println(" values sent");
+            Serial.println("[IR] 💡 CRITICAL FOR MITSUBISHI SRK:");
+            Serial.println("[IR]    ⚠️  JANGAN TERLALU DEKAT! Optimal: 1.5-2.5 meter");
+            Serial.println("[IR]    ⚠️  Terlalu dekat (<50cm) = Signal overpower!");
+            Serial.println("[IR]    1. Test kamera HP: IR LED harus kedip purple 3x");
+            Serial.println("[IR]    2. Mundur ke 2 meter (sweet spot!)");
+            Serial.println("[IR]    3. Arahkan tepat ke sensor AC [○]");
+            Serial.println("[IR]    4. AC harus standby (display nyala redup)");
+        }
+    }
+    else
+    {
+        // Parse encoded format: "0x20DF10EF:32"
+        int secondColon = codeData.indexOf(':');
+        if (secondColon < 0)
+        {
+            Serial.println("[IR] ❌ Invalid encoded format");
+            return;
+        }
+
+        String valueStr = codeData.substring(0, secondColon);
+        String bitsStr = codeData.substring(secondColon + 1);
+
+        // Convert hex string to uint64_t
+        uint64_t value = 0;
+        if (valueStr.startsWith("0x") || valueStr.startsWith("0X"))
+        {
+            valueStr = valueStr.substring(2);
+        }
+
+        // Parse hex manually
+        for (int i = 0; i < valueStr.length(); i++)
+        {
+            char c = valueStr.charAt(i);
+            value = value * 16;
+            if (c >= '0' && c <= '9')
+                value += (c - '0');
+            else if (c >= 'A' && c <= 'F')
+                value += (c - 'A' + 10);
+            else if (c >= 'a' && c <= 'f')
+                value += (c - 'a' + 10);
+        }
+
+        uint16_t bits = bitsStr.toInt();
+
+        Serial.print("[IR] Value: 0x");
+        serialPrintUint64(value, HEX);
+        Serial.println();
+        Serial.print("[IR] Bits: ");
+        Serial.println(bits);
+
+        // Send based on protocol
+        Serial.print("[IR] 📡 Transmitting ");
+        Serial.print(protocol);
+        Serial.println(" signal...");
+
+        if (protocol == "NEC")
+        {
+            irsend.sendNEC(value, bits);
+        }
+        else if (protocol == "SAMSUNG")
+        {
+            irsend.sendSAMSUNG(value, bits);
+        }
+        else if (protocol == "LG")
+        {
+            irsend.sendLG(value, bits);
+        }
+        else if (protocol == "SONY")
+        {
+            irsend.sendSony(value, bits, 2); // Repeat 2 times
+        }
+        else if (protocol == "PANASONIC")
+        {
+            // Panasonic uses address + data format
+            uint16_t address = (value >> 32) & 0xFFFF;
+            uint32_t data = value & 0xFFFFFFFF;
+            irsend.sendPanasonic(address, data);
+        }
+        else if (protocol == "MITSUBISHI_AC" || protocol == "MITSUBISHI")
+        {
+            // Mitsubishi AC - Send as RAW for better compatibility
+            Serial.println("[IR] 🔴 MITSUBISHI AC MODE - Using special handling");
+
+            // For Mitsubishi AC, we need to send RAW data with specific timing
+            // The value contains the full AC state
+
+            // Convert to RAW and send (this is more reliable for AC remotes)
+            if (irCodes[findIRCodeIndex("POWER_ON")].rawLength > 0)
+            {
+                // Use stored RAW data if available
+                int idx = findIRCodeIndex("POWER_ON");
+                if (idx >= 0 && irCodes[idx].rawLength > 0)
+                {
+                    Serial.println("[IR] Using stored RAW data for Mitsubishi AC");
+                    irsend.sendRaw(irCodes[idx].rawData, irCodes[idx].rawLength, 38);
+                }
+            }
+            else
+            {
+                // Fallback: try direct protocol send
+                Serial.println("[IR] Attempting Mitsubishi protocol send");
+                // Note: This might not work for all Mitsubishi models
+                // RAW learning is recommended
+                irsend.send(decode_type_t::MITSUBISHI_AC, value, bits);
+            }
+        }
+        else if (protocol == "MITSUBISHI_HEAVY")
+        {
+            Serial.println("[IR] 🔴 MITSUBISHI HEAVY MODE");
+            irsend.send(decode_type_t::MITSUBISHI_HEAVY_152, value, bits);
+        }
+        else
+        {
+            Serial.print("[IR] ⚠️  Unknown protocol: ");
+            Serial.println(protocol);
+            Serial.println("[IR] Trying generic send...");
+            irsend.send(UNKNOWN, value, bits);
+        }
+
+        Serial.println("[IR] ✅ Signal transmitted!");
+    }
+}
+
+void sendIRCode(String button)
+{
+    int idx = findIRCodeIndex(button);
+
+    if (idx < 0 || !irCodes[idx].learned)
+    {
+        Serial.print("[IR] ❌ No code for ");
+        Serial.println(button);
+        return;
+    }
+
+    Serial.print("[IR] 📤 Sending: ");
+    Serial.println(button);
+
+    if (irCodes[idx].protocol != decode_type_t::UNKNOWN && irCodes[idx].value != 0)
+    {
+        switch (irCodes[idx].protocol)
+        {
+        case decode_type_t::NEC:
+            irsend.sendNEC(irCodes[idx].value, irCodes[idx].bits);
+            break;
+        case decode_type_t::SAMSUNG:
+            irsend.sendSAMSUNG(irCodes[idx].value, irCodes[idx].bits);
+            break;
+        case decode_type_t::LG:
+            irsend.sendLG(irCodes[idx].value, irCodes[idx].bits);
+            break;
+        case decode_type_t::SONY:
+            irsend.sendSony(irCodes[idx].value, irCodes[idx].bits, 2);
+            break;
+        default:
+            if (irCodes[idx].rawLength > 0)
+            {
+                irsend.sendRaw(irCodes[idx].rawData, irCodes[idx].rawLength, 38);
+            }
+            break;
+        }
+    }
+    else if (irCodes[idx].rawLength > 0)
+    {
+        irsend.sendRaw(irCodes[idx].rawData, irCodes[idx].rawLength, 38);
+    }
+
+    Serial.println("[IR] ✅ Sent!");
+}
+
+int findIRCodeIndex(String button)
+{
+    for (int i = 0; i < irCodeCount; i++)
+    {
+        if (irCodes[i].button == button)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
