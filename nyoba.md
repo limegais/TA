@@ -4555,8 +4555,13 @@ def control_outlet():
         if not data or not isinstance(data, dict):
             return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
         
-        outlet_num = data.get('outlet', data.get('outlet_num'))
-        state = data.get('state')
+        # Support both old format and new API format (id/status)
+        outlet_num = data.get('id', data.get('outlet', data.get('outlet_num', 1)))
+        
+        if 'status' in data:
+            state = 'ON' if data['status'] == 1 else 'OFF'
+        else:
+            state = data.get('state', 'OFF')
         
         mqtt_client.publish('smartroom/outlet/control', json.dumps({
             'outlet_num': outlet_num,
@@ -4564,7 +4569,7 @@ def control_outlet():
         }))
         
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {outlet_num} Control: {state}', 'level': 'info'})
-        return jsonify({'status': 'success', 'message': f'Outlet {outlet_num} {state} command sent'})
+        return jsonify({'status': 'ok', 'message': f'Outlet {outlet_num} {state} command sent'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -9297,10 +9302,17 @@ HTML_TEMPLATE = '''
         var outletCharts = {};
 
         function outletControl(num, state) {
+            var payload = {
+                "id": num === 1 ? 8 : num,
+                "nama": "Outlet",
+                "group_key": "master-room",
+                "status": state === 'ON' ? 1 : 0,
+                "is_master": false
+            };
             fetch('/api/outlet/control', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({outlet: num, state: state})
+                body: JSON.stringify(payload)
             })
             .then(r => r.json())
             .then(data => {
