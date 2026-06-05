@@ -5682,6 +5682,9 @@ HTML_TEMPLATE = '''
         <div class="nav-item admin-only" onclick="showPage('lamp-analytics')">
             <span>Lamp Analytics</span>
         </div>
+        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
+            <span>Outlet Analytics</span>
+        </div>
         <div class="nav-item admin-only" onclick="showPage('camera')">
             <span>Camera</span>
         </div>
@@ -5696,9 +5699,6 @@ HTML_TEMPLATE = '''
         </div>
         <div class="nav-item" onclick="showPage('control-outlet')">
             <span>Outlet Control</span>
-        </div>
-        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
-            <span>Outlet Analysis</span>
         </div>
         <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
             <span>ML Optimization</span>
