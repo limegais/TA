@@ -3202,6 +3202,7 @@ def export_csv_from_db():
         # Sort by timestamp then device
         all_rows.sort(key=lambda r: (r.get('timestamp', ''), r.get('_device', '')))
         output = io.StringIO()
+        output.write("sep=,\n")
         writer = _csv.writer(output)
         writer.writerow(['Timestamp', 'Device', 'Voltage (V)', 'Current (A)', 'Active Power (W)',
                          'Reactive Power (VAR)', 'Apparent Power (VA)', 'Power Factor',
@@ -3247,6 +3248,7 @@ def export_csv_from_db():
             if not mysql_rows:
                 return jsonify({'error': f'No data for {dev_name} in MySQL for range {from_dt} to {to_dt}'}), 404
             output = io.StringIO()
+            output.write("sep=,\n")
             fields  = ['timestamp','voltage','current','active_power','reactive_power',
                        'apparent_power','power_factor','frequency','energy_kwh']
             headers = ['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
@@ -3311,6 +3313,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
                                   for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
                 output = io.StringIO()
+                output.write("sep=,\n")
                 writer = _csv.writer(output)
                 writer.writerow(['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
                                  'Frequency (Hz)','Power Factor','Konsumsi Energy (kWh)'])
@@ -3413,6 +3416,7 @@ from(bucket: "{INFLUX_BUCKET}")
 
         sorted_ts = sorted(rows_by_ts.keys())
         output    = io.StringIO()
+        output.write("sep=,\n")
         writer    = _csv.writer(output)
         # Use human-readable headers
         header_row = ['Timestamp'] + [_FIELD_LABELS.get(f, f) for f in fields]
@@ -3739,6 +3743,7 @@ def energy_export_csv():
 
     # Buat CSV — human-readable headers, 1 data = 1 kolom, BOM for Excel
     output = io.StringIO()
+    output.write("sep=,\n")
     fields = ['timestamp','device','voltage','current','active_power','reactive_power','semu','pf','frequency','energy_kwh']
     header_labels = {
         'timestamp': 'Timestamp',
@@ -4064,6 +4069,7 @@ def ga_export_csv():
         improvement = '-'
 
     buf = io.StringIO()
+    buf.write("sep=,\n")
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
@@ -4141,6 +4147,7 @@ def pso_export_csv():
         return jsonify({'error': 'No PSO iteration data yet. Run PSO first.'}), 404
 
     buf = io.StringIO()
+    buf.write("sep=,\n")
     wr  = csv_mod.writer(buf)
 
     # Header
@@ -9830,6 +9837,7 @@ HTML_TEMPLATE = '''
 
         // ==================== EXPORT FUNCTIONS ====================
         function downloadCSV(filename, csvContent) {
+            csvContent = "sep=,\\n" + csvContent;
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
