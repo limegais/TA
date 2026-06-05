@@ -4548,6 +4548,42 @@ def control_lamp():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/outlet/control', methods=['POST'])
+def control_outlet():
+    try:
+        data = request.json
+        if not data or not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
+        
+        outlet_num = data.get('outlet', data.get('outlet_num'))
+        state = data.get('state')
+        
+        mqtt_client.publish('smartroom/outlet/control', json.dumps({
+            'outlet_num': outlet_num,
+            'state': state
+        }))
+        
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {outlet_num} Control: {state}', 'level': 'info'})
+        return jsonify({'status': 'success', 'message': f'Outlet {outlet_num} {state} command sent'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/status', methods=['GET'])
+def get_outlet_status():
+    try:
+        # Assuming only 1 outlet as per user request
+        return jsonify({
+            'status': 'ok',
+            'outlets': [
+                {'id': 1, 'state': 'OFF', 'power': 0, 'energy': 0}
+            ],
+            'total_power': 0,
+            'today_kwh': 0,
+            'peak_power': 0
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/ac/mode', methods=['POST'])
 def set_ac_mode():
     try:
@@ -7686,59 +7722,14 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- Power Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Outlet Power Usage (W)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportOutletCSV()" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn active" id="outlet-range-1h" onclick="loadOutletAnalytics('1h',this)">1h</button>
-                        <button class="chart-option-btn" id="outlet-range-6h" onclick="loadOutletAnalytics('6h',this)">6h</button>
-                        <button class="chart-option-btn" id="outlet-range-24h" onclick="loadOutletAnalytics('24h',this)">24h</button>
-                        <button class="chart-option-btn" id="outlet-range-7d" onclick="loadOutletAnalytics('7d',this)">7d</button>
-                    </div>
-                </div>
-                <canvas id="outletPowerChart" height="80"></canvas>
-            </div>
-
-            <!-- Energy Consumption Chart -->
-            <div class="chart-container" style="margin-top:18px;">
-                <div class="chart-header">
-                    <div class="chart-title">Energy Consumption per Outlet (kWh)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" id="outlet-kwh-24h" onclick="loadOutletKwhChart('24h',this)">24h</button>
-                        <button class="chart-option-btn" id="outlet-kwh-7d" onclick="loadOutletKwhChart('7d',this)">7d</button>
-                        <button class="chart-option-btn" id="outlet-kwh-30d" onclick="loadOutletKwhChart('30d',this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="outletKwhChart" height="80"></canvas>
-            </div>
 
             <!-- Per-Outlet Breakdown -->
             <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;">
                 <div style="padding:16px;border-radius:14px;border:1px solid rgba(37,99,235,0.2);background:rgba(37,99,235,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 1</div>
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet</div>
                     <div style="font-size:22px;font-weight:700;color:#2563eb;"><span id="oa-o1-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
                     <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o1-kwh" style="font-weight:600;color:#2563eb;">--</span> kWh</div>
                     <div id="oa-o1-bar" style="height:4px;border-radius:2px;background:rgba(37,99,235,0.15);margin-top:8px;"><div id="oa-o1-bar-fill" style="height:100%;border-radius:2px;background:#2563eb;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(14,165,233,0.2);background:rgba(14,165,233,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 2</div>
-                    <div style="font-size:22px;font-weight:700;color:#0ea5e9;"><span id="oa-o2-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o2-kwh" style="font-weight:600;color:#0ea5e9;">--</span> kWh</div>
-                    <div id="oa-o2-bar" style="height:4px;border-radius:2px;background:rgba(14,165,233,0.15);margin-top:8px;"><div id="oa-o2-bar-fill" style="height:100%;border-radius:2px;background:#0ea5e9;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(59,130,246,0.2);background:rgba(59,130,246,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 3</div>
-                    <div style="font-size:22px;font-weight:700;color:#3b82f6;"><span id="oa-o3-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o3-kwh" style="font-weight:600;color:#3b82f6;">--</span> kWh</div>
-                    <div id="oa-o3-bar" style="height:4px;border-radius:2px;background:rgba(59,130,246,0.15);margin-top:8px;"><div id="oa-o3-bar-fill" style="height:100%;border-radius:2px;background:#3b82f6;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(30,64,175,0.2);background:rgba(30,64,175,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 4</div>
-                    <div style="font-size:22px;font-weight:700;color:#1e40af;"><span id="oa-o4-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o4-kwh" style="font-weight:600;color:#1e40af;">--</span> kWh</div>
-                    <div id="oa-o4-bar" style="height:4px;border-radius:2px;background:rgba(30,64,175,0.15);margin-top:8px;"><div id="oa-o4-bar-fill" style="height:100%;border-radius:2px;background:#1e40af;width:0%;"></div></div>
                 </div>
             </div>
         </div>
