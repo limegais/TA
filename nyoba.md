@@ -2580,7 +2580,7 @@ def on_message(client, userdata, msg):
                 'voltage': payload.get('voltage', 0),
                 'current': payload.get('current', 0),
                 'power': payload.get('power', 0),
-                'energy': payload.get('energy', 0),
+                'energy': float(payload.get('energy', 0)) / 1000.0,
                 'frequency': payload.get('frequency', 0),
                 'pf': payload.get('pf', 0),
                 'connected': True
@@ -3725,7 +3725,7 @@ def energy_export_csv():
                 'voltage':   float(d.get('voltage')   or 0),
                 'current':       float(d.get('current')       or 0),
                 'active_power': p,
-                'energy_kwh': float(d.get('total_energy') or 0),
+                'energy_kwh': float(d.get('total_energy') or 0) / 1000.0,
                 'frequency':  float(d.get('frequency')  or 0),
                 'pf':         pf,
                 'reactive_power':    float(d.get('reactive_power') or 0),
@@ -7675,6 +7675,39 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
+            <!-- Live Electrical Parameters -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:20px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:15px;display:flex;align-items:center;">
+                    <i class="fas fa-bolt" style="color:#059669;margin-right:8px;"></i> Live Electrical Parameters
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Voltage</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-voltage">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">V</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Current</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-current">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">A</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Apparent</div>
+                        <div style="font-size:20px;font-weight:700;color:#3b82f6;"><span id="oa-live-apparent">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VA</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Reactive</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-reactive">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VAR</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Frequency</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-freq">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">Hz</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Power Factor</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-pf">--</span> <span id="oa-live-pf-quality" style="font-size:10px;padding:2px 6px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;vertical-align:middle;">--</span></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Power Chart -->
             <div class="chart-container">
                 <div class="chart-header">
@@ -11545,6 +11578,12 @@ HTML_TEMPLATE = '''
             s('eu-outlet-voltage', f(outlet.voltage));       s('eu-outlet-current', f(outlet.current, 2));
             s('eu-outlet-kwh',     fkwh(outlet.energy));     s('eu-outlet-freq',    f(outlet.frequency, 2));
             s('eu-outlet-pf',      f(outlet.pf, 2));          s('eu-outlet-ts',      outlet.updated_at || '--');
+            
+            // Populate Outlet Analysis Live Params
+            s('oa-live-voltage', f(outlet.voltage));       s('oa-live-current', f(outlet.current, 2));
+            s('oa-live-apparent', f(outlet.apparent_power, 1)); s('oa-live-reactive', f(outlet.reactive_power, 1));
+            s('oa-live-freq', f(outlet.frequency, 2));      s('oa-live-pf', f(outlet.pf, 2));
+            
             s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
             s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     fkwh(lamp.energy));
             s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
@@ -11570,6 +11609,7 @@ HTML_TEMPLATE = '''
             };
             _applyBadge('eu-ac-pf-quality',   ac.pf);
             _applyBadge('eu-outlet-pf-quality', outlet.pf);
+            _applyBadge('oa-live-pf-quality', outlet.pf);
             _applyBadge('eu-lamp-pf-quality', lamp.pf);
             var acBar = document.getElementById('eu-ac-pbar');
             var outletBar = document.getElementById('eu-outlet-pbar');
@@ -11644,7 +11684,16 @@ HTML_TEMPLATE = '''
 
         // ── Socket handler ──
         socket.on('mysql_energy_update', function(data) {
-            _applyEnergyData(data.ac || {}, data.outlet || {}, data.lamp || {});
+            var ac = data.ac || {};
+            var outlet = data.outlet || {};
+            var lamp = data.lamp || {};
+            
+            // PROTEKSI GANDA: Pastikan menjadi kWh, jika masih di atas 1000 (Wh), paksa bagi 1000
+            if (ac.energy > 1000) ac.energy = ac.energy / 1000.0;
+            if (outlet.energy > 1000) outlet.energy = outlet.energy / 1000.0;
+            if (lamp.energy > 1000) lamp.energy = lamp.energy / 1000.0;
+
+            _applyEnergyData(ac, outlet, lamp);
         });
 
         // ── Direct PHP polling fallback ──
