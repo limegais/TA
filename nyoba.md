@@ -3900,7 +3900,10 @@ def energy_history():
                 for start in starts:
                     if start in values_by_bucket:
                         last_value = values_by_bucket[start]
-                    points.append({'time': start.strftime(time_format), 'value': round(float(last_value), dec)})
+                    val = float(last_value)
+                    if val > 10000:
+                        val = val / 1000.0
+                    points.append({'time': start.strftime(time_format), 'value': round(val, dec)})
                 return points
 
             return [
@@ -3951,9 +3954,12 @@ def energy_history():
             for table in result:
                 for record in table.records:
                     dec = 5 if field_name == 'energy_kwh' else 2
+                    val = float(record.get_value())
+                    if field_name == 'energy_kwh' and val > 10000:
+                        val = val / 1000.0
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(float(record.get_value()), dec)
+                        'value': round(val, dec)
                     })
             return points
 
@@ -4328,7 +4334,10 @@ def energy_daily_summary():
                     for rec in table.records:
                         v = rec.get_value()
                         if v is not None:
-                            return round(float(v), 3)
+                            val = float(v)
+                            if field == 'energy_kwh' and val > 10000:
+                                val = val / 1000.0
+                            return round(val, 3)
             except Exception:
                 pass
             return 0.0
@@ -4348,7 +4357,10 @@ def energy_daily_summary():
                     for rec in table.records:
                         v = rec.get_value()
                         if v is not None:
-                            return round(float(v), 3)
+                            val = float(v)
+                            if field == 'energy_kwh' and val > 10000:
+                                val = val / 1000.0
+                            return round(val, 3)
             except Exception:
                 pass
             return 0.0
@@ -4374,9 +4386,15 @@ def energy_daily_summary():
         lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
         lamp_power_peak = _query_today_max('mysql_lamp', 'power')
 
+        # Outlet metrics (mysql_outlet)
+        outlet_kwh     = _query_today('mysql_outlet', 'energy_kwh', 'max')
+        outlet_power_avg = _query_today('mysql_outlet', 'power', 'mean')
+        outlet_power_peak = _query_today_max('mysql_outlet', 'power')
+
         # Runtime from ring buffers (fallback when InfluxDB has no data yet today)
         ac_runtime_h   = _runtime_hours_from_buffer(energy_runtime_history, threshold_power=50.0)
         lamp_runtime_h = _runtime_hours_from_buffer(lamp_runtime_history, threshold_power=5.0)
+        outlet_runtime_h = _runtime_hours_from_buffer(outlet_runtime_history, threshold_power=5.0)
 
         # If InfluxDB returned 0 kWh, estimate from ring buffer
         if ac_kwh == 0 and ac_power_avg == 0:
@@ -4393,8 +4411,15 @@ def energy_daily_summary():
                 lamp_power_avg = round(sum(lamp_vals) / len(lamp_vals), 1)
                 lamp_power_peak = round(max(lamp_vals), 1)
                 lamp_kwh = round(lamp_power_avg * lamp_runtime_h / 1000.0, 4)
+        if outlet_kwh == 0 and outlet_power_avg == 0:
+            today = now_local.date()
+            outlet_vals = [r.get('power', 0) for r in outlet_runtime_history if r.get('ts') and r['ts'].date() == today]
+            if outlet_vals:
+                outlet_power_avg = round(sum(outlet_vals) / len(outlet_vals), 1)
+                outlet_power_peak = round(max(outlet_vals), 1)
+                outlet_kwh = round(outlet_power_avg * outlet_runtime_h / 1000.0, 4)
 
-        total_kwh = round(ac_kwh + lamp_kwh, 4)
+        total_kwh = round(ac_kwh + lamp_kwh + outlet_kwh, 4)
         cost_rp   = round(total_kwh * 1500)
 
         return jsonify({
@@ -4410,6 +4435,12 @@ def energy_daily_summary():
                 'power_avg_w': lamp_power_avg,
                 'power_peak_w': lamp_power_peak,
                 'runtime_h': lamp_runtime_h
+            },
+            'outlet': {
+                'kwh': outlet_kwh,
+                'power_avg_w': outlet_power_avg,
+                'power_peak_w': outlet_power_peak,
+                'runtime_h': outlet_runtime_h
             },
             'total_kwh': total_kwh,
             'cost_rp': cost_rp
@@ -8813,7 +8844,7 @@ HTML_TEMPLATE = '''
                         deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
                         rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
                     }
-                    var chartKey = device === 'ac' ? 'acEnergyKwh' : 'lampEnergyKwh';
+                    var chartKey = device === 'ac' ? 'acEnergyKwh' : (device === 'lamp' ? 'lampEnergyKwh' : 'outletEnergyKwhMySQL');
                     var chart = charts[chartKey];
                     if (chart && chart.data) {
                         chart.data.labels = rangeLabels;
@@ -8821,7 +8852,7 @@ HTML_TEMPLATE = '''
                         chart.update('none');
                     }
                     // Update stat cards
-                    var prefix = device === 'ac' ? 'ac' : 'lamp';
+                    var prefix = device; // device is 'ac', 'lamp', or 'outlet'
                     var lastEl = document.getElementById(prefix + '-analytics-kwh-last');
                     var totalEl = document.getElementById(prefix + '-analytics-kwh-total');
                     var avgEl = document.getElementById(prefix + '-analytics-kwh-avg');
@@ -8877,6 +8908,10 @@ HTML_TEMPLATE = '''
                     setText('ds-lamp-peak',    d.lamp ? d.lamp.power_peak_w.toFixed(1) : '--');
                     setText('ds-ac-runtime',   d.ac ? d.ac.runtime_h.toFixed(2) : '--');
                     setText('ds-lamp-runtime', d.lamp ? d.lamp.runtime_h.toFixed(2) : '--');
+                    if (d.outlet) {
+                        setText('outlet-today-kwh', d.outlet.kwh !== undefined ? fmtKwh(d.outlet.kwh) : '--');
+                        setText('outlet-peak-power', d.outlet.power_peak_w !== undefined ? d.outlet.power_peak_w.toFixed(1) : '--');
+                    }
                 })
                 .catch(function(e) { console.error('Daily summary error:', e); });
         }
@@ -11635,6 +11670,7 @@ HTML_TEMPLATE = '''
             s('ac-energy-kwh',   fkwh(acKwh));
             s('outlet-energy-kwh', fkwh(outletKwh));
             s('outlet-analytics-total-energy', fkwh(outletKwh));
+            s('outlet-total-power', outletPow.toFixed(1));
             s('lamp-energy-kwh', fkwh(lampKwh));
             s('total-energy-kwh', fkwh(totKwh));
             s('ac-voltage-card',  f(ac.voltage));
