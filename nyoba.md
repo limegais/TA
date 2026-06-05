@@ -4555,18 +4555,22 @@ def control_outlet():
         if not data or not isinstance(data, dict):
             return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
         
-        # Support both old format and new API format (id/status)
         outlet_num = data.get('id', data.get('outlet', data.get('outlet_num', 1)))
-        
         if 'status' in data:
             state = 'ON' if data['status'] == 1 else 'OFF'
         else:
             state = data.get('state', 'OFF')
+            
+        # Send the exact API structure to MQTT as requested
+        mqtt_payload = {
+            "id": outlet_num if outlet_num == 8 else (8 if outlet_num == 1 else outlet_num),
+            "nama": "Outlet",
+            "group_key": "master-room",
+            "status": 1 if state == 'ON' else 0,
+            "is_master": False
+        }
         
-        mqtt_client.publish('smartroom/outlet/control', json.dumps({
-            'outlet_num': outlet_num,
-            'state': state
-        }))
+        mqtt_client.publish('smartroom/outlet/control', json.dumps(mqtt_payload))
         
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {outlet_num} Control: {state}', 'level': 'info'})
         return jsonify({'status': 'ok', 'message': f'Outlet {outlet_num} {state} command sent'})
@@ -4585,6 +4589,48 @@ def get_outlet_status():
             'total_power': 0,
             'today_kwh': 0,
             'peak_power': 0
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/history', methods=['GET'])
+def api_outlet_history():
+    try:
+        range_str = request.args.get('range', '1h')
+        hours = 1
+        if 'h' in range_str:
+            try: hours = int(range_str.replace('h', ''))
+            except: hours = 1
+        elif 'd' in range_str:
+            try: hours = int(range_str.replace('d', '')) * 24
+            except: hours = 24
+                
+        res = get_influx_data('energy_monitor', 'power', hours, device_tag='mysql_outlet')
+        return jsonify({
+            'labels': res.get('time', []),
+            'outlet1': res.get('value', []),
+            'outlet2': [], 'outlet3': [], 'outlet4': []
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/energy', methods=['GET'])
+def api_outlet_energy():
+    try:
+        range_str = request.args.get('range', '24h')
+        hours = 24
+        if 'h' in range_str:
+            try: hours = int(range_str.replace('h', ''))
+            except: hours = 24
+        elif 'd' in range_str:
+            try: hours = int(range_str.replace('d', '')) * 24
+            except: hours = 24
+                
+        res = get_influx_data('energy_monitor', 'energy_kwh', hours, device_tag='mysql_outlet')
+        return jsonify({
+            'labels': res.get('time', []),
+            'outlet1': res.get('value', []),
+            'outlet2': [], 'outlet3': [], 'outlet4': []
         })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
