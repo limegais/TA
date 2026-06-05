@@ -2,7 +2,7 @@ from flask import Flask, render_template_string, jsonify, request, Response, ses
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -1762,6 +1762,8 @@ mqtt_status = {
 
 # Runtime energy history fallback (used when Influx query returns no points)
 energy_runtime_history = deque(maxlen=5000)
+# Runtime outlet energy history fallback (MySQL id_kwh=2)
+outlet_runtime_history = deque(maxlen=5000)
 # Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
 lamp_runtime_history = deque(maxlen=5000)
 
@@ -3812,10 +3814,129 @@ def energy_history():
         else:  # 5y
             time_format = '%Y'      # 2024, 2025, 2026, ...
 
+        def _add_months(dt, months):
+            month_index = dt.month - 1 + months
+            year = dt.year + month_index // 12
+            month = month_index % 12 + 1
+            return dt.replace(year=year, month=month, day=1)
+
+        def _to_flux_time(dt):
+            return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+        def _fixed_bucket_spec(extra_baseline=False):
+            """Return fixed local bucket starts so charts always show the requested count."""
+            now = datetime.now()
+            if period == '24h':
+                end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                starts = [end - timedelta(hours=i) for i in range(24, 0, -1)]
+                prev_start = starts[0] - timedelta(hours=1)
+                window = '1h'
+            elif period == '7d':
+                end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                starts = [end - timedelta(days=i) for i in range(7, 0, -1)]
+                prev_start = starts[0] - timedelta(days=1)
+                window = '1d'
+            elif period == '30d':
+                end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                starts = [end - timedelta(days=i) for i in range(30, 0, -1)]
+                prev_start = starts[0] - timedelta(days=1)
+                window = '1d'
+            elif period == '12mo':
+                this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                end = _add_months(this_month, 1)
+                starts = [_add_months(end, -i) for i in range(12, 0, -1)]
+                prev_start = _add_months(starts[0], -1)
+                window = '1mo'
+            else:
+                return None
+
+            if extra_baseline:
+                starts = [prev_start] + starts
+            return {'starts': starts, 'start': starts[0], 'end': end, 'window': window}
+
+        def _bucket_key(dt):
+            if period == '24h':
+                return dt.replace(minute=0, second=0, microsecond=0)
+            if period in ('7d', '30d'):
+                return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            if period == '12mo':
+                return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            return dt
+
+        def _runtime_bucket_values(field_name, spec):
+            if device == 'lamp':
+                buf = lamp_runtime_history
+            elif device == 'outlet':
+                buf = outlet_runtime_history
+            else:
+                buf = energy_runtime_history
+            rows = [r for r in buf if r.get('ts') and spec['start'] <= r['ts'] < spec['end']]
+            if not rows:
+                return {}
+
+            grouped = {}
+            for row in rows:
+                key = _bucket_key(row['ts'])
+                grouped.setdefault(key, []).append(row)
+
+            values = {}
+            for key, items in grouped.items():
+                if field_name == 'energy_kwh':
+                    latest = max(items, key=lambda r: r.get('ts'))
+                    values[key] = float(latest.get(field_name, 0) or 0)
+                else:
+                    vals = [float(r.get(field_name, 0) or 0) for r in items]
+                    values[key] = sum(vals) / len(vals) if vals else 0.0
+            return values
+
+        def _points_from_fixed_buckets(field_name, values_by_bucket, spec):
+            dec = 5 if field_name == 'energy_kwh' else 2
+            starts = spec['starts']
+
+            if field_name == 'energy_kwh':
+                first_available = next((values_by_bucket[s] for s in starts if s in values_by_bucket), 0.0)
+                last_value = first_available
+                points = []
+                for start in starts:
+                    if start in values_by_bucket:
+                        last_value = values_by_bucket[start]
+                    points.append({'time': start.strftime(time_format), 'value': round(float(last_value), dec)})
+                return points
+
+            return [
+                {'time': start.strftime(time_format), 'value': round(float(values_by_bucket.get(start, 0.0)), dec)}
+                for start in starts
+            ]
+
         def query_field_points(field_name):
             # energy_kwh is cumulative — use last() per window so final value
             # of each interval is taken (not average), so JS can diff between points
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
+            fixed_spec = _fixed_bucket_spec(extra_baseline=(field_name == 'energy_kwh'))
+            if fixed_spec:
+                query = f'''
+                from(bucket: "{INFLUX_BUCKET}")
+                  |> range(start: time(v: "{_to_flux_time(fixed_spec['start'])}"), stop: time(v: "{_to_flux_time(fixed_spec['end'])}"))
+                  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+                  |> filter(fn: (r) => r["_field"] == "{field_name}")
+                  |> filter(fn: (r) => r["device"] == "{device_tag}")
+                  |> aggregateWindow(every: {fixed_spec['window']}, fn: {agg_fn}, createEmpty: false, timeSrc: "_start")
+                  |> yield(name: "{agg_fn}")
+                '''
+                result = query_api.query(query=query)
+                values_by_bucket = {}
+                expected_starts = set(fixed_spec['starts'])
+                for table in result:
+                    for record in table.records:
+                        rec_time = record.get_time().astimezone().replace(tzinfo=None)
+                        key = _bucket_key(rec_time)
+                        if key in expected_starts:
+                            values_by_bucket[key] = float(record.get_value())
+
+                if not values_by_bucket:
+                    values_by_bucket = _runtime_bucket_values(field_name, fixed_spec)
+
+                return _points_from_fixed_buckets(field_name, values_by_bucket, fixed_spec)
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
               |> range(start: {p['range']})
@@ -3843,7 +3964,12 @@ def energy_history():
                 now = datetime.now()
                 lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
                 cutoff = now - lookback
-                buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
+                if device == 'lamp':
+                    buf = lamp_runtime_history
+                elif device == 'outlet':
+                    buf = outlet_runtime_history
+                else:
+                    buf = energy_runtime_history
                 runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
                 if runtime:
                     step = max(1, len(runtime) // 120)
@@ -3858,7 +3984,12 @@ def energy_history():
             now = datetime.now()
             lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
             cutoff = now - lookback
-            buf = lamp_runtime_history if device == 'lamp' else energy_runtime_history
+            if device == 'lamp':
+                buf = lamp_runtime_history
+            elif device == 'outlet':
+                buf = outlet_runtime_history
+            else:
+                buf = energy_runtime_history
             runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
             if runtime:
                 step = max(1, len(runtime) // 120)
@@ -7473,6 +7604,33 @@ HTML_TEMPLATE = '''
                 <p>Power consumption monitoring per outlet over time</p>
             </div>
 
+            <!-- MySQL Outlet Energy Consumption Chart -->
+            <div class="chart-container" style="margin-bottom:18px;">
+                <div class="chart-header">
+                    <div class="chart-title">MySQL Outlet Energy Consumption (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('outlet','24h',this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('outlet','7d',this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('outlet','30d',this)">30d</button>
+                    </div>
+                </div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:15px;padding:0 10px;">
+                    <div>
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Latest Interval</div>
+                        <div id="outlet-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Total Period</div>
+                        <div id="outlet-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Average</div>
+                        <div id="outlet-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                </div>
+                <canvas id="outletEnergyKwhMySQLChart" height="90"></canvas>
+            </div>
+
             <!-- Summary Stats -->
             <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:20px;">
                 <div class="stat-card">
@@ -7490,6 +7648,14 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="stat-value"><span id="outlet-today-kwh" style="color:#0ea5e9;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
                     <div class="stat-change">Energy used today</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Total Energy</span>
+                        <div class="stat-icon" style="background:rgba(5,150,105,0.15);color:#059669;"><i class="fas fa-plug"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-analytics-total-energy" style="color:#059669;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
+                    <div class="stat-change">Cumulative energy usage</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-header">
@@ -7707,6 +7873,60 @@ HTML_TEMPLATE = '''
             }
         }
 
+        // Energy-specific options with tooltip formatting and styled axes.
+        // This is used both during initial chart creation and later when Energy Usage
+        // charts are recreated between line and bar types.
+        function makeEnergyOpts(unit) {
+            return {
+                responsive: true,
+                maintainAspectRatio: true,
+                animation: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        enabled: true,
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#f0f7ff',
+                        bodyColor: '#bfdbfe',
+                        borderColor: 'rgba(148,163,184,0.35)',
+                        borderWidth: 1,
+                        displayColors: true,
+                        callbacks: {
+                            label: function(ctx) {
+                                var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
+                                var delta = ctx.parsed.y;
+                                // If kWh chart and cumulative arrays exist, show calculation
+                                if (unit === 'kWh' && ctx.chart._kwhCumAc) {
+                                    var idx = ctx.dataIndex;
+                                    var cumArr = [ctx.chart._kwhCumAc, ctx.chart._kwhCumOutlet, ctx.chart._kwhCumLamp, null][ctx.datasetIndex];
+                                    if (cumArr && cumArr.length > idx + 1) {
+                                        var prev = cumArr[idx].toFixed(4);
+                                        var curr = cumArr[idx + 1].toFixed(4);
+                                        return dsLabel + ': ' + curr + ' \u2212 ' + prev + ' = ' + delta.toFixed(5) + ' kWh';
+                                    }
+                                    return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
+                                }
+                                return dsLabel + ': ' + formatChartValue(delta, unit);
+                            },
+                            title: function(items) {
+                                if (!items || !items[0]) return '';
+                                var lbl = items[0].label || '';
+                                if (unit === 'kWh') {
+                                    return lbl.indexOf('\u2192') >= 0 ? lbl.replace('\u2192', ' \u2192 ') : lbl;
+                                }
+                                return 'Time: ' + lbl;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { grid: { color: 'rgba(148,163,184,0.12)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+                    y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' } }
+                }
+            };
+        }
+
         // ==================== CHARTS ====================
         function initCharts() {
             function makeOpts(showLegend) {
@@ -7724,41 +7944,6 @@ HTML_TEMPLATE = '''
                     opts.plugins.legend.labels = { color: '#94a3b8', font: { size: 12 } };
                 }
                 return opts;
-            }
-
-            // Energy-specific options with tooltip formatting and styled axes
-            function makeEnergyOpts(unit) {
-                return {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    animation: false,
-                    interaction: { mode: 'index', intersect: false },
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            enabled: true,
-                            backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                            titleColor: '#f0f7ff',
-                            bodyColor: '#bfdbfe',
-                            borderColor: 'rgba(148,163,184,0.35)',
-                            borderWidth: 1,
-                            displayColors: true,
-                            callbacks: {
-                                label: function(ctx) {
-                                    var label = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
-                                    return label + ': ' + formatChartValue(ctx.parsed.y, unit);
-                                },
-                                title: function(items) {
-                                    return items && items[0] ? ('Time: ' + items[0].label) : 'Time';
-                                }
-                            }
-                        }
-                    },
-                    scales: {
-                        x: { grid: { color: 'rgba(148,163,184,0.12)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
-                        y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' } }
-                    }
-                };
             }
 
             charts.temp = new Chart(document.getElementById('tempChart'), {
@@ -7869,6 +8054,41 @@ HTML_TEMPLATE = '''
                     pointBackgroundColor: '#2563eb', pointBorderColor: '#fff', pointBorderWidth: 2
                 }] }
             });
+
+            charts.outletEnergyKwhMySQL = new Chart(document.getElementById('outletEnergyKwhMySQLChart'), {
+                type: 'line',
+                options: {
+                    responsive: true, maintainAspectRatio: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff',
+                            bodyColor: '#a7f3d0', borderColor: 'rgba(5,150,105,0.4)', borderWidth: 1,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(ctx) { return 'Delta: ' + ctx.parsed.y.toFixed(5) + ' kWh'; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(148,163,184,0.10)' }, ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: 'rgba(5,150,105,0.10)' }, ticks: { color: '#94a3b8' }, title: { display: true, text: 'kWh', color: '#64748b', font: { size: 10 } } }
+                    }
+                },
+                data: { labels: [], datasets: [{
+                    label: 'Outlet Energy (kWh)', data: [],
+                    borderColor: '#059669', borderWidth: 2, tension: 0.3,
+                    backgroundColor: function(ctx) {
+                        var c = ctx.chart.ctx; var a = ctx.chart.chartArea; if (!a) return 'rgba(5,150,105,0.1)';
+                        var g = c.createLinearGradient(0, a.top, 0, a.bottom);
+                        g.addColorStop(0, 'rgba(5,150,105,0.25)'); g.addColorStop(1, 'rgba(5,150,105,0.02)'); return g;
+                    },
+                    fill: true, pointRadius: 2, pointHoverRadius: 6,
+                    pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2
+                }] }
+            });
+
 
             charts.energyPower = new Chart(document.getElementById('energyPowerChart'), {
                 type: 'line', options: makeEnergyOpts('W'),
@@ -8346,6 +8566,7 @@ HTML_TEMPLATE = '''
                     if (field === 'energy_kwh') {
                         function computeDeltas(cumValues) {
                             var deltas = [];
+                            if (cumValues.length <= 1) return cumValues.slice();
                             for (var i = 1; i < cumValues.length; i++) {
                                 var diff = cumValues[i] - cumValues[i - 1];
                                 deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
@@ -8354,6 +8575,7 @@ HTML_TEMPLATE = '''
                         }
                         function buildRangeLabels(labels) {
                             var rangeLabels = [];
+                            if (labels.length <= 1) return labels.slice();
                             for (var i = 1; i < labels.length; i++) {
                                 rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
                             }
@@ -8367,25 +8589,21 @@ HTML_TEMPLATE = '''
                         outletValues = computeDeltas(outletValues);
                         lampValues = computeDeltas(lampValues);
 
-                        // For bar chart periods, use simple labels; for line use range labels
-                        var useBarChart = (period === '7d' || period === '30d' || period === '12mo');
+                        // Daily stays as a line; every longer Energy Usage period is a bar chart.
+                        var useBarChart = (period !== '24h');
                         if (useBarChart) {
-                            acLabels = acLabels.slice(1);
-                            outletLabels = outletLabels.slice(1);
-                            lampLabels = lampLabels.slice(1);
+                            if (acLabels.length > 1) acLabels = acLabels.slice(1);
+                            if (outletLabels.length > 1) outletLabels = outletLabels.slice(1);
+                            if (lampLabels.length > 1) lampLabels = lampLabels.slice(1);
                         } else {
                             acLabels = buildRangeLabels(acLabels);
                             outletLabels = buildRangeLabels(outletLabels);
                             lampLabels = buildRangeLabels(lampLabels);
                         }
-
-                        chart._kwhCumAc = acCumRaw;
-                        chart._kwhCumOutlet = outletCumRaw;
-                        chart._kwhCumLamp = lampCumRaw;
                     }
 
                     // ── Determine chart type: Daily (24h) = line, others = bar ──
-                    var useBarForAll = (period === '7d' || period === '30d' || period === '12mo');
+                    var useBarForAll = (period !== '24h');
                     var targetType = useBarForAll ? 'bar' : 'line';
                     var unitMap = { power: 'kW', voltage: 'V', current: 'A', energy_kwh: 'kWh' };
                     var unit = unitMap[field] || '';
@@ -8396,71 +8614,51 @@ HTML_TEMPLATE = '''
                         chart.destroy();
                         var canvasId = energyCanvasMap[field];
                         var canvas = document.getElementById(canvasId);
+                        var baseOpts = makeEnergyOpts(unit);
+                        var datasetsToUse;
+
                         if (useBarForAll) {
-                            var barDatasets = [
+                            baseOpts.plugins.legend = { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } };
+                            baseOpts.scales.x.grid = { display: false };
+                            baseOpts.scales.x.ticks.maxRotation = 45;
+                            baseOpts.scales.y.title = { display: true, text: unit, color: '#94a3b8', font: { size: 11 } };
+                            
+                            datasetsToUse = [
                                 { label: 'AC (' + unit + ')', data: [], backgroundColor: 'rgba(30,64,175,0.6)', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
                                 { label: 'Outlet (' + unit + ')', data: [], backgroundColor: 'rgba(5,150,105,0.6)', borderColor: '#059669', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 },
                                 { label: 'Lamp (' + unit + ')', data: [], backgroundColor: 'rgba(234,179,8,0.6)', borderColor: '#eab308', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 }
                             ];
                             if (hasTotal) {
-                                barDatasets.push({ label: 'Total (' + unit + ')', data: [], backgroundColor: 'rgba(124,58,237,0.4)', borderColor: '#7c3aed', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 });
+                                datasetsToUse.push({ label: 'Total (' + unit + ')', data: [], backgroundColor: 'rgba(124,58,237,0.4)', borderColor: '#7c3aed', borderWidth: 1, borderRadius: 4, barPercentage: 0.6, categoryPercentage: 0.85 });
                             }
-                            chart = new Chart(canvas, {
-                                type: 'bar',
-                                options: Object.assign({}, makeEnergyOpts(unit), {
-                                    plugins: Object.assign({}, makeEnergyOpts(unit).plugins, {
-                                        legend: { display: true, labels: { boxWidth: 14, font: { size: 11 }, color: '#94a3b8', padding: 14 } },
-                                        tooltip: { mode: 'index', intersect: false,
-                                            backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#f0f7ff', bodyColor: '#bfdbfe',
-                                            borderColor: 'rgba(148,163,184,0.35)', borderWidth: 1, displayColors: true,
-                                            callbacks: { title: function(items){ return items && items[0] ? items[0].label : ''; }, label: function(ctx){ var ds = ctx.dataset && ctx.dataset.label ? ctx.dataset.label : ''; return ds + ': ' + ctx.parsed.y.toFixed(field === 'energy_kwh' ? 5 : 2) + ' ' + unit; } }
-                                        }
-                                    }),
-                                    scales: {
-                                        x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, autoSkip: true, font: { size: 11 } } },
-                                        y: { beginAtZero: true, grid: { color: 'rgba(148,163,184,0.14)' }, ticks: { color: '#94a3b8' },
-                                             title: { display: true, text: unit, color: '#94a3b8', font: { size: 11 } } }
-                                    }
-                                }),
-                                data: { labels: [], datasets: barDatasets }
-                            });
                         } else {
                             // Line chart (Daily / 24h)
-                            var lineDatasets = [
+                            datasetsToUse = [
                                 { label: 'AC (' + unit + ')', data: [], borderColor: '#1e40af', backgroundColor: 'rgba(30,64,175,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#1e40af', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
                                 { label: 'Outlet (' + unit + ')', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#059669', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 },
                                 { label: 'Lamp (' + unit + ')', data: [], borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.08)', tension: 0.3, fill: (field === 'energy_kwh'), pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#eab308', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2 }
                             ];
                             if (hasTotal) {
-                                lineDatasets.push({ label: 'Total (' + unit + ')', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] });
+                                datasetsToUse.push({ label: 'Total (' + unit + ')', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.06)', tension: 0.3, fill: false, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#7c3aed', pointBorderColor: '#fff', pointBorderWidth: 2, borderWidth: 2, borderDash: [5,3] });
                             }
-                            chart = new Chart(canvas, {
-                                type: 'line', options: makeEnergyOpts(unit),
-                                data: { labels: [], datasets: lineDatasets }
-                            });
                         }
-                        charts[chartName] = chart;
+                        
+                        try {
+                            chart = new Chart(canvas, {
+                                type: targetType,
+                                options: baseOpts,
+                                data: { labels: [], datasets: datasetsToUse }
+                            });
+                            charts[chartName] = chart;
+                        } catch (err) {
+                            console.error('Chart.js recreation error:', err);
+                        }
                     }
 
-                    // kWh tooltip with cumulative breakdown
                     if (field === 'energy_kwh') {
-                        chart.options.plugins.tooltip.callbacks.title = function(items) {
-                            if (!items || !items[0]) return '';
-                            var lbl = items[0].label || '';
-                            return lbl.indexOf('\u2192') >= 0 ? lbl.replace('\u2192', ' \u2192 ') : lbl;
-                        };
-                        chart.options.plugins.tooltip.callbacks.label = function(ctx) {
-                            var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
-                            var delta = ctx.parsed.y;
-                            var idx = ctx.dataIndex;
-                            var cumArr = [chart._kwhCumAc, chart._kwhCumOutlet, chart._kwhCumLamp, null][ctx.datasetIndex];
-                            if (cumArr && cumArr.length > idx + 1) {
-                                var prev = cumArr[idx].toFixed(4);
-                                var curr = cumArr[idx + 1].toFixed(4);
-                                return dsLabel + ': ' + curr + ' \u2212 ' + prev + ' = ' + delta.toFixed(5) + ' kWh';
-                            }
-                            return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
-                        };
+                        chart._kwhCumAc = acCumRaw;
+                        chart._kwhCumOutlet = outletCumRaw;
+                        chart._kwhCumLamp = lampCumRaw;
                     }
 
                     // Compute Total values (AC + Outlet + Lamp)
@@ -8546,7 +8744,7 @@ HTML_TEMPLATE = '''
             var unit = {power:'kW', current:'A', energy_kwh:'kWh', voltage:'V'}[field] || '';
             var fmt = function(v) {
                 return field === 'energy_kwh'
-                    ? v.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1')
+                    ? v.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
                     : v.toFixed(2);
             };
             var setEl = function(id, v) { var el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' ' + unit; };
@@ -8560,7 +8758,7 @@ HTML_TEMPLATE = '''
         }
 
         // Analytics page individual energy chart loader
-        var _analyticsEnergyPeriod = { ac: '24h', lamp: '24h' };
+        var _analyticsEnergyPeriod = { ac: '24h', lamp: '24h', outlet: '24h' };
         function loadAnalyticsEnergy(device, period, btnEl) {
             _analyticsEnergyPeriod[device] = period;
             if (btnEl) {
@@ -9079,6 +9277,7 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'outlet-analysis') {
                 requestAnimationFrame(function() {
+                    try { loadAnalyticsEnergy('outlet', _analyticsEnergyPeriod.outlet || '24h', null); } catch(e) { console.error(e); }
                     try { initOutletCharts(); } catch(e) { console.error('[NAV] outlet chart init error:', e); }
                     try { loadOutletAnalytics('1h', document.getElementById('outlet-range-1h')); } catch(e) {}
                     try { loadOutletKwhChart('24h', document.getElementById('outlet-kwh-24h')); } catch(e) {}
@@ -11300,12 +11499,14 @@ HTML_TEMPLATE = '''
 
         // ==================== SOCKET.IO EVENTS ====================
         // Ring buffer untuk chart MySQL realtime
-        var _mysqlBuf = { labels: [], acV: [], lampV: [], freq: [], acP: [], lampP: [], acA: [], lampA: [] };
+        var _mysqlBuf = { labels: [], acV: [], outletV: [], lampV: [], freq: [], acP: [], outletP: [], lampP: [], acA: [], outletA: [], lampA: [] };
         var _MYSQL_MAX = 30;
 
         // ── Fungsi update DOM energi (dipakai socket DAN direct-poll) ──
         var _lastEnergyUpdate = 0;
-        function _applyEnergyData(ac, lamp) {
+        function _applyEnergyData(ac, outlet, lamp) {
+            outlet = outlet || {};
+            lamp = lamp || {};
             _lastEnergyUpdate = Date.now();
             var s = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
             var f = function(v, d) { return parseFloat(v || 0).toFixed(d !== undefined ? d : 1); };
@@ -11340,6 +11541,10 @@ HTML_TEMPLATE = '''
             s('eu-ac-power',   f(ac.power));         s('eu-ac-kwh',     fkwh(ac.energy));
             s('eu-ac-freq',    f(ac.frequency, 2));  s('eu-ac-pf',      f(ac.pf, 2));
             s('eu-ac-ts',      ac.updated_at || '--');
+            s('outlet-power',      f(outlet.power));
+            s('eu-outlet-voltage', f(outlet.voltage));       s('eu-outlet-current', f(outlet.current, 2));
+            s('eu-outlet-kwh',     fkwh(outlet.energy));     s('eu-outlet-freq',    f(outlet.frequency, 2));
+            s('eu-outlet-pf',      f(outlet.pf, 2));          s('eu-outlet-ts',      outlet.updated_at || '--');
             s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
             s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     fkwh(lamp.energy));
             s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
@@ -11348,6 +11553,8 @@ HTML_TEMPLATE = '''
             // ── Reactive / Apparent / PF quality / Power bars ──
             s('eu-ac-reactive',   f(ac.reactive_power,  1));
             s('eu-ac-apparent',   f(ac.apparent_power,  1));
+            s('eu-outlet-reactive', f(outlet.reactive_power, 1));
+            s('eu-outlet-apparent', f(outlet.apparent_power, 1));
             s('eu-lamp-reactive', f(lamp.reactive_power, 1));
             s('eu-lamp-apparent', f(lamp.apparent_power, 1));
             var _pfBadge = function(pf) {
@@ -11362,29 +11569,40 @@ HTML_TEMPLATE = '''
                 if (el) { el.textContent = q.t; el.style.background = q.bg; el.style.color = q.c; }
             };
             _applyBadge('eu-ac-pf-quality',   ac.pf);
+            _applyBadge('eu-outlet-pf-quality', outlet.pf);
             _applyBadge('eu-lamp-pf-quality', lamp.pf);
             var acBar = document.getElementById('eu-ac-pbar');
+            var outletBar = document.getElementById('eu-outlet-pbar');
             var lpBar = document.getElementById('eu-lamp-pbar');
             if (acBar)  acBar.style.width  = Math.min(100, (parseFloat(ac.power||0)   / 3.0 * 100)).toFixed(1) + '%';
+            if (outletBar) outletBar.style.width = Math.min(100, (parseFloat(outlet.power||0) / 1.0 * 100)).toFixed(1) + '%';
             if (lpBar)  lpBar.style.width  = Math.min(100, (parseFloat(lamp.power||0) / 0.5 * 100)).toFixed(1) + '%';
 
             // ── Update power-grid summary cards ──
             var acPow  = parseFloat(ac.power||0);
+            var outletPow = parseFloat(outlet.power||0);
             var lampPow = parseFloat(lamp.power||0);
             var acKwh  = parseFloat(ac.energy||0);
+            var outletKwh = parseFloat(outlet.energy||0);
             var lampKwh = parseFloat(lamp.energy||0);
-            var totPow = acPow + lampPow;
-            var totKwh = acKwh + lampKwh;
+            var totPow = acPow + outletPow + lampPow;
+            var totKwh = acKwh + outletKwh + lampKwh;
             s('ac-power',   acPow.toFixed(1));
+            s('outlet-power', outletPow.toFixed(1));
             s('lamp-power', lampPow.toFixed(1));
             s('total-power',   totPow.toFixed(1));
-            s('total-current', (parseFloat(ac.current||0) + parseFloat(lamp.current||0)).toFixed(2));
+            s('total-current', (parseFloat(ac.current||0) + parseFloat(outlet.current||0) + parseFloat(lamp.current||0)).toFixed(2));
             s('ac-energy-kwh',   fkwh(acKwh));
+            s('outlet-energy-kwh', fkwh(outletKwh));
+            s('outlet-analytics-total-energy', fkwh(outletKwh));
             s('lamp-energy-kwh', fkwh(lampKwh));
             s('total-energy-kwh', fkwh(totKwh));
             s('ac-voltage-card',  f(ac.voltage));
             s('ac-current-card',  f(ac.current, 2));
             s('ac-pf-card',       f(ac.pf, 2));
+            s('outlet-voltage-card', f(outlet.voltage));
+            s('outlet-current-card', f(outlet.current, 2));
+            s('outlet-pf-card',      f(outlet.pf, 2));
             s('lamp-voltage-card', f(lamp.voltage));
             s('lamp-current-card', f(lamp.current, 2));
             s('lamp-pf-card',      f(lamp.pf, 2));
@@ -11398,14 +11616,17 @@ HTML_TEMPLATE = '''
             var ts2  = now2.getHours() + ':' + String(now2.getMinutes()).padStart(2,'0') + ':' + String(now2.getSeconds()).padStart(2,'0');
             _mysqlBuf.labels.push(ts2);
             _mysqlBuf.acV.push(parseFloat(ac.voltage||0));
+            _mysqlBuf.outletV.push(parseFloat(outlet.voltage||0));
             _mysqlBuf.lampV.push(parseFloat(lamp.voltage||0));
             _mysqlBuf.freq.push(parseFloat(ac.frequency||0));
             _mysqlBuf.acP.push(parseFloat(ac.power||0));
+            _mysqlBuf.outletP.push(parseFloat(outlet.power||0));
             _mysqlBuf.lampP.push(parseFloat(lamp.power||0));
             _mysqlBuf.acA.push(parseFloat(ac.current||0));
+            _mysqlBuf.outletA.push(parseFloat(outlet.current||0));
             _mysqlBuf.lampA.push(parseFloat(lamp.current||0));
             if (_mysqlBuf.labels.length > _MYSQL_MAX) {
-                ['labels','acV','lampV','freq','acP','lampP','acA','lampA'].forEach(function(k){ _mysqlBuf[k].shift(); });
+                ['labels','acV','outletV','lampV','freq','acP','outletP','lampP','acA','outletA','lampA'].forEach(function(k){ _mysqlBuf[k].shift(); });
             }
             if (charts.mysqlVoltFreq) {
                 charts.mysqlVoltFreq.data.labels = _mysqlBuf.labels.slice();
@@ -11415,14 +11636,15 @@ HTML_TEMPLATE = '''
             if (charts.mysqlCurrent) {
                 charts.mysqlCurrent.data.labels = _mysqlBuf.labels.slice();
                 charts.mysqlCurrent.data.datasets[0].data = _mysqlBuf.acA.slice();
-                charts.mysqlCurrent.data.datasets[1].data = _mysqlBuf.lampA.slice();
+                charts.mysqlCurrent.data.datasets[1].data = _mysqlBuf.outletA.slice();
+                charts.mysqlCurrent.data.datasets[2].data = _mysqlBuf.lampA.slice();
                 charts.mysqlCurrent.update('none');
             }
         }
 
         // ── Socket handler ──
         socket.on('mysql_energy_update', function(data) {
-            _applyEnergyData(data.ac || {}, data.lamp || {});
+            _applyEnergyData(data.ac || {}, data.outlet || {}, data.lamp || {});
         });
 
         // ── Direct PHP polling fallback ──
@@ -11444,26 +11666,34 @@ HTML_TEMPLATE = '''
                         return;
                     }
                     _phpPollErr = 0;
-                    var ac   = data.ac   || {};
-                    var lamp = data.lamp || {};
+                    var ac     = data.ac     || {};
+                    var outlet = data.outlet || {};
+                    var lamp   = data.lamp   || {};
                     // Calculate pf because PHP does not send pf directly
                     var acAp = parseFloat(ac.apparent_power||0);
+                    var outletAp = parseFloat(outlet.apparent_power||0);
                     var lpAp = parseFloat(lamp.apparent_power||0);
                     ac.pf   = acAp > 0 ? parseFloat((parseFloat(ac.active_power||0) / acAp).toFixed(3)) : 0;
+                    outlet.pf = outletAp > 0 ? parseFloat((parseFloat(outlet.active_power||0) / outletAp).toFixed(3)) : 0;
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
                     // Adjust field names: active_power → power, frequency → frequency
                     ac.power       = ac.active_power;
-                    // total_energy from DB is already in kWh (energy_kwh table)
-                    ac.energy      = parseFloat(ac.total_energy || 0);
+                    // total_energy from DB is actually in Wh, divide by 1000 for kWh
+                    ac.energy      = parseFloat(ac.total_energy || 0) / 1000.0;
                     ac.frequency   = ac.frequency;
                     ac.voltage     = ac.voltage;
                     ac.current     = ac.arus;
+                    outlet.power     = outlet.active_power;
+                    outlet.energy    = parseFloat(outlet.total_energy || 0) / 1000.0;
+                    outlet.frequency = outlet.frequency;
+                    outlet.voltage   = outlet.voltage;
+                    outlet.current   = outlet.arus;
                     lamp.power     = lamp.active_power;
-                    lamp.energy    = parseFloat(lamp.total_energy || 0);
+                    lamp.energy    = parseFloat(lamp.total_energy || 0) / 1000.0;
                     lamp.frequency = lamp.frequency;
                     lamp.voltage   = lamp.voltage;
                     lamp.current   = lamp.arus;
-                    _applyEnergyData(ac, lamp);
+                    _applyEnergyData(ac, outlet, lamp);
                 })
                 .catch(function(e) { _phpPollErr++; console.warn('[PHP-poll] error:', e); });
         }
@@ -11610,7 +11840,7 @@ HTML_TEMPLATE = '''
             if (el) el.textContent = m + ':' + String(s).padStart(2,'0');
         }
 
-        function _recAddRow(ac, lamp) {
+        function _recAddRow(ac, outlet, lamp) {
             if (!_recActive) return;
             var now = new Date();
             var ts  = now.toISOString().replace('T',' ').substring(0,19);
@@ -11625,6 +11855,18 @@ HTML_TEMPLATE = '''
                 semu:     _recFmt(ac.apparent_power, 2),
                 freq:     _recFmt(ac.frequency || ac.frequency, 2),
                 pf:       _recFmt(ac.pf, 3),
+            });
+            // Outlet row (MySQL id_kwh=2)
+            _recRows.push({
+                ts: ts, device: 'Outlet',
+                voltage: _recFmt(outlet.voltage || outlet.voltage),
+                arus:     _recFmt(outlet.current || outlet.arus, 3),
+                daya:     _recFmt(outlet.power   || outlet.active_power, 2),
+                energi:   _recFmt(outlet.energy  || outlet.total_energy, 4),
+                reaktif:  _recFmt(outlet.reactive_power, 2),
+                semu:     _recFmt(outlet.apparent_power, 2),
+                freq:     _recFmt(outlet.frequency || outlet.frequency, 2),
+                pf:       _recFmt(outlet.pf, 3),
             });
             // Lamp row
             _recRows.push({
@@ -11715,11 +11957,11 @@ HTML_TEMPLATE = '''
         var _lastRecTime = 0;
         var _REC_INTERVAL_MS = 360000; // 6 minutes
         var _origApply = _applyEnergyData;
-        _applyEnergyData = function(ac, lamp) {
-            _origApply(ac, lamp);
+        _applyEnergyData = function(ac, outlet, lamp) {
+            _origApply(ac, outlet, lamp);
             if (Date.now() - _lastRecTime >= _REC_INTERVAL_MS) {
                 _lastRecTime = Date.now();
-                _recAddRow(ac, lamp);
+                _recAddRow(ac, outlet, lamp);
             }
         };
 
@@ -12991,6 +13233,7 @@ if __name__ == '__main__':
         mysql_energy.start_polling({
             'mqtt_data':              mqtt_data,
             'energy_runtime_history': energy_runtime_history,
+            'outlet_runtime_history': outlet_runtime_history,
             'get_energy_phase':       lambda: energy_phase,
             'write_influx':           write_to_influxdb,
             'socketio':               socketio,
