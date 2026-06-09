@@ -1742,7 +1742,8 @@ mqtt_data = {
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
-    'ir_states': {}  # Track toggle states for power buttons
+    'ir_states': {},  # Track toggle states for power buttons
+    'outlet': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'}
 }
 
 log_messages = deque(maxlen=100)
@@ -4572,23 +4573,28 @@ def control_outlet():
         
         mqtt_client.publish('smartroom/outlet/control', json.dumps(mqtt_payload))
         
-        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {outlet_num} Control: {state}', 'level': 'info'})
-        return jsonify({'status': 'ok', 'message': f'Outlet {outlet_num} {state} command sent'})
+        # Track outlet state (map 8 back to 1 for internal tracking)
+        internal_outlet_num = 1 if outlet_num == 8 else outlet_num
+        mqtt_data['outlet'][str(internal_outlet_num)] = state
+        
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {internal_outlet_num} Control: {state}', 'level': 'info'})
+        return jsonify({'status': 'ok', 'message': f'Outlet {internal_outlet_num} {state} command sent'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/outlet/status', methods=['GET'])
 def get_outlet_status():
     try:
-        # Assuming only 1 outlet as per user request
+        outlets = []
+        for i in range(1, 5):
+            outlets.append({
+                'id': i,
+                'state': mqtt_data['outlet'].get(str(i), 'OFF')
+            })
+            
         return jsonify({
             'status': 'ok',
-            'outlets': [
-                {'id': 1, 'state': 'OFF', 'power': 0, 'energy': 0}
-            ],
-            'total_power': 0,
-            'today_kwh': 0,
-            'peak_power': 0
+            'outlets': outlets
         })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
