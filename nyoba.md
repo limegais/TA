@@ -4588,7 +4588,7 @@ def control_outlet():
                 'https://iotlab-uns.com/neo-sbms/api/device-status',
                 data=json.dumps(laravel_payload).encode('utf-8'),
                 headers={'Content-Type': 'application/json'},
-                method='POST'
+                method='PUT'
             )
             with _ureq.urlopen(req, timeout=5) as response:
                 response_body = response.read().decode('utf-8')
