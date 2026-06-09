@@ -4571,8 +4571,15 @@ def control_outlet():
             "is_master": False
         }
         
-        # Backup publish via MQTT
-        mqtt_client.publish('smartroom/outlet/control', json.dumps(laravel_payload))
+        # Backup publish via MQTT (ESP32 expects string 'ON'/'OFF' for MQTT)
+        mqtt_payload = {
+            "id": outlet_num if outlet_num == 8 else (8 if outlet_num == 1 else outlet_num),
+            "nama": "Outlet",
+            "group_key": "master-room",
+            "status": state,
+            "is_master": False
+        }
+        mqtt_client.publish('smartroom/outlet/control', json.dumps(mqtt_payload))
         
         # POST ke Laravel API untuk update status di database
         try:
