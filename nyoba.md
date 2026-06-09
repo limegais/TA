@@ -4562,41 +4562,22 @@ def control_outlet():
         else:
             state = data.get('state', 'OFF')
             
-        # Send the exact API structure
-        laravel_payload = {
-            "id": outlet_num if outlet_num == 8 else (8 if outlet_num == 1 else outlet_num),
-            "nama": "Outlet",
-            "group_key": "master-room",
-            "status": 1 if state == 'ON' else 0,
-            "is_master": False
-        }
+        # Gunakan "Shotgun Approach": Karena kita tidak bisa melihat kode ESP32,
+        # kita kirimkan semua variasi yang mungkin (status angka vs teks, ID 8 vs 1)
+        raw_id = 1 if outlet_num == 8 else outlet_num
+        variations = [
+            # Variasi 1: ID dari web (8), status angka (1/0) -> seperti format asli database
+            {"id": outlet_num, "nama": "Outlet", "group_key": "master-room", "status": 1 if state == 'ON' else 0, "is_master": False},
+            # Variasi 2: ID dari web (8), status teks ("ON"/"OFF") -> seperti format AC
+            {"id": outlet_num, "nama": "Outlet", "group_key": "master-room", "status": state, "is_master": False},
+            # Variasi 3: ID mentah (1), status angka (1/0)
+            {"id": raw_id, "nama": "Outlet", "group_key": "master-room", "status": 1 if state == 'ON' else 0, "is_master": False},
+            # Variasi 4: ID mentah (1), status teks ("ON"/"OFF")
+            {"id": raw_id, "nama": "Outlet", "group_key": "master-room", "status": state, "is_master": False},
+        ]
         
-        # Backup publish via MQTT (ESP32 expects string 'ON'/'OFF' for MQTT)
-        mqtt_payload = {
-            "id": outlet_num if outlet_num == 8 else (8 if outlet_num == 1 else outlet_num),
-            "nama": "Outlet",
-            "group_key": "master-room",
-            "status": state,
-            "is_master": False
-        }
-        mqtt_client.publish('smartroom/outlet/control', json.dumps(mqtt_payload))
-        
-        # POST ke Laravel API untuk update status di database
-        try:
-            import urllib.request as _ureq
-            req = _ureq.Request(
-                'https://iotlab-uns.com/neo-sbms/api/device-status',
-                data=json.dumps(laravel_payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='PUT'
-            )
-            with _ureq.urlopen(req, timeout=5) as response:
-                response_body = response.read().decode('utf-8')
-                print(f"[API Outlet] Response: {response_body}")
-                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'API Laravel Response: {response_body}', 'level': 'info'})
-        except Exception as api_err:
-            print(f"[API Outlet] Error HTTP POST ke Laravel: {api_err}")
-            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'API Laravel Error: {str(api_err)}', 'level': 'error'})
+        for payload_var in variations:
+            mqtt_client.publish('smartroom/outlet/control', json.dumps(payload_var))
         
         # Track outlet state (map 8 back to 1 for internal tracking)
         internal_outlet_num = 1 if outlet_num == 8 else outlet_num
