@@ -4593,8 +4593,10 @@ def control_outlet():
             with _ureq.urlopen(req, timeout=5) as response:
                 response_body = response.read().decode('utf-8')
                 print(f"[API Outlet] Response: {response_body}")
+                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'API Laravel Response: {response_body}', 'level': 'info'})
         except Exception as api_err:
             print(f"[API Outlet] Error HTTP POST ke Laravel: {api_err}")
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'API Laravel Error: {str(api_err)}', 'level': 'error'})
         
         # Track outlet state (map 8 back to 1 for internal tracking)
         internal_outlet_num = 1 if outlet_num == 8 else outlet_num
