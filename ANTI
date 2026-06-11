@@ -4755,11 +4755,16 @@ def sbms_api_control(device_id):
         device_name = {1: 'Master', 2: 'AC', 3: 'Lampu', 4: 'Outlet'}.get(device_id, f'Device {device_id}')
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'SBMS {device_name}: {action} (status={resp.get("status", "?")})', 'level': 'info'})
         return jsonify({'status': 'ok', 'device': resp})
+    
+    # DEBUG: Log the 404 or other errors to the console to help debugging
+    target_url = sbms_config['server_url'].rstrip('/') + f'/api/control-device/{device_id}'
+    print(f"[SBMS ERROR] Control failed for {target_url}. Code: {code}, Response: {resp}")
+    
     msg = resp.get('message', 'Control failed')
     if code == 401:
         sbms_config['connected'] = False
         sbms_config['token'] = None
-    return jsonify({'status': 'error', 'message': msg}), code or 500
+    return jsonify({'status': 'error', 'message': f"{msg} (HTTP {code} from SBMS)"}), code or 500
 
 @app.route('/api/ac/mode', methods=['POST'])
 def set_ac_mode():
