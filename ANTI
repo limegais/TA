@@ -4752,7 +4752,7 @@ def sbms_api_control(device_id):
         status_val = data.get('status', 0)  # 1=ON, 0=OFF
         code, resp = _sbms_request('POST', f'/api/control-device/{device_id}', {'status': status_val})
     if code == 200:
-        device_name = {1: 'Master', 2: 'AC', 3: 'Lampu', 4: 'Outlet'}.get(device_id, f'Device {device_id}')
+        device_name = {5: 'Master', 6: 'AC', 7: 'Lampu', 8: 'Outlet'}.get(device_id, f'Device {device_id}')
         log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'SBMS {device_name}: {action} (status={resp.get("status", "?")})', 'level': 'info'})
         return jsonify({'status': 'ok', 'device': resp})
     
@@ -7941,86 +7941,86 @@ HTML_TEMPLATE = '''
             <!-- Device Control Cards -->
             <div class="sbms-device-grid" id="sbms-device-grid">
                 <!-- Master -->
-                <div class="sbms-device-card is-master" id="sbms-card-1">
+                <div class="sbms-device-card is-master" id="sbms-card-5">
                     <div class="sbms-device-header">
                         <div class="sbms-device-icon" style="background:rgba(245,158,11,0.15);color:#f59e0b;">
                             <i class="fas fa-crown"></i>
                         </div>
                         <div>
                             <div class="sbms-device-name">Master</div>
-                            <div class="sbms-device-id">ID: 1 &mdash; Kontrol semua device</div>
+                            <div class="sbms-device-id">ID: 5 &mdash; Kontrol semua device</div>
                         </div>
-                        <div class="sbms-device-status off" id="sbms-status-1">
-                            <span class="sdot"></span> <span id="sbms-status-text-1">OFF</span>
+                        <div class="sbms-device-status off" id="sbms-status-5">
+                            <span class="sdot"></span> <span id="sbms-status-text-5">OFF</span>
                         </div>
                     </div>
                     <div class="sbms-btn-group">
-                        <button class="sbms-btn on-btn" onclick="sbmsControl(1,1)" id="sbms-on-1"><i class="fas fa-power-off"></i> ON</button>
-                        <button class="sbms-btn off-btn" onclick="sbmsControl(1,0)" id="sbms-off-1"><i class="fas fa-power-off"></i> OFF</button>
-                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(1)" id="sbms-toggle-1"><i class="fas fa-sync-alt"></i> Toggle</button>
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(5,1)" id="sbms-on-5"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(5,0)" id="sbms-off-5"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(5)" id="sbms-toggle-5"><i class="fas fa-sync-alt"></i> Toggle</button>
                     </div>
                 </div>
 
                 <!-- AC -->
-                <div class="sbms-device-card" id="sbms-card-2">
+                <div class="sbms-device-card" id="sbms-card-6">
                     <div class="sbms-device-header">
                         <div class="sbms-device-icon" style="background:rgba(37,99,235,0.15);color:#2563eb;">
                             <i class="fas fa-snowflake"></i>
                         </div>
                         <div>
                             <div class="sbms-device-name">AC</div>
-                            <div class="sbms-device-id">ID: 2 &mdash; Air Conditioner</div>
+                            <div class="sbms-device-id">ID: 6 &mdash; Air Conditioner</div>
                         </div>
-                        <div class="sbms-device-status off" id="sbms-status-2">
-                            <span class="sdot"></span> <span id="sbms-status-text-2">OFF</span>
+                        <div class="sbms-device-status off" id="sbms-status-6">
+                            <span class="sdot"></span> <span id="sbms-status-text-6">OFF</span>
                         </div>
                     </div>
                     <div class="sbms-btn-group">
-                        <button class="sbms-btn on-btn" onclick="sbmsControl(2,1)" id="sbms-on-2"><i class="fas fa-power-off"></i> ON</button>
-                        <button class="sbms-btn off-btn" onclick="sbmsControl(2,0)" id="sbms-off-2"><i class="fas fa-power-off"></i> OFF</button>
-                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(2)" id="sbms-toggle-2"><i class="fas fa-sync-alt"></i> Toggle</button>
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(6,1)" id="sbms-on-6"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(6,0)" id="sbms-off-6"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(6)" id="sbms-toggle-6"><i class="fas fa-sync-alt"></i> Toggle</button>
                     </div>
                 </div>
 
                 <!-- Lampu -->
-                <div class="sbms-device-card" id="sbms-card-3">
+                <div class="sbms-device-card" id="sbms-card-7">
                     <div class="sbms-device-header">
                         <div class="sbms-device-icon" style="background:rgba(14,165,233,0.15);color:#0ea5e9;">
                             <i class="fas fa-lightbulb"></i>
                         </div>
                         <div>
                             <div class="sbms-device-name">Lampu</div>
-                            <div class="sbms-device-id">ID: 3 &mdash; Lamp</div>
+                            <div class="sbms-device-id">ID: 7 &mdash; Lamp</div>
                         </div>
-                        <div class="sbms-device-status off" id="sbms-status-3">
-                            <span class="sdot"></span> <span id="sbms-status-text-3">OFF</span>
+                        <div class="sbms-device-status off" id="sbms-status-7">
+                            <span class="sdot"></span> <span id="sbms-status-text-7">OFF</span>
                         </div>
                     </div>
                     <div class="sbms-btn-group">
-                        <button class="sbms-btn on-btn" onclick="sbmsControl(3,1)" id="sbms-on-3"><i class="fas fa-power-off"></i> ON</button>
-                        <button class="sbms-btn off-btn" onclick="sbmsControl(3,0)" id="sbms-off-3"><i class="fas fa-power-off"></i> OFF</button>
-                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(3)" id="sbms-toggle-3"><i class="fas fa-sync-alt"></i> Toggle</button>
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(7,1)" id="sbms-on-7"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(7,0)" id="sbms-off-7"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(7)" id="sbms-toggle-7"><i class="fas fa-sync-alt"></i> Toggle</button>
                     </div>
                 </div>
 
                 <!-- Outlet -->
-                <div class="sbms-device-card" id="sbms-card-4">
+                <div class="sbms-device-card" id="sbms-card-8">
                     <div class="sbms-device-header">
                         <div class="sbms-device-icon" style="background:rgba(5,150,105,0.15);color:#059669;">
                             <i class="fas fa-plug"></i>
                         </div>
                         <div>
                             <div class="sbms-device-name">Outlet</div>
-                            <div class="sbms-device-id">ID: 4 &mdash; Power Outlet</div>
+                            <div class="sbms-device-id">ID: 8 &mdash; Power Outlet</div>
                         </div>
-                        <div class="sbms-device-status off" id="sbms-status-4">
-                            <span class="sdot"></span> <span id="sbms-status-text-4">OFF</span>
+                        <div class="sbms-device-status off" id="sbms-status-8">
+                            <span class="sdot"></span> <span id="sbms-status-text-8">OFF</span>
                         </div>
                     </div>
                     <div class="sbms-btn-group">
-                        <button class="sbms-btn on-btn" onclick="sbmsControl(4,1)" id="sbms-on-4"><i class="fas fa-power-off"></i> ON</button>
-                        <button class="sbms-btn off-btn" onclick="sbmsControl(4,0)" id="sbms-off-4"><i class="fas fa-power-off"></i> OFF</button>
-                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(4)" id="sbms-toggle-4"><i class="fas fa-sync-alt"></i> Toggle</button>
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(8,1)" id="sbms-on-8"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(8,0)" id="sbms-off-8"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(8)" id="sbms-toggle-8"><i class="fas fa-sync-alt"></i> Toggle</button>
                     </div>
                 </div>
             </div>
@@ -10023,7 +10023,7 @@ HTML_TEMPLATE = '''
 
         function sbmsToggle(deviceId) {
             if (!_sbmsConnected) { showToast('Connect ke SBMS dulu!', 'error'); return; }
-            var names = {1:'Master', 2:'AC', 3:'Lampu', 4:'Outlet'};
+            var names = {5:'Master', 6:'AC', 7:'Lampu', 8:'Outlet'};
             var btns = document.querySelectorAll('#sbms-card-' + deviceId + ' .sbms-btn');
             btns.forEach(function(b) { b.disabled = true; });
             fetch('/api/sbms/control/' + deviceId, {
@@ -10088,8 +10088,8 @@ HTML_TEMPLATE = '''
         function _sbmsUpdateTable(devices) {
             var tbody = document.getElementById('sbms-devices-tbody');
             if (!tbody) return;
-            var names = {1:'Master', 2:'AC', 3:'Lampu', 4:'Outlet'};
-            var icons = {1:'👑', 2:'❄️', 3:'💡', 4:'🔌'};
+            var names = {5:'Master', 6:'AC', 7:'Lampu', 8:'Outlet'};
+            var icons = {5:'👑', 6:'❄️', 7:'💡', 8:'🔌'};
             if (!devices || devices.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-secondary);font-style:italic;">No devices found</td></tr>';
                 return;
