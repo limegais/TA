@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, jsonify, request, Response, session, redirect, url_for
+from flask import Flask, render_template, render_template_string, jsonify, request, Response, session, redirect, url_for
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 import json
@@ -16,6 +16,17 @@ import math
 import os
 import tempfile
 import subprocess
+import urllib.request
+import urllib.error
+
+# ==================== SBMS API CONFIG ====================
+# External SBMS server for device control (Outlet, AC, Lamp, Master)
+sbms_config = {
+    'server_url': 'https://iotlab-uns.com/neo-sbms',      # e.g. http://192.168.1.10 or https://sbms.example.com
+    'token': None,
+    'user': None,
+    'connected': False,
+}
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'smartroom-secret-2024'
@@ -1742,7 +1753,8 @@ mqtt_data = {
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
-    'ir_states': {}  # Track toggle states for power buttons
+    'ir_states': {},  # Track toggle states for power buttons
+    'outlet': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'}
 }
 
 log_messages = deque(maxlen=100)
@@ -2580,7 +2592,7 @@ def on_message(client, userdata, msg):
                 'voltage': payload.get('voltage', 0),
                 'current': payload.get('current', 0),
                 'power': payload.get('power', 0),
-                'energy': payload.get('energy', 0),
+                'energy': float(payload.get('energy', 0)) / 1000.0,
                 'frequency': payload.get('frequency', 0),
                 'pf': payload.get('pf', 0),
                 'connected': True
@@ -2875,8 +2887,8 @@ def login():
             session['username'] = username
             session['role'] = user['role']
             return redirect('/')
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid username or password')
-    return render_template_string(LOGIN_TEMPLATE, error=None)
+        return render_template('login.html', error='Invalid username or password')
+    return render_template('login.html', error=None)
 
 @app.route('/logout')
 def logout():
@@ -2894,7 +2906,7 @@ def get_auth_role():
 # ==================== API ROUTES ====================
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template('dashboard.html')
 
 @app.route('/video_feed')
 def video_feed():
@@ -3202,6 +3214,7 @@ def export_csv_from_db():
         # Sort by timestamp then device
         all_rows.sort(key=lambda r: (r.get('timestamp', ''), r.get('_device', '')))
         output = io.StringIO()
+        output.write("sep=,\n")
         writer = _csv.writer(output)
         writer.writerow(['Timestamp', 'Device', 'Voltage (V)', 'Current (A)', 'Active Power (W)',
                          'Reactive Power (VAR)', 'Apparent Power (VA)', 'Power Factor',
@@ -3247,6 +3260,7 @@ def export_csv_from_db():
             if not mysql_rows:
                 return jsonify({'error': f'No data for {dev_name} in MySQL for range {from_dt} to {to_dt}'}), 404
             output = io.StringIO()
+            output.write("sep=,\n")
             fields  = ['timestamp','voltage','current','active_power','reactive_power',
                        'apparent_power','power_factor','frequency','energy_kwh']
             headers = ['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
@@ -3311,6 +3325,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 first_kwh = next((float(rows_by_ts[t]['energy_kwh'])
                                   for t in sorted_ts if rows_by_ts[t].get('energy_kwh') is not None), None)
                 output = io.StringIO()
+                output.write("sep=,\n")
                 writer = _csv.writer(output)
                 writer.writerow(['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
                                  'Frequency (Hz)','Power Factor','Konsumsi Energy (kWh)'])
@@ -3413,6 +3428,7 @@ from(bucket: "{INFLUX_BUCKET}")
 
         sorted_ts = sorted(rows_by_ts.keys())
         output    = io.StringIO()
+        output.write("sep=,\n")
         writer    = _csv.writer(output)
         # Use human-readable headers
         header_row = ['Timestamp'] + [_FIELD_LABELS.get(f, f) for f in fields]
@@ -3725,7 +3741,7 @@ def energy_export_csv():
                 'voltage':   float(d.get('voltage')   or 0),
                 'current':       float(d.get('current')       or 0),
                 'active_power': p,
-                'energy_kwh': float(d.get('total_energy') or 0),
+                'energy_kwh': float(d.get('total_energy') or 0) / 1000.0,
                 'frequency':  float(d.get('frequency')  or 0),
                 'pf':         pf,
                 'reactive_power':    float(d.get('reactive_power') or 0),
@@ -3739,6 +3755,7 @@ def energy_export_csv():
 
     # Buat CSV — human-readable headers, 1 data = 1 kolom, BOM for Excel
     output = io.StringIO()
+    output.write("sep=,\n")
     fields = ['timestamp','device','voltage','current','active_power','reactive_power','semu','pf','frequency','energy_kwh']
     header_labels = {
         'timestamp': 'Timestamp',
@@ -3900,7 +3917,10 @@ def energy_history():
                 for start in starts:
                     if start in values_by_bucket:
                         last_value = values_by_bucket[start]
-                    points.append({'time': start.strftime(time_format), 'value': round(float(last_value), dec)})
+                    val = float(last_value)
+                    if val > 10000:
+                        val = val / 1000.0
+                    points.append({'time': start.strftime(time_format), 'value': round(val, dec)})
                 return points
 
             return [
@@ -3936,6 +3956,36 @@ def energy_history():
                 if not values_by_bucket:
                     values_by_bucket = _runtime_bucket_values(field_name, fixed_spec)
 
+                # Fallback to MySQL if buckets are missing (e.g. InfluxDB only has recent data)
+                if len(values_by_bucket) < len(expected_starts) and period in ('30d', '12mo', '5y'):
+                    try:
+                        id_kwh_map = {'ac': 1, 'outlet': 2, 'lamp': 3}
+                        id_kwh = id_kwh_map.get(device, 1)
+                        from_dt = fixed_spec['start'].strftime('%Y-%m-%d')
+                        to_dt = datetime.now().strftime('%Y-%m-%d')
+                        
+                        mysql_rows = _fetch_energy_history_from_mysql(id_kwh, from_dt, to_dt, limit=50000)
+                        if mysql_rows:
+                            grouped = {}
+                            for row in mysql_rows:
+                                ts = datetime.strptime(row['timestamp'], '%Y-%m-%d %H:%M:%S')
+                                key = _bucket_key(ts)
+                                grouped.setdefault(key, []).append(row)
+                                
+                            # Clear InfluxDB data to prevent offset mismatch (Influx is absolute, MySQL is relative)
+                            values_by_bucket.clear()
+                            
+                            for start in expected_starts:
+                                if start in grouped:
+                                    items = grouped[start]
+                                    if field_name == 'energy_kwh':
+                                        values_by_bucket[start] = float(items[-1].get('energy_kwh', 0))
+                                    else:
+                                        vals = [float(item.get(field_name, 0)) for item in items]
+                                        values_by_bucket[start] = sum(vals) / len(vals)
+                    except Exception as e:
+                        print(f"[API] MySQL Fallback merge error: {e}")
+
                 return _points_from_fixed_buckets(field_name, values_by_bucket, fixed_spec)
             query = f'''
             from(bucket: "{INFLUX_BUCKET}")
@@ -3951,9 +4001,12 @@ def energy_history():
             for table in result:
                 for record in table.records:
                     dec = 5 if field_name == 'energy_kwh' else 2
+                    val = float(record.get_value())
+                    if field_name == 'energy_kwh' and val > 10000:
+                        val = val / 1000.0
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(float(record.get_value()), dec)
+                        'value': round(val, dec)
                     })
             return points
 
@@ -4058,6 +4111,7 @@ def ga_export_csv():
         improvement = '-'
 
     buf = io.StringIO()
+    buf.write("sep=,\n")
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
@@ -4135,6 +4189,7 @@ def pso_export_csv():
         return jsonify({'error': 'No PSO iteration data yet. Run PSO first.'}), 404
 
     buf = io.StringIO()
+    buf.write("sep=,\n")
     wr  = csv_mod.writer(buf)
 
     # Header
@@ -4328,7 +4383,10 @@ def energy_daily_summary():
                     for rec in table.records:
                         v = rec.get_value()
                         if v is not None:
-                            return round(float(v), 3)
+                            val = float(v)
+                            if field == 'energy_kwh' and val > 10000:
+                                val = val / 1000.0
+                            return round(val, 3)
             except Exception:
                 pass
             return 0.0
@@ -4348,7 +4406,10 @@ def energy_daily_summary():
                     for rec in table.records:
                         v = rec.get_value()
                         if v is not None:
-                            return round(float(v), 3)
+                            val = float(v)
+                            if field == 'energy_kwh' and val > 10000:
+                                val = val / 1000.0
+                            return round(val, 3)
             except Exception:
                 pass
             return 0.0
@@ -4374,9 +4435,15 @@ def energy_daily_summary():
         lamp_power_avg = _query_today('mysql_lamp', 'power', 'mean')
         lamp_power_peak = _query_today_max('mysql_lamp', 'power')
 
+        # Outlet metrics (mysql_outlet)
+        outlet_kwh     = _query_today('mysql_outlet', 'energy_kwh', 'max')
+        outlet_power_avg = _query_today('mysql_outlet', 'power', 'mean')
+        outlet_power_peak = _query_today_max('mysql_outlet', 'power')
+
         # Runtime from ring buffers (fallback when InfluxDB has no data yet today)
         ac_runtime_h   = _runtime_hours_from_buffer(energy_runtime_history, threshold_power=50.0)
         lamp_runtime_h = _runtime_hours_from_buffer(lamp_runtime_history, threshold_power=5.0)
+        outlet_runtime_h = _runtime_hours_from_buffer(outlet_runtime_history, threshold_power=5.0)
 
         # If InfluxDB returned 0 kWh, estimate from ring buffer
         if ac_kwh == 0 and ac_power_avg == 0:
@@ -4393,8 +4460,15 @@ def energy_daily_summary():
                 lamp_power_avg = round(sum(lamp_vals) / len(lamp_vals), 1)
                 lamp_power_peak = round(max(lamp_vals), 1)
                 lamp_kwh = round(lamp_power_avg * lamp_runtime_h / 1000.0, 4)
+        if outlet_kwh == 0 and outlet_power_avg == 0:
+            today = now_local.date()
+            outlet_vals = [r.get('power', 0) for r in outlet_runtime_history if r.get('ts') and r['ts'].date() == today]
+            if outlet_vals:
+                outlet_power_avg = round(sum(outlet_vals) / len(outlet_vals), 1)
+                outlet_power_peak = round(max(outlet_vals), 1)
+                outlet_kwh = round(outlet_power_avg * outlet_runtime_h / 1000.0, 4)
 
-        total_kwh = round(ac_kwh + lamp_kwh, 4)
+        total_kwh = round(ac_kwh + lamp_kwh + outlet_kwh, 4)
         cost_rp   = round(total_kwh * 1500)
 
         return jsonify({
@@ -4410,6 +4484,12 @@ def energy_daily_summary():
                 'power_avg_w': lamp_power_avg,
                 'power_peak_w': lamp_power_peak,
                 'runtime_h': lamp_runtime_h
+            },
+            'outlet': {
+                'kwh': outlet_kwh,
+                'power_avg_w': outlet_power_avg,
+                'power_peak_w': outlet_power_peak,
+                'runtime_h': outlet_runtime_h
             },
             'total_kwh': total_kwh,
             'cost_rp': cost_rp
@@ -4509,6 +4589,212 @@ def control_lamp():
         return jsonify({'status': 'success', 'message': 'Lamp command sent'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/control', methods=['POST'])
+def control_outlet():
+    try:
+        data = request.json
+        if not data or not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
+        
+        outlet_num = data.get('id', data.get('outlet', data.get('outlet_num', 1)))
+        if 'status' in data:
+            state = 'ON' if data['status'] == 1 else 'OFF'
+        else:
+            state = data.get('state', 'OFF')
+            
+        # Gunakan "Shotgun Approach": Karena kita tidak bisa melihat kode ESP32,
+        # kita kirimkan semua variasi yang mungkin (status angka vs teks, ID 8 vs 1)
+        raw_id = 1 if outlet_num == 8 else outlet_num
+        variations = [
+            # Variasi 1: ID dari web (8), status angka (1/0) -> seperti format asli database
+            {"id": outlet_num, "nama": "Outlet", "group_key": "master-room", "status": 1 if state == 'ON' else 0, "is_master": False},
+            # Variasi 2: ID dari web (8), status teks ("ON"/"OFF") -> seperti format AC
+            {"id": outlet_num, "nama": "Outlet", "group_key": "master-room", "status": state, "is_master": False},
+            # Variasi 3: ID mentah (1), status angka (1/0)
+            {"id": raw_id, "nama": "Outlet", "group_key": "master-room", "status": 1 if state == 'ON' else 0, "is_master": False},
+            # Variasi 4: ID mentah (1), status teks ("ON"/"OFF")
+            {"id": raw_id, "nama": "Outlet", "group_key": "master-room", "status": state, "is_master": False},
+        ]
+        
+        for payload_var in variations:
+            mqtt_client.publish('smartroom/outlet/control', json.dumps(payload_var))
+        
+        # Track outlet state (map 8 back to 1 for internal tracking)
+        internal_outlet_num = 1 if outlet_num == 8 else outlet_num
+        mqtt_data['outlet'][str(internal_outlet_num)] = state
+        
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Outlet {internal_outlet_num} Control: {state}', 'level': 'info'})
+        return jsonify({'status': 'ok', 'message': f'Outlet {internal_outlet_num} {state} command sent'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/status', methods=['GET'])
+def get_outlet_status():
+    try:
+        outlets = []
+        for i in range(1, 5):
+            outlets.append({
+                'id': i,
+                'state': mqtt_data['outlet'].get(str(i), 'OFF')
+            })
+            
+        return jsonify({
+            'status': 'ok',
+            'outlets': outlets
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/history', methods=['GET'])
+def api_outlet_history():
+    try:
+        range_str = request.args.get('range', '1h')
+        hours = 1
+        if 'h' in range_str:
+            try: hours = int(range_str.replace('h', ''))
+            except: hours = 1
+        elif 'd' in range_str:
+            try: hours = int(range_str.replace('d', '')) * 24
+            except: hours = 24
+                
+        res = get_influx_data('energy_monitor', 'power', hours, device_tag='mysql_outlet')
+        return jsonify({
+            'labels': res.get('time', []),
+            'outlet1': res.get('value', []),
+            'outlet2': [], 'outlet3': [], 'outlet4': []
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/outlet/energy', methods=['GET'])
+def api_outlet_energy():
+    try:
+        range_str = request.args.get('range', '24h')
+        hours = 24
+        if 'h' in range_str:
+            try: hours = int(range_str.replace('h', ''))
+            except: hours = 24
+        elif 'd' in range_str:
+            try: hours = int(range_str.replace('d', '')) * 24
+            except: hours = 24
+                
+        res = get_influx_data('energy_monitor', 'energy_kwh', hours, device_tag='mysql_outlet')
+        return jsonify({
+            'labels': res.get('time', []),
+            'outlet1': res.get('value', []),
+            'outlet2': [], 'outlet3': [], 'outlet4': []
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ==================== SBMS API PROXY ENDPOINTS ====================
+def _sbms_request(method, path, json_data=None):
+    """Helper: make HTTP request to SBMS server. Returns (status_code, response_dict)."""
+    url = sbms_config['server_url'].rstrip('/') + path
+    headers = {'Content-Type': 'application/json'}
+    if sbms_config['token']:
+        headers['Authorization'] = f"Bearer {sbms_config['token']}"
+    body = json.dumps(json_data).encode('utf-8') if json_data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_data = json.loads(resp.read().decode('utf-8'))
+            return resp.status, resp_data
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode('utf-8'))
+        except Exception:
+            err_body = {'message': str(e)}
+        return e.code, err_body
+    except Exception as e:
+        return 0, {'message': str(e)}
+
+@app.route('/api/sbms/config', methods=['GET', 'POST'])
+def sbms_api_config():
+    """Get or set SBMS server URL."""
+    if request.method == 'POST':
+        data = request.json or {}
+        url = data.get('server_url', '').strip().rstrip('/')
+        if not url:
+            return jsonify({'status': 'error', 'message': 'server_url is required'}), 400
+        sbms_config['server_url'] = url
+        sbms_config['token'] = None
+        sbms_config['user'] = None
+        sbms_config['connected'] = False
+        return jsonify({'status': 'ok', 'server_url': url})
+    return jsonify({
+        'server_url': sbms_config['server_url'],
+        'connected': sbms_config['connected'],
+        'user': sbms_config['user'],
+    })
+
+@app.route('/api/sbms/login', methods=['POST'])
+def sbms_api_login():
+    """Login to SBMS server and store token."""
+    data = request.json or {}
+    email = data.get('email', '')
+    password = data.get('password', '')
+    if not sbms_config['server_url']:
+        return jsonify({'status': 'error', 'message': 'SBMS server URL not configured'}), 400
+    if not email or not password:
+        return jsonify({'status': 'error', 'message': 'Email and password are required'}), 400
+    code, resp = _sbms_request('POST', '/api/auth/login', {'email': email, 'password': password})
+    if code == 200 and resp.get('token'):
+        sbms_config['token'] = resp['token']
+        sbms_config['user'] = resp.get('user', {}).get('email', email)
+        sbms_config['connected'] = True
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'SBMS Login OK: {email}', 'level': 'info'})
+        return jsonify({'status': 'ok', 'user': sbms_config['user']})
+    msg = resp.get('message', 'Login failed')
+    return jsonify({'status': 'error', 'message': msg}), 401
+
+@app.route('/api/sbms/logout', methods=['POST'])
+def sbms_api_logout():
+    """Logout from SBMS server."""
+    if sbms_config['token']:
+        _sbms_request('POST', '/api/auth/logout')
+    sbms_config['token'] = None
+    sbms_config['user'] = None
+    sbms_config['connected'] = False
+    return jsonify({'status': 'ok', 'message': 'Disconnected from SBMS'})
+
+@app.route('/api/sbms/devices', methods=['GET'])
+def sbms_api_devices():
+    """Get status of all SBMS devices (no auth needed)."""
+    if not sbms_config['server_url']:
+        return jsonify({'status': 'error', 'message': 'SBMS server URL not configured'}), 400
+    code, resp = _sbms_request('GET', '/api/device-status')
+    if code == 200:
+        return jsonify({'status': 'ok', 'devices': resp if isinstance(resp, list) else resp.get('devices', resp)})
+    return jsonify({'status': 'error', 'message': resp.get('message', 'Failed to fetch')}), code or 500
+
+@app.route('/api/sbms/control/<int:device_id>', methods=['POST'])
+def sbms_api_control(device_id):
+    """Control a SBMS device: set ON/OFF or toggle."""
+    if not sbms_config['token']:
+        return jsonify({'status': 'error', 'message': 'Not logged in to SBMS'}), 401
+    data = request.json or {}
+    action = data.get('action', 'set')  # 'set' or 'toggle'
+    if action == 'toggle':
+        code, resp = _sbms_request('POST', f'/api/control-device/{device_id}/toggle')
+    else:
+        status_val = data.get('status', 0)  # 1=ON, 0=OFF
+        code, resp = _sbms_request('POST', f'/api/control-device/{device_id}', {'status': status_val})
+    if code == 200:
+        device_name = {5: 'Master', 6: 'AC', 7: 'Lampu', 8: 'Outlet'}.get(device_id, f'Device {device_id}')
+        log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'SBMS {device_name}: {action} (status={resp.get("status", "?")})', 'level': 'info'})
+        return jsonify({'status': 'ok', 'device': resp})
+    
+    # DEBUG: Log the 404 or other errors to the console to help debugging
+    target_url = sbms_config['server_url'].rstrip('/') + f'/api/control-device/{device_id}'
+    print(f"[SBMS ERROR] Control failed for {target_url}. Code: {code}, Response: {resp}")
+    
+    msg = resp.get('message', 'Control failed')
+    if code == 401:
+        sbms_config['connected'] = False
+        sbms_config['token'] = None
+    return jsonify({'status': 'error', 'message': f"{msg} (HTTP {code} from SBMS)"}), code or 500
 
 @app.route('/api/ac/mode', methods=['POST'])
 def set_ac_mode():
@@ -4857,8 +5143,17 @@ def check_alert_rules():
         import traceback
         print(f'[WARN] check_alert_rules error: {e}\n{traceback.format_exc()}')
 
-# ==================== LOGIN TEMPLATE ====================
-LOGIN_TEMPLATE = '''
+# ==================== HTML TEMPLATES ====================
+# Templates have been moved to external files:
+#   templates/login.html        - Login page
+#   templates/dashboard.html    - Main dashboard (includes all pages)
+#   templates/base.html         - Base layout
+#   templates/pages/*.html      - Individual page sections (13 files)
+#   templates/partials/*.html   - Shared components (sidebar, modals, etc.)
+#   static/css/dashboard.css    - Stylesheet
+#   static/js/dashboard.js      - JavaScript
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5524,6 +5819,129 @@ HTML_TEMPLATE = '''
         select.slider {
             background: var(--input-bg); color: var(--text-primary);
         }
+        /* ===== SBMS Control Styles ===== */
+        .sbms-conn-panel {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; margin-bottom: 20px;
+            position: relative; overflow: hidden;
+        }
+        .sbms-conn-panel::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+            background: linear-gradient(90deg, #2563eb, #0ea5e9, #3b82f6);
+        }
+        .sbms-conn-panel.connected::before {
+            background: linear-gradient(90deg, #059669, #10b981, #34d399);
+        }
+        .sbms-conn-badge {
+            display: inline-flex; align-items: center; gap: 6px; padding: 4px 14px; border-radius: 20px;
+            font-size: 12px; font-weight: 700; letter-spacing: 0.3px;
+        }
+        .sbms-conn-badge.offline {
+            background: rgba(30,64,175,0.12); color: #1e40af;
+        }
+        .sbms-conn-badge.online {
+            background: rgba(5,150,105,0.12); color: #059669;
+        }
+        .sbms-conn-badge .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+        }
+        .sbms-conn-badge.offline .dot { background: #1e40af; }
+        .sbms-conn-badge.online .dot { background: #059669; animation: pulse-green 2s infinite; }
+        .sbms-input {
+            width: 100%; padding: 10px 14px; background: var(--input-bg); border: 1.5px solid var(--border);
+            border-radius: 10px; color: var(--text-primary); font-size: 14px; font-family: inherit;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        .sbms-input:focus {
+            outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15);
+        }
+        .sbms-input::placeholder { color: var(--text-secondary); opacity: 0.6; }
+        .sbms-device-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px;
+        }
+        .sbms-device-card {
+            background: var(--bg-card); border: 1.5px solid var(--border); border-radius: 16px;
+            padding: 22px; transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1); position: relative; overflow: hidden;
+        }
+        .sbms-device-card:hover {
+            transform: translateY(-4px); box-shadow: 0 12px 32px var(--shadow);
+            border-color: rgba(37,99,235,0.3);
+        }
+        .sbms-device-card.is-on {
+            border-color: rgba(5,150,105,0.4);
+        }
+        .sbms-device-card.is-on::after {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+            background: linear-gradient(90deg, #059669, #10b981);
+        }
+        .sbms-device-card.is-master { border-left: 4px solid #f59e0b; }
+        .sbms-device-card.is-master.is-on { border-left-color: #f59e0b; }
+        .sbms-device-header {
+            display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+        }
+        .sbms-device-icon {
+            width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center;
+            justify-content: center; font-size: 20px; flex-shrink: 0;
+        }
+        .sbms-device-name {
+            font-size: 16px; font-weight: 700; color: var(--text-primary);
+        }
+        .sbms-device-id {
+            font-size: 11px; color: var(--text-secondary); font-weight: 500;
+        }
+        .sbms-device-status {
+            display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px;
+            border-radius: 20px; font-size: 12px; font-weight: 700; margin-left: auto;
+        }
+        .sbms-device-status.on {
+            background: rgba(5,150,105,0.12); color: #059669;
+        }
+        .sbms-device-status.off {
+            background: rgba(30,64,175,0.12); color: #1e40af;
+        }
+        .sbms-device-status .sdot {
+            width: 7px; height: 7px; border-radius: 50%;
+        }
+        .sbms-device-status.on .sdot { background: #059669; animation: pulse-green 2s infinite; }
+        .sbms-device-status.off .sdot { background: #1e40af; }
+        .sbms-btn-group {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 4px;
+        }
+        .sbms-btn {
+            padding: 12px 8px; border: none; border-radius: 10px; font-size: 13px; font-weight: 700;
+            cursor: pointer; transition: all 0.25s; display: flex; align-items: center;
+            justify-content: center; gap: 6px; letter-spacing: 0.3px;
+        }
+        .sbms-btn:active { transform: scale(0.96); }
+        .sbms-btn.on-btn {
+            background: linear-gradient(135deg, #059669, #10b981); color: white;
+            box-shadow: 0 4px 12px rgba(5,150,105,0.3);
+        }
+        .sbms-btn.on-btn:hover { box-shadow: 0 6px 20px rgba(5,150,105,0.45); transform: translateY(-1px); }
+        .sbms-btn.off-btn {
+            background: linear-gradient(135deg, #dc2626, #ef4444); color: white;
+            box-shadow: 0 4px 12px rgba(220,38,38,0.3);
+        }
+        .sbms-btn.off-btn:hover { box-shadow: 0 6px 20px rgba(220,38,38,0.45); transform: translateY(-1px); }
+        .sbms-btn.toggle-btn {
+            background: linear-gradient(135deg, #2563eb, #3b82f6); color: white;
+            box-shadow: 0 4px 12px rgba(37,99,235,0.3);
+        }
+        .sbms-btn.toggle-btn:hover { box-shadow: 0 6px 20px rgba(37,99,235,0.45); transform: translateY(-1px); }
+        .sbms-btn:disabled {
+            opacity: 0.4; cursor: not-allowed; transform: none !important; box-shadow: none !important;
+        }
+        .sbms-login-grid {
+            display: grid; grid-template-columns: 2fr 1.5fr 1.5fr auto; gap: 10px; align-items: end;
+        }
+        .sbms-field label {
+            display: block; font-size: 11px; font-weight: 600; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+        }
+        @media (max-width: 768px) {
+            .sbms-login-grid { grid-template-columns: 1fr; }
+            .sbms-device-grid { grid-template-columns: 1fr; }
+            .sbms-btn-group { grid-template-columns: 1fr 1fr 1fr; }
+        }
     </style>
 </head>
 <body>
@@ -5557,6 +5975,9 @@ HTML_TEMPLATE = '''
         <div class="nav-item admin-only" onclick="showPage('lamp-analytics')">
             <span>Lamp Analytics</span>
         </div>
+        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
+            <span>Outlet Analytics</span>
+        </div>
         <div class="nav-item admin-only" onclick="showPage('camera')">
             <span>Camera</span>
         </div>
@@ -5571,9 +5992,6 @@ HTML_TEMPLATE = '''
         </div>
         <div class="nav-item" onclick="showPage('control-outlet')">
             <span>Outlet Control</span>
-        </div>
-        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
-            <span>Outlet Analysis</span>
         </div>
         <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
             <span>ML Optimization</span>
@@ -7499,103 +7917,199 @@ HTML_TEMPLATE = '''
         <div id="control-outlet" class="page">
             <div class="header">
                 <h1>Outlet Control Panel</h1>
-                <p>Smart power outlet control — ON/OFF per outlet via MQTT</p>
+                <p>Kontrol perangkat via SBMS REST API &mdash; Master, AC, Lampu, Outlet</p>
             </div>
 
-            <!-- Outlet Status Summary -->
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px;margin-bottom:20px;">
-                <div class="stat-card" style="text-align:center;">
-                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 1</div>
-                    <div id="outlet1-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
-                    <div id="outlet1-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+            <!-- SBMS Connection Panel -->
+            <div class="sbms-conn-panel" id="sbms-conn-panel">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <div style="width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#2563eb,#0ea5e9);display:flex;align-items:center;justify-content:center;">
+                            <i class="fas fa-server" style="color:white;font-size:18px;"></i>
+                        </div>
+                        <div>
+                            <div style="font-size:16px;font-weight:700;color:var(--text-primary);">SBMS Server</div>
+                            <div style="font-size:12px;color:var(--text-secondary);">Smart Building Management System</div>
+                        </div>
+                    </div>
+                    <div id="sbms-conn-status" class="sbms-conn-badge offline">
+                        <span class="dot"></span>
+                        <span id="sbms-conn-text">Disconnected</span>
+                    </div>
                 </div>
-                <div class="stat-card" style="text-align:center;">
-                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 2</div>
-                    <div id="outlet2-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
-                    <div id="outlet2-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+
+                <!-- Login Form -->
+                <div id="sbms-login-form">
+                    <div class="sbms-login-grid">
+                        <div class="sbms-field">
+                            <label>Server URL</label>
+                            <input type="text" class="sbms-input" id="sbms-server-url" placeholder="http://192.168.1.10" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>Email</label>
+                            <input type="email" class="sbms-input" id="sbms-email" placeholder="admin@example.com" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>Password</label>
+                            <input type="password" class="sbms-input" id="sbms-password" placeholder="Password" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>&nbsp;</label>
+                            <button class="sbms-btn toggle-btn" id="sbms-connect-btn" onclick="sbmsConnect()" style="padding:10px 24px;white-space:nowrap;">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
                 </div>
-                <div class="stat-card" style="text-align:center;">
-                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 3</div>
-                    <div id="outlet3-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
-                    <div id="outlet3-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
-                </div>
-                <div class="stat-card" style="text-align:center;">
-                    <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Outlet 4</div>
-                    <div id="outlet4-power" style="font-size:18px;font-weight:700;color:#2563eb;">--W</div>
-                    <div id="outlet4-status-badge" style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(30,64,175,0.15);color:#1e40af;">OFF</div>
+
+                <!-- Connected Info (hidden by default) -->
+                <div id="sbms-connected-info" style="display:none;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-user-check" style="color:#059669;"></i>
+                            <span style="font-size:13px;color:var(--text-primary);font-weight:600;">Logged in as <span id="sbms-user-email" style="color:#059669;">-</span></span>
+                            <span style="font-size:12px;color:var(--text-secondary);">| <span id="sbms-server-display">-</span></span>
+                        </div>
+                        <button class="sbms-btn off-btn" onclick="sbmsDisconnect()" style="padding:8px 18px;font-size:12px;">
+                            <i class="fas fa-sign-out-alt"></i> Disconnect
+                        </button>
+                    </div>
                 </div>
             </div>
 
-            <!-- Outlet ON/OFF Cards -->
-            <div class="control-panel">
-                <div class="control-title">Outlet Switches</div>
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:16px;">
-
-                    <!-- Outlet 1 -->
-                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div id="outlet1-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
-                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 1</div>
-                            <div id="outlet1-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
+            <!-- Device Control Cards -->
+            <div class="sbms-device-grid" id="sbms-device-grid">
+                <!-- Master -->
+                <div class="sbms-device-card is-master" id="sbms-card-5">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(245,158,11,0.15);color:#f59e0b;">
+                            <i class="fas fa-crown"></i>
                         </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'ON')">ON</button>
-                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'OFF')">OFF</button>
+                        <div>
+                            <div class="sbms-device-name">Master</div>
+                            <div class="sbms-device-id">ID: 5 &mdash; Kontrol semua device</div>
                         </div>
-                    </div>
-
-                    <!-- Outlet 2 -->
-                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div id="outlet2-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
-                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 2</div>
-                            <div id="outlet2-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
-                        </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(2,'ON')">ON</button>
-                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(2,'OFF')">OFF</button>
+                        <div class="sbms-device-status off" id="sbms-status-5">
+                            <span class="sdot"></span> <span id="sbms-status-text-5">OFF</span>
                         </div>
                     </div>
-
-                    <!-- Outlet 3 -->
-                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div id="outlet3-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
-                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 3</div>
-                            <div id="outlet3-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
-                        </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(3,'ON')">ON</button>
-                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(3,'OFF')">OFF</button>
-                        </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(5,1)" id="sbms-on-5"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(5,0)" id="sbms-off-5"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(5)" id="sbms-toggle-5"><i class="fas fa-sync-alt"></i> Toggle</button>
                     </div>
-
-                    <!-- Outlet 4 -->
-                    <div style="padding:20px;border-radius:14px;border:2px solid var(--border);background:var(--bg-card);display:flex;flex-direction:column;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div id="outlet4-dot" style="width:12px;height:12px;border-radius:50%;background:#1e40af;flex-shrink:0;"></div>
-                            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Outlet 4</div>
-                            <div id="outlet4-label" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">General</div>
-                        </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(4,'ON')">ON</button>
-                            <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(4,'OFF')">OFF</button>
-                        </div>
-                    </div>
-
                 </div>
 
-                <!-- All OFF button -->
-                <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
-                    <button class="btn btn-danger" style="flex:1;padding:14px;font-size:14px;border-radius:10px;font-weight:700;" onclick="outletAllOff()">ALL OUTLETS OFF</button>
-                    <button class="btn btn-success" style="flex:1;padding:14px;font-size:14px;border-radius:10px;font-weight:700;" onclick="outletAllOn()">ALL OUTLETS ON</button>
+                <!-- AC -->
+                <div class="sbms-device-card" id="sbms-card-6">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(37,99,235,0.15);color:#2563eb;">
+                            <i class="fas fa-snowflake"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">AC</div>
+                            <div class="sbms-device-id">ID: 6 &mdash; Air Conditioner</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-6">
+                            <span class="sdot"></span> <span id="sbms-status-text-6">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(6,1)" id="sbms-on-6"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(6,0)" id="sbms-off-6"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(6)" id="sbms-toggle-6"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
                 </div>
 
-                <div style="margin-top:14px;font-size:12px;color:var(--text-secondary);text-align:center;">
-                    MQTT topic: <code style="background:rgba(37,99,235,0.1);padding:2px 7px;border-radius:4px;color:#2563eb;">smartroom/outlet/control</code>
+                <!-- Lampu -->
+                <div class="sbms-device-card" id="sbms-card-7">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(14,165,233,0.15);color:#0ea5e9;">
+                            <i class="fas fa-lightbulb"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">Lampu</div>
+                            <div class="sbms-device-id">ID: 7 &mdash; Lamp</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-7">
+                            <span class="sdot"></span> <span id="sbms-status-text-7">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(7,1)" id="sbms-on-7"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(7,0)" id="sbms-off-7"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(7)" id="sbms-toggle-7"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
+                </div>
+
+                <!-- Outlet -->
+                <div class="sbms-device-card" id="sbms-card-8">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(5,150,105,0.15);color:#059669;">
+                            <i class="fas fa-plug"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">Outlet</div>
+                            <div class="sbms-device-id">ID: 8 &mdash; Power Outlet</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-8">
+                            <span class="sdot"></span> <span id="sbms-status-text-8">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(8,1)" id="sbms-on-8"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(8,0)" id="sbms-off-8"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(8)" id="sbms-toggle-8"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
                 </div>
             </div>
+
+            <!-- Device Group Status Table -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-top:20px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:14px;display:flex;align-items:center;gap:8px;">
+                    <i class="fas fa-list-alt" style="color:#2563eb;"></i> All Devices Status
+                    <button onclick="sbmsRefreshStatus()" style="margin-left:auto;padding:5px 14px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:all 0.2s;" onmouseover="this.style.background='var(--bg-card-hover)'" onmouseout="this.style.background='transparent'">
+                        <i class="fas fa-refresh"></i> Refresh
+                    </button>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table class="ml-table" id="sbms-devices-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Device</th>
+                                <th>Status</th>
+                                <th>Master</th>
+                                <th>Group</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sbms-devices-tbody">
+                            <tr><td colspan="5" style="color:var(--text-secondary);font-style:italic;">Connect to SBMS to see devices</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top:12px;font-size:11px;color:var(--text-secondary);text-align:center;">
+                    Auto-refresh setiap 5 detik saat connected &bull; Status via <code style="background:rgba(37,99,235,0.08);padding:1px 6px;border-radius:4px;color:#2563eb;">GET /api/device-status</code>
+                </div>
+            </div>
+
+            <!-- MQTT Fallback (collapsed) -->
+            <details style="margin-top:16px;">
+                <summary style="cursor:pointer;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:600;color:var(--text-secondary);">
+                    <i class="fas fa-wifi" style="margin-right:6px;"></i> MQTT Direct Control (Fallback)
+                </summary>
+                <div style="padding:16px;background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:0 0 12px 12px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:300px;">
+                        <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'ON')">Outlet ON</button>
+                        <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'OFF')">Outlet OFF</button>
+                    </div>
+                    <div style="margin-top:10px;font-size:11px;color:var(--text-secondary);">
+                        MQTT topic: <code style="background:rgba(37,99,235,0.1);padding:2px 7px;border-radius:4px;color:#2563eb;">smartroom/outlet/control</code>
+                    </div>
+                </div>
+            </details>
         </div>
+
 
         <!-- Outlet Analysis Page -->
         <div id="outlet-analysis" class="page">
@@ -7651,6 +8165,14 @@ HTML_TEMPLATE = '''
                 </div>
                 <div class="stat-card">
                     <div class="stat-header">
+                        <span class="stat-title">Total Energy</span>
+                        <div class="stat-icon" style="background:rgba(5,150,105,0.15);color:#059669;"><i class="fas fa-plug"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-analytics-total-energy" style="color:#059669;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
+                    <div class="stat-change">Cumulative energy usage</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
                         <span class="stat-title">Active Outlets</span>
                         <div class="stat-icon" style="background:rgba(59,130,246,0.15);color:#3b82f6;"><i class="fas fa-plug"></i></div>
                     </div>
@@ -7667,59 +8189,47 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- Power Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Outlet Power Usage (W)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportOutletCSV()" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn active" id="outlet-range-1h" onclick="loadOutletAnalytics('1h',this)">1h</button>
-                        <button class="chart-option-btn" id="outlet-range-6h" onclick="loadOutletAnalytics('6h',this)">6h</button>
-                        <button class="chart-option-btn" id="outlet-range-24h" onclick="loadOutletAnalytics('24h',this)">24h</button>
-                        <button class="chart-option-btn" id="outlet-range-7d" onclick="loadOutletAnalytics('7d',this)">7d</button>
+            <!-- Live Electrical Parameters -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:20px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:15px;display:flex;align-items:center;">
+                    <i class="fas fa-bolt" style="color:#059669;margin-right:8px;"></i> Live Electrical Parameters
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Voltage</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-voltage">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">V</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Current</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-current">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">A</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Apparent</div>
+                        <div style="font-size:20px;font-weight:700;color:#3b82f6;"><span id="oa-live-apparent">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VA</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Reactive</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-reactive">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VAR</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Frequency</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-freq">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">Hz</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Power Factor</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-pf">--</span> <span id="oa-live-pf-quality" style="font-size:10px;padding:2px 6px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;vertical-align:middle;">--</span></div>
                     </div>
                 </div>
-                <canvas id="outletPowerChart" height="80"></canvas>
             </div>
 
-            <!-- Energy Consumption Chart -->
-            <div class="chart-container" style="margin-top:18px;">
-                <div class="chart-header">
-                    <div class="chart-title">Energy Consumption per Outlet (kWh)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn active" id="outlet-kwh-24h" onclick="loadOutletKwhChart('24h',this)">24h</button>
-                        <button class="chart-option-btn" id="outlet-kwh-7d" onclick="loadOutletKwhChart('7d',this)">7d</button>
-                        <button class="chart-option-btn" id="outlet-kwh-30d" onclick="loadOutletKwhChart('30d',this)">30d</button>
-                    </div>
-                </div>
-                <canvas id="outletKwhChart" height="80"></canvas>
-            </div>
 
             <!-- Per-Outlet Breakdown -->
             <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;">
                 <div style="padding:16px;border-radius:14px;border:1px solid rgba(37,99,235,0.2);background:rgba(37,99,235,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 1</div>
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet</div>
                     <div style="font-size:22px;font-weight:700;color:#2563eb;"><span id="oa-o1-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
                     <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o1-kwh" style="font-weight:600;color:#2563eb;">--</span> kWh</div>
                     <div id="oa-o1-bar" style="height:4px;border-radius:2px;background:rgba(37,99,235,0.15);margin-top:8px;"><div id="oa-o1-bar-fill" style="height:100%;border-radius:2px;background:#2563eb;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(14,165,233,0.2);background:rgba(14,165,233,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 2</div>
-                    <div style="font-size:22px;font-weight:700;color:#0ea5e9;"><span id="oa-o2-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o2-kwh" style="font-weight:600;color:#0ea5e9;">--</span> kWh</div>
-                    <div id="oa-o2-bar" style="height:4px;border-radius:2px;background:rgba(14,165,233,0.15);margin-top:8px;"><div id="oa-o2-bar-fill" style="height:100%;border-radius:2px;background:#0ea5e9;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(59,130,246,0.2);background:rgba(59,130,246,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 3</div>
-                    <div style="font-size:22px;font-weight:700;color:#3b82f6;"><span id="oa-o3-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o3-kwh" style="font-weight:600;color:#3b82f6;">--</span> kWh</div>
-                    <div id="oa-o3-bar" style="height:4px;border-radius:2px;background:rgba(59,130,246,0.15);margin-top:8px;"><div id="oa-o3-bar-fill" style="height:100%;border-radius:2px;background:#3b82f6;width:0%;"></div></div>
-                </div>
-                <div style="padding:16px;border-radius:14px;border:1px solid rgba(30,64,175,0.2);background:rgba(30,64,175,0.04);">
-                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet 4</div>
-                    <div style="font-size:22px;font-weight:700;color:#1e40af;"><span id="oa-o4-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o4-kwh" style="font-weight:600;color:#1e40af;">--</span> kWh</div>
-                    <div id="oa-o4-bar" style="height:4px;border-radius:2px;background:rgba(30,64,175,0.15);margin-top:8px;"><div id="oa-o4-bar-fill" style="height:100%;border-radius:2px;background:#1e40af;width:0%;"></div></div>
                 </div>
             </div>
         </div>
@@ -8772,7 +9282,7 @@ HTML_TEMPLATE = '''
                         deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
                         rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
                     }
-                    var chartKey = device === 'ac' ? 'acEnergyKwh' : 'lampEnergyKwh';
+                    var chartKey = device === 'ac' ? 'acEnergyKwh' : (device === 'lamp' ? 'lampEnergyKwh' : 'outletEnergyKwhMySQL');
                     var chart = charts[chartKey];
                     if (chart && chart.data) {
                         chart.data.labels = rangeLabels;
@@ -8780,7 +9290,7 @@ HTML_TEMPLATE = '''
                         chart.update('none');
                     }
                     // Update stat cards
-                    var prefix = device === 'ac' ? 'ac' : 'lamp';
+                    var prefix = device; // device is 'ac', 'lamp', or 'outlet'
                     var lastEl = document.getElementById(prefix + '-analytics-kwh-last');
                     var totalEl = document.getElementById(prefix + '-analytics-kwh-total');
                     var avgEl = document.getElementById(prefix + '-analytics-kwh-avg');
@@ -8836,6 +9346,10 @@ HTML_TEMPLATE = '''
                     setText('ds-lamp-peak',    d.lamp ? d.lamp.power_peak_w.toFixed(1) : '--');
                     setText('ds-ac-runtime',   d.ac ? d.ac.runtime_h.toFixed(2) : '--');
                     setText('ds-lamp-runtime', d.lamp ? d.lamp.runtime_h.toFixed(2) : '--');
+                    if (d.outlet) {
+                        setText('outlet-today-kwh', d.outlet.kwh !== undefined ? fmtKwh(d.outlet.kwh) : '--');
+                        setText('outlet-peak-power', d.outlet.power_peak_w !== undefined ? d.outlet.power_peak_w.toFixed(1) : '--');
+                    }
                 })
                 .catch(function(e) { console.error('Daily summary error:', e); });
         }
@@ -9266,6 +9780,7 @@ HTML_TEMPLATE = '''
             }
             if (pageId === 'control-outlet') {
                 try { refreshOutletStatus(); } catch(e) { console.error('[NAV] outlet status error:', e); }
+                if (_sbmsConnected) { try { sbmsRefreshStatus(); _sbmsStartAutoRefresh(); } catch(e) {} }
             }
             if (pageId === 'outlet-analysis') {
                 requestAnimationFrame(function() {
@@ -9283,10 +9798,17 @@ HTML_TEMPLATE = '''
         var outletCharts = {};
 
         function outletControl(num, state) {
+            var payload = {
+                "id": num === 1 ? 8 : num,
+                "nama": "Outlet",
+                "group_key": "master-room",
+                "status": state === 'ON' ? 1 : 0,
+                "is_master": false
+            };
             fetch('/api/outlet/control', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({outlet: num, state: state})
+                body: JSON.stringify(payload)
             })
             .then(r => r.json())
             .then(data => {
@@ -9442,6 +9964,245 @@ HTML_TEMPLATE = '''
         function exportOutletCSV() {
             window.open('/api/outlet/export/csv', '_blank');
         }
+
+        // ==================== SBMS API CONTROL ====================
+        var _sbmsRefreshTimer = null;
+        var _sbmsConnected = false;
+
+        function sbmsConnect() {
+            var url = document.getElementById('sbms-server-url').value.trim();
+            var email = document.getElementById('sbms-email').value.trim();
+            var password = document.getElementById('sbms-password').value;
+            if (!url) { showToast('Masukkan URL server SBMS', 'error'); return; }
+            if (!email || !password) { showToast('Masukkan email dan password', 'error'); return; }
+            var btn = document.getElementById('sbms-connect-btn');
+            btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+            // Step 1: Set server URL
+            fetch('/api/sbms/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({server_url: url})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function() {
+                // Step 2: Login
+                return fetch('/api/sbms/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: email, password: password})
+                });
+            })
+            .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+            .then(function(res) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-plug"></i> Connect';
+                if (res.ok && res.data.status === 'ok') {
+                    _sbmsConnected = true;
+                    _sbmsUpdateConnUI(true, res.data.user, url);
+                    showToast('Connected to SBMS! (' + res.data.user + ')', 'success');
+                    sbmsRefreshStatus();
+                    _sbmsStartAutoRefresh();
+                } else {
+                    showToast('SBMS Login gagal: ' + (res.data.message || 'Unknown error'), 'error');
+                }
+            })
+            .catch(function(e) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-plug"></i> Connect';
+                showToast('Koneksi error: ' + e.message, 'error');
+            });
+        }
+
+        function sbmsDisconnect() {
+            fetch('/api/sbms/logout', {method: 'POST'})
+            .then(function() {
+                _sbmsConnected = false;
+                _sbmsUpdateConnUI(false);
+                _sbmsStopAutoRefresh();
+                showToast('Disconnected from SBMS', 'info');
+            })
+            .catch(function(e) { showToast('Logout error: ' + e.message, 'error'); });
+        }
+
+        function sbmsControl(deviceId, status) {
+            if (!_sbmsConnected) { showToast('Connect ke SBMS dulu!', 'error'); return; }
+            var names = {1:'Master', 2:'AC', 3:'Lampu', 4:'Outlet'};
+            var btns = document.querySelectorAll('#sbms-card-' + deviceId + ' .sbms-btn');
+            btns.forEach(function(b) { b.disabled = true; });
+            fetch('/api/sbms/control/' + deviceId, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'set', status: status})
+            })
+            .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+            .then(function(res) {
+                btns.forEach(function(b) { b.disabled = false; });
+                if (res.ok && res.data.status === 'ok') {
+                    var dev = res.data.device || {};
+                    showToast((names[deviceId]||'Device') + ' → ' + (status ? 'ON' : 'OFF'), 'success');
+                    // Update all devices from response
+                    if (dev.devices && Array.isArray(dev.devices)) {
+                        _sbmsUpdateAllDeviceCards(dev.devices);
+                    } else {
+                        _sbmsUpdateDeviceCard(deviceId, status);
+                    }
+                } else {
+                    showToast('Kontrol gagal: ' + (res.data.message || 'Error'), 'error');
+                    if (res.data.message && res.data.message.indexOf('not logged') >= 0) {
+                        _sbmsConnected = false;
+                        _sbmsUpdateConnUI(false);
+                    }
+                }
+            })
+            .catch(function(e) {
+                btns.forEach(function(b) { b.disabled = false; });
+                showToast('Control error: ' + e.message, 'error');
+            });
+        }
+
+        function sbmsToggle(deviceId) {
+            if (!_sbmsConnected) { showToast('Connect ke SBMS dulu!', 'error'); return; }
+            var names = {5:'Master', 6:'AC', 7:'Lampu', 8:'Outlet'};
+            var btns = document.querySelectorAll('#sbms-card-' + deviceId + ' .sbms-btn');
+            btns.forEach(function(b) { b.disabled = true; });
+            fetch('/api/sbms/control/' + deviceId, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'toggle'})
+            })
+            .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+            .then(function(res) {
+                btns.forEach(function(b) { b.disabled = false; });
+                if (res.ok && res.data.status === 'ok') {
+                    var dev = res.data.device || {};
+                    showToast((names[deviceId]||'Device') + ' toggled', 'success');
+                    if (dev.devices && Array.isArray(dev.devices)) {
+                        _sbmsUpdateAllDeviceCards(dev.devices);
+                    } else {
+                        sbmsRefreshStatus();
+                    }
+                } else {
+                    showToast('Toggle gagal: ' + (res.data.message || 'Error'), 'error');
+                }
+            })
+            .catch(function(e) {
+                btns.forEach(function(b) { b.disabled = false; });
+                showToast('Toggle error: ' + e.message, 'error');
+            });
+        }
+
+        function sbmsRefreshStatus() {
+            fetch('/api/sbms/devices')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.status === 'ok' && data.devices) {
+                    var devices = Array.isArray(data.devices) ? data.devices : [];
+                    _sbmsUpdateAllDeviceCards(devices);
+                    _sbmsUpdateTable(devices);
+                }
+            })
+            .catch(function(e) { console.error('[SBMS] Refresh error:', e); });
+        }
+
+        function _sbmsUpdateDeviceCard(id, statusVal) {
+            var card = document.getElementById('sbms-card-' + id);
+            var badge = document.getElementById('sbms-status-' + id);
+            var text = document.getElementById('sbms-status-text-' + id);
+            var isOn = (statusVal === 1 || statusVal === '1' || statusVal === true);
+            if (card) {
+                if (isOn) card.classList.add('is-on'); else card.classList.remove('is-on');
+            }
+            if (badge) {
+                badge.className = 'sbms-device-status ' + (isOn ? 'on' : 'off');
+            }
+            if (text) text.textContent = isOn ? 'ON' : 'OFF';
+        }
+
+        function _sbmsUpdateAllDeviceCards(devices) {
+            devices.forEach(function(d) {
+                _sbmsUpdateDeviceCard(d.id, d.status);
+            });
+        }
+
+        function _sbmsUpdateTable(devices) {
+            var tbody = document.getElementById('sbms-devices-tbody');
+            if (!tbody) return;
+            var names = {5:'Master', 6:'AC', 7:'Lampu', 8:'Outlet'};
+            var icons = {5:'👑', 6:'❄️', 7:'💡', 8:'🔌'};
+            if (!devices || devices.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-secondary);font-style:italic;">No devices found</td></tr>';
+                return;
+            }
+            var html = '';
+            devices.forEach(function(d) {
+                var isOn = (d.status === 1 || d.status === '1' || d.status === true);
+                var statusBadge = isOn
+                    ? '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:12px;background:rgba(5,150,105,0.12);color:#059669;font-weight:700;font-size:11px;"><span style="width:6px;height:6px;border-radius:50%;background:#059669;"></span> ON</span>'
+                    : '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:12px;background:rgba(30,64,175,0.12);color:#1e40af;font-weight:700;font-size:11px;"><span style="width:6px;height:6px;border-radius:50%;background:#1e40af;"></span> OFF</span>';
+                html += '<tr>'
+                    + '<td style="font-weight:700;">' + d.id + '</td>'
+                    + '<td>' + (icons[d.id]||'') + ' ' + (d.nama || names[d.id] || 'Device ' + d.id) + '</td>'
+                    + '<td>' + statusBadge + '</td>'
+                    + '<td>' + (d.is_master ? '✅' : '—') + '</td>'
+                    + '<td><code style="font-size:11px;background:rgba(37,99,235,0.06);padding:2px 6px;border-radius:4px;">' + (d.group_key || '-') + '</code></td>'
+                    + '</tr>';
+            });
+            tbody.innerHTML = html;
+        }
+
+        function _sbmsUpdateConnUI(connected, userEmail, serverUrl) {
+            var panel = document.getElementById('sbms-conn-panel');
+            var badge = document.getElementById('sbms-conn-status');
+            var text = document.getElementById('sbms-conn-text');
+            var loginForm = document.getElementById('sbms-login-form');
+            var connInfo = document.getElementById('sbms-connected-info');
+            if (connected) {
+                panel.classList.add('connected');
+                badge.className = 'sbms-conn-badge online';
+                text.textContent = 'Connected';
+                loginForm.style.display = 'none';
+                connInfo.style.display = 'block';
+                document.getElementById('sbms-user-email').textContent = userEmail || '-';
+                document.getElementById('sbms-server-display').textContent = serverUrl || '-';
+            } else {
+                panel.classList.remove('connected');
+                badge.className = 'sbms-conn-badge offline';
+                text.textContent = 'Disconnected';
+                loginForm.style.display = 'block';
+                connInfo.style.display = 'none';
+                // Reset device cards
+                [1,2,3,4].forEach(function(id) { _sbmsUpdateDeviceCard(id, 0); });
+                _sbmsUpdateTable([]);
+            }
+        }
+
+        function _sbmsStartAutoRefresh() {
+            _sbmsStopAutoRefresh();
+            _sbmsRefreshTimer = setInterval(function() {
+                var page = document.getElementById('control-outlet');
+                if (page && page.classList.contains('active') && _sbmsConnected) {
+                    sbmsRefreshStatus();
+                }
+            }, 5000);
+        }
+
+        function _sbmsStopAutoRefresh() {
+            if (_sbmsRefreshTimer) { clearInterval(_sbmsRefreshTimer); _sbmsRefreshTimer = null; }
+        }
+
+        // Check SBMS connection state on page load
+        (function() {
+            fetch('/api/sbms/config')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.connected && data.server_url) {
+                    _sbmsConnected = true;
+                    _sbmsUpdateConnUI(true, data.user, data.server_url);
+                    _sbmsStartAutoRefresh();
+                }
+            })
+            .catch(function() {});
+        })();
 
         // ==================== ML OPTIMIZATION ====================
         var mlHistory = [];
@@ -9754,6 +10515,7 @@ HTML_TEMPLATE = '''
 
         // ==================== EXPORT FUNCTIONS ====================
         function downloadCSV(filename, csvContent) {
+            csvContent = "sep=,\\n" + csvContent;
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
@@ -11537,6 +12299,12 @@ HTML_TEMPLATE = '''
             s('eu-outlet-voltage', f(outlet.voltage));       s('eu-outlet-current', f(outlet.current, 2));
             s('eu-outlet-kwh',     fkwh(outlet.energy));     s('eu-outlet-freq',    f(outlet.frequency, 2));
             s('eu-outlet-pf',      f(outlet.pf, 2));          s('eu-outlet-ts',      outlet.updated_at || '--');
+            
+            // Populate Outlet Analysis Live Params
+            s('oa-live-voltage', f(outlet.voltage));       s('oa-live-current', f(outlet.current, 2));
+            s('oa-live-apparent', f(outlet.apparent_power, 1)); s('oa-live-reactive', f(outlet.reactive_power, 1));
+            s('oa-live-freq', f(outlet.frequency, 2));      s('oa-live-pf', f(outlet.pf, 2));
+            
             s('eu-lamp-voltage', f(lamp.voltage));     s('eu-lamp-current', f(lamp.current, 2));
             s('eu-lamp-power',   f(lamp.power));       s('eu-lamp-kwh',     fkwh(lamp.energy));
             s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
@@ -11562,6 +12330,7 @@ HTML_TEMPLATE = '''
             };
             _applyBadge('eu-ac-pf-quality',   ac.pf);
             _applyBadge('eu-outlet-pf-quality', outlet.pf);
+            _applyBadge('oa-live-pf-quality', outlet.pf);
             _applyBadge('eu-lamp-pf-quality', lamp.pf);
             var acBar = document.getElementById('eu-ac-pbar');
             var outletBar = document.getElementById('eu-outlet-pbar');
@@ -11586,6 +12355,8 @@ HTML_TEMPLATE = '''
             s('total-current', (parseFloat(ac.current||0) + parseFloat(outlet.current||0) + parseFloat(lamp.current||0)).toFixed(2));
             s('ac-energy-kwh',   fkwh(acKwh));
             s('outlet-energy-kwh', fkwh(outletKwh));
+            s('outlet-analytics-total-energy', fkwh(outletKwh));
+            s('outlet-total-power', outletPow.toFixed(1));
             s('lamp-energy-kwh', fkwh(lampKwh));
             s('total-energy-kwh', fkwh(totKwh));
             s('ac-voltage-card',  f(ac.voltage));
@@ -11635,7 +12406,16 @@ HTML_TEMPLATE = '''
 
         // ── Socket handler ──
         socket.on('mysql_energy_update', function(data) {
-            _applyEnergyData(data.ac || {}, data.outlet || {}, data.lamp || {});
+            var ac = data.ac || {};
+            var outlet = data.outlet || {};
+            var lamp = data.lamp || {};
+            
+            // PROTEKSI GANDA: Pastikan menjadi kWh, jika masih di atas 1000 (Wh), paksa bagi 1000
+            if (ac.energy > 1000) ac.energy = ac.energy / 1000.0;
+            if (outlet.energy > 1000) outlet.energy = outlet.energy / 1000.0;
+            if (lamp.energy > 1000) lamp.energy = lamp.energy / 1000.0;
+
+            _applyEnergyData(ac, outlet, lamp);
         });
 
         // ── Direct PHP polling fallback ──
@@ -11669,18 +12449,18 @@ HTML_TEMPLATE = '''
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
                     // Adjust field names: active_power → power, frequency → frequency
                     ac.power       = ac.active_power;
-                    // total_energy from DB is already in kWh (energy_kwh table)
-                    ac.energy      = parseFloat(ac.total_energy || 0);
+                    // total_energy from DB is actually in Wh, divide by 1000 for kWh
+                    ac.energy      = parseFloat(ac.total_energy || 0) / 1000.0;
                     ac.frequency   = ac.frequency;
                     ac.voltage     = ac.voltage;
                     ac.current     = ac.arus;
                     outlet.power     = outlet.active_power;
-                    outlet.energy    = parseFloat(outlet.total_energy || 0);
+                    outlet.energy    = parseFloat(outlet.total_energy || 0) / 1000.0;
                     outlet.frequency = outlet.frequency;
                     outlet.voltage   = outlet.voltage;
                     outlet.current   = outlet.arus;
                     lamp.power     = lamp.active_power;
-                    lamp.energy    = parseFloat(lamp.total_energy || 0);
+                    lamp.energy    = parseFloat(lamp.total_energy || 0) / 1000.0;
                     lamp.frequency = lamp.frequency;
                     lamp.voltage   = lamp.voltage;
                     lamp.current   = lamp.arus;
@@ -13232,5 +14012,24 @@ if __name__ == '__main__':
         print("  [MySQL] Energy polling thread started")
     except Exception as _me:
         print(f"  [MySQL] WARNING: mysql_energy could not be loaded: {_me}")
+
+    def auto_connect_sbms():
+        time.sleep(2)
+        print("  [SBMS] Auto-connecting to SBMS Server...")
+        sbms_config['server_url'] = 'https://iotlab-uns.com/neo-sbms'
+        try:
+            code, resp = _sbms_request('POST', '/api/auth/login', {'email': 'admin@example.com', 'password': '123456'})
+            if code == 200 and resp.get('token'):
+                sbms_config['token'] = resp['token']
+                sbms_config['user'] = resp.get('user', {}).get('email', 'admin@example.com')
+                sbms_config['connected'] = True
+                log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': 'SBMS Auto-Login OK', 'level': 'info'})
+                print(f"  [SBMS] Successfully auto-connected as {sbms_config['user']}")
+            else:
+                print(f"  [SBMS] Auto-connect failed: HTTP {code} - {resp}")
+        except Exception as e:
+            print(f"  [SBMS] Auto-connect exception: {e}")
+
+    threading.Thread(target=auto_connect_sbms, daemon=True).start()
 
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
