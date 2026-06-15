@@ -885,10 +885,24 @@ def run_pso_optimization(verbose=False):
         lux3_r = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
         lux_real = round((lux1_r + lux2_r + lux3_r) / 3.0, 1)
 
-        # Hitung fitness nyata
+        # Hitung fitness nyata menggunakan fungsi objektif yang sama dengan estimasi
         person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
         TARGET_LUX = 350.0 if person_now else 0.0
-        real_fit   = round((lux_real - TARGET_LUX) ** 2, 2)
+        
+        err_avg = (lux_real - TARGET_LUX) ** 2
+        var_real = ((lux1_r - lux_real)**2 + (lux2_r - lux_real)**2 + (lux3_r - lux_real)**2) / 3.0
+        err_min = 0.0
+        MIN_LUX = 200.0
+        for lux_val in [lux1_r, lux2_r, lux3_r]:
+            if lux_val < MIN_LUX:
+                err_min += (MIN_LUX - lux_val) ** 2
+                
+        real_fit = err_avg + 0.5 * var_real + 1.5 * err_min
+        
+        if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0 and lux1_r >= MIN_LUX and lux2_r >= MIN_LUX and lux3_r >= MIN_LUX:
+            real_fit = 0.0
+            
+        real_fit = round(real_fit, 4)
 
         print(f"[PSO] Lux nyata={lux_real} | fitness={real_fit} | target={TARGET_LUX:.0f}")
 
@@ -7681,19 +7695,6 @@ HTML_TEMPLATE = '''
                 <canvas id="psoFitnessChart" height="100"></canvas>
             </div>
 
-            <!-- GA vs PSO Comparison Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">GA vs PSO — Fitness Comparison</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportCompareChart('comparison', 'Fitness')" title="Export CSV"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="clearMLCharts()">
-                            Clear
-                        </button>
-                    </div>
-                </div>
-                <canvas id="comparisonChart" height="80"></canvas>
-            </div>
 
             <!-- Optimization History Table -->
             <div class="chart-container">
