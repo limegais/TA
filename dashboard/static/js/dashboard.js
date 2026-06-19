@@ -1217,8 +1217,8 @@
                     }
 
                     if (field === 'power') {
-                        document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
-                        document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
+                        { var _el = document.getElementById('compare-avg-before'); if (_el) _el.textContent = summary.avg_before || '--'; }
+                        { var _el = document.getElementById('compare-avg-after'); if (_el) _el.textContent = summary.avg_after || '--'; }
                         var savingsEl = document.getElementById('compare-savings');
                         savingsEl.textContent = summary.savings_percent || '--';
                         if (summary.savings_percent > 0) {
@@ -1889,8 +1889,8 @@
                 text.textContent = 'Connected';
                 loginForm.style.display = 'none';
                 connInfo.style.display = 'block';
-                document.getElementById('sbms-user-email').textContent = userEmail || '-';
-                document.getElementById('sbms-server-display').textContent = serverUrl || '-';
+                { var _el = document.getElementById('sbms-user-email'); if (_el) _el.textContent = userEmail || '-'; }
+                { var _el = document.getElementById('sbms-server-display'); if (_el) _el.textContent = serverUrl || '-'; }
             } else {
                 panel.classList.remove('connected');
                 badge.className = 'sbms-conn-badge offline';
@@ -2227,7 +2227,7 @@
 
         // ==================== EXPORT FUNCTIONS ====================
         function downloadCSV(filename, csvContent) {
-            csvContent = "sep=,\\n" + csvContent;
+            csvContent = "sep=,\n" + csvContent;
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
@@ -2241,9 +2241,9 @@
                 showToast('No optimization data to export', 'error');
                 return;
             }
-            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\\n';
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
             mlHistory.forEach(e => {
-                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\\n';
+                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
@@ -2255,14 +2255,14 @@
                 showToast('No logs to export', 'error');
                 return;
             }
-            let csv = 'Time,Level,Message\\n';
+            let csv = 'Time,Level,Message\n';
             Array.from(container.children).forEach(entry => {
                 const text = entry.textContent || '';
                 const timeMatch = text.match(/\\[(.+?)\\]/);
                 const time = timeMatch ? timeMatch[1] : '';
                 const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
-                csv += '"' + time + '","' + level + '","' + msg + '"\\n';
+                csv += '"' + time + '","' + level + '","' + msg + '"\n';
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
@@ -2317,10 +2317,10 @@
                         showToast('No feedback data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Rating,Occupancy Count,Comment\\n';
+                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
                     rows.forEach(item => {
                         const comment = (item.comment || '').replace(/"/g, '""');
-                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\\n';
+                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\n';
                     });
                     downloadCSV('occupancy_feedback.csv', csv);
                     showToast('Feedback exported', 'success');
@@ -2337,7 +2337,7 @@
                         showToast('No energy data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\\n';
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
                     const times = data.power.map(p => p.time);
                     const powers = data.power || [];
                     const voltages = data.voltage || [];
@@ -2346,7 +2346,7 @@
                         const pw = powers[i] ? powers[i].value : '';
                         const vl = voltages[i] ? voltages[i].value : '';
                         const en = energies[i] ? energies[i].value : '';
-                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\\n';
+                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\n';
                     });
                     downloadCSV('energy_history_' + period + '.csv', csv);
                     showToast('Energy data exported (' + period + ')', 'success');
@@ -2361,10 +2361,10 @@
                 showToast('No data to export for ' + chartName, 'error');
                 return;
             }
-            let csv = 'Time,' + valueLabel + '\\n';
+            let csv = 'Time,' + valueLabel + '\n';
             chart.data.labels.forEach((label, i) => {
                 const val = chart.data.datasets[0].data[i];
-                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\\n';
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
             });
             downloadCSV(chartName + '_data.csv', csv);
             showToast(chartName + ' data exported', 'success');
@@ -2378,14 +2378,14 @@
                 return;
             }
             const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
-            let csv = 'Time,' + dsNames.join(',') + '\\n';
+            let csv = 'Time,' + dsNames.join(',') + '\n';
             chart.data.labels.forEach((label, i) => {
                 let row = '"' + label + '"';
                 chart.data.datasets.forEach(ds => {
                     const val = ds.data[i];
                     row += ',' + (val !== null && val !== undefined ? val : '');
                 });
-                csv += row + '\\n';
+                csv += row + '\n';
             });
             downloadCSV(chartName + '_compare.csv', csv);
             showToast(chartName + ' comparison exported', 'success');
@@ -2553,15 +2553,15 @@
                     if (data.status === 'active') {
                         statusEl.textContent = 'Active';
                         statusEl.style.color = '#3b82f6';
-                        document.getElementById('cam-resolution').textContent = data.width + ' x ' + data.height;
-                        document.getElementById('cam-fps').textContent = data.fps + ' FPS';
+                        { var _el = document.getElementById('cam-resolution'); if (_el) _el.textContent = data.width + ' x ' + data.height; }
+                        { var _el = document.getElementById('cam-fps'); if (_el) _el.textContent = data.fps + ' FPS'; }
                     } else {
                         statusEl.textContent = 'Inactive';
                         statusEl.style.color = '#1e40af';
                     }
                 })
                 .catch(e => {
-                    document.getElementById('cam-status').textContent = 'Error';
+                    { var _el = document.getElementById('cam-status'); if (_el) _el.textContent = 'Error'; }
                     document.getElementById('cam-status').style.color = '#1e40af';
                 });
         }
@@ -2574,17 +2574,17 @@
 
         // ==================== AC CONTROLS ====================
         function updateACTemp(value) {
-            document.getElementById('ac-temp-display').textContent = value;
+            { var _el = document.getElementById('ac-temp-display'); if (_el) _el.textContent = value; }
             saveSettings();
         }
 
         function updateACRH(value) {
-            document.getElementById('ac-rh-display').textContent = value;
+            { var _el = document.getElementById('ac-rh-display'); if (_el) _el.textContent = value; }
             saveSettings();
         }
 
         function updateFanSpeed(value) {
-            document.getElementById('fan-speed-display').textContent = value;
+            { var _el = document.getElementById('fan-speed-display'); if (_el) _el.textContent = value; }
             saveSettings();
         }
 
@@ -2715,14 +2715,14 @@
 
         // ==================== LAMP CONTROLS ====================
         function updateBrightness(lampNum, value) {
-            document.getElementById('brightness-display-' + lampNum).textContent = value;
+            { var _el = document.getElementById('brightness-display-' + lampNum); if (_el) _el.textContent = value; }
             saveSettings();
         }
 
         function syncAllSliders() {
             const val = document.getElementById('brightness-slider-1').value;
             document.getElementById('brightness-slider-2').value = val;
-            document.getElementById('brightness-display-2').textContent = val;
+            { var _el = document.getElementById('brightness-display-2'); if (_el) _el.textContent = val; }
             saveSettings();
         }
 
@@ -3100,7 +3100,7 @@
         }
 
         function resetAllIRCodes() {
-            if (!confirm('[WARNING] Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
+            if (!confirm('[WARNING] Reset all learned IR codes?\n\nThis will delete ALL saved remote buttons!')) {
                 return;
             }
             
@@ -3190,43 +3190,43 @@
                 .then(data => {
                     const codes = data.codes || data;
                     
-                    let debugInfo = '═══════════════════════════════════\\n';
-                    debugInfo += '  IR CODES DEBUG INFO\\n';
-                    debugInfo += '═══════════════════════════════════\\n\\n';
+                    let debugInfo = '═══════════════════════════════════\n';
+                    debugInfo += '  IR CODES DEBUG INFO\n';
+                    debugInfo += '═══════════════════════════════════\n\n';
                     
                     if (Object.keys(codes).length === 0) {
-                        debugInfo += '[WARN] No IR codes learned yet\\n\\n';
-                        debugInfo += 'Steps to learn:\\n';
-                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
-                        debugInfo += '2. Click \"Learn\" button\\n';
-                        debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
-                        debugInfo += '4. Wait for \"Learned [OK]\" status\\n';
-                        debugInfo += '5. Click \"Send\" to test\\n';
+                        debugInfo += '[WARN] No IR codes learned yet\n\n';
+                        debugInfo += 'Steps to learn:\n';
+                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\n';
+                        debugInfo += '2. Click \"Learn\" button\n';
+                        debugInfo += '3. Press remote button (hold 2-3 seconds)\n';
+                        debugInfo += '4. Wait for \"Learned [OK]\" status\n';
+                        debugInfo += '5. Click \"Send\" to test\n';
                     } else {
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += '[IR] ' + button + ':\\n';
-                            debugInfo += '   Code: ' + codePreview + '\\n';
-                            debugInfo += '   Length: ' + codeStr.length + ' chars\\n';
+                            debugInfo += '[IR] ' + button + ':\n';
+                            debugInfo += '   Code: ' + codePreview + '\n';
+                            debugInfo += '   Length: ' + codeStr.length + ' chars\n';
                             
                             // Parse protocol
                             if (codeStr.includes(':')) {
                                 const protocol = codeStr.split(':')[0];
-                                debugInfo += '   Protocol: ' + protocol + '\\n';
+                                debugInfo += '   Protocol: ' + protocol + '\n';
                             }
-                            debugInfo += '\\n';
+                            debugInfo += '\n';
                         });
                         
-                        debugInfo += '═══════════════════════════════════\\n';
-                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\\n';
+                        debugInfo += '═══════════════════════════════════\n';
+                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\n';
                     }
                     
-                    debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
-                    debugInfo += '- If AC not responding: Use RAW protocol\\n';
-                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
-                    debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
-                    debugInfo += '- Distance to AC: 1-3 meters, direct line\\n';
+                    debugInfo += '\n[TIP] TROUBLESHOOTING:\n';
+                    debugInfo += '- If AC not responding: Use RAW protocol\n';
+                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\n';
+                    debugInfo += '- If code too short: Press remote longer (2-3s)\n';
+                    debugInfo += '- Distance to AC: 1-3 meters, direct line\n';
                     
                     alert(debugInfo);
                     console.log('IR Debug Info:', codes);
@@ -3235,7 +3235,7 @@
         }
 
         function testAllIRCodes() {
-            if (!confirm('Test all learned IR codes?\\n\\nThis will send all codes one by one with 2 second delay.')) {
+            if (!confirm('Test all learned IR codes?\n\nThis will send all codes one by one with 2 second delay.')) {
                 return;
             }
             
@@ -3341,9 +3341,9 @@
             
             lastDetectionTime = now;
             
-            document.getElementById('alert-person-count').textContent = count;
-            document.getElementById('alert-person-confidence').textContent = confidence + '%';
-            document.getElementById('alert-time').textContent = new Date().toLocaleTimeString();
+            { var _el = document.getElementById('alert-person-count'); if (_el) _el.textContent = count; }
+            { var _el = document.getElementById('alert-person-confidence'); if (_el) _el.textContent = confidence + '%'; }
+            { var _el = document.getElementById('alert-time'); if (_el) _el.textContent = new Date().toLocaleTimeString(); }
             
             const alertBox = document.getElementById('detection-alert');
             alertBox.classList.add('show');
@@ -3757,7 +3757,7 @@
                     //  daily-cost diisi langsung dari MySQL via socket)
 
                     updateModeBadges();
-                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
+                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
         }
 
         function updateLogs() {
@@ -3778,11 +3778,11 @@
         // ==================== DEVICE STATUS ====================
         function diagLog(msg) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent += msg + '\\n';
+            if (el) el.textContent += msg + '\n';
         }
         function diagClear(title) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\\n';
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
         }
 
         function checkMqttStatus(showDetail) {
@@ -4422,11 +4422,11 @@
             if (_recRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
             var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
             if (rows.length === 0) { showToast('No data for ' + device, 'error'); return; }
-            var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
+            var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\n';
             var body = rows.map(function(r) {
                 return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
-            }).join('\\n');
+            }).join('\n');
             var now = new Date();
             var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
             var fname = 'energy' + suffix + '_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
@@ -4575,10 +4575,10 @@
 
         function tempExportCSV() {
             if (_tempRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
-            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
+            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\n';
             var body = _tempRows.map(function(r) {
                 return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl;
-            }).join('\\n');
+            }).join('\n');
             var now = new Date();
             var fname = 'temp_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -4709,10 +4709,10 @@
 
         function luxExportCSV() {
             if (_luxRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
-            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
             var body = _luxRows.map(function(r) {
                 return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
-            }).join('\\n');
+            }).join('\n');
             var now = new Date();
             var fname = 'lux_brightness_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -4873,10 +4873,10 @@
 
         function occExportCSV() {
             if (_occRows.length === 0) { showToast('No occupancy data yet', 'error'); return; }
-            var header = 'Time,Hour,Person Count,Confidence\\n';
+            var header = 'Time,Hour,Person Count,Confidence\n';
             var body = _occRows.map(function(r) {
                 return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
-            }).join('\\n');
+            }).join('\n');
             var now = new Date();
             var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '.csv';
@@ -5375,7 +5375,7 @@
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Unknown') + '\\n\\nClick "Test Frontend" or "Test MQTT Broker" button below.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Unknown') + '\n\nClick "Test Frontend" or "Test MQTT Broker" button below.';
                         }
                     }
                 }).catch(function() {});
@@ -5501,11 +5501,11 @@
                         var base = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
                         var rows = drpFilter(base, from, to);
                         if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                        var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
+                        var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\n';
                         var body = rows.map(function(r) {
                             return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                                    r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
-                        }).join('\\n');
+                        }).join('\n');
                         var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
                         var fname = 'energy' + suffix + '_' + from + '_to_' + to + '.csv';
                         downloadCSV(fname, header + body);
@@ -5518,8 +5518,8 @@
                 showDateRangePicker('Export temperature & humidity recording', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\\n');
+                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\n');
                     var fname = 'temp_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' rows exported: ' + fname, 'success');
@@ -5530,8 +5530,8 @@
                 showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
                     var rows = drpFilter(_luxRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\\n');
+                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\n');
                     var fname = 'lux_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' rows exported: ' + fname, 'success');
@@ -5542,8 +5542,8 @@
                 showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
                     var rows = drpFilter(_occRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Hour,Person Count,Confidence\\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\\n');
+                    var header = 'Time,Hour,Person Count,Confidence\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\n');
                     var fname = 'occupancy_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' data exported: ' + fname, 'success');
@@ -5557,7 +5557,7 @@
                 }
                 var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
                 showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
-                    var header = 'Time,' + valueLabel + '\\n';
+                    var header = 'Time,' + valueLabel + '\n';
                     var lines = [];
                     chart.data.labels.forEach(function(label, i) {
                         var d = label.substring(0,10);
@@ -5566,7 +5566,7 @@
                         lines.push('"' + label + '",' + (val !== null && val !== undefined ? val : ''));
                     });
                     if (lines.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    downloadCSV(chartName + '_' + from + '_to_' + to + '.csv', header + lines.join('\\n') + '\\n');
+                    downloadCSV(chartName + '_' + from + '_to_' + to + '.csv', header + lines.join('\n') + '\n');
                     showToast(lines.length + ' points exported', 'success');
                 });
             };
