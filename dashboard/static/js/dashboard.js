@@ -3385,6 +3385,14 @@
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
             const toastMessage = document.getElementById('toast-message');
+            if (!toast || !toastMessage) {
+                if (type === 'error' || type === 'info') {
+                    alert(message);
+                } else {
+                    console.log('[Toast]', type, message);
+                }
+                return;
+            }
             const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
             
             toastMessage.innerHTML = message;
