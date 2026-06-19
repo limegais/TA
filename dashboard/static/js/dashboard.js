@@ -87,19 +87,22 @@
                     
                     if (acTempSlider) {
                         acTempSlider.value = settings.acTemp || 24;
-                        document.getElementById('ac-temp-display').textContent = acTempSlider.value;
+                        const acTempDisplay = document.getElementById('ac-temp-display');
+                        if (acTempDisplay) acTempDisplay.textContent = acTempSlider.value;
                     }
                     
                     if (fanSpeedSlider) {
                         fanSpeedSlider.value = settings.fanSpeed || 1;
-                        document.getElementById('fan-speed-display').textContent = fanSpeedSlider.value;
+                        const fanSpeedDisplay = document.getElementById('fan-speed-display');
+                        if (fanSpeedDisplay) fanSpeedDisplay.textContent = fanSpeedSlider.value;
                     }
                     
                     for (let i = 1; i <= 2; i++) {
                         const slider = document.getElementById('brightness-slider-' + i);
                         if (slider) {
                             slider.value = settings['lampBrightness' + i] || 0;
-                            document.getElementById('brightness-display-' + i).textContent = slider.value;
+                            const brightDisplay = document.getElementById('brightness-display-' + i);
+                            if (brightDisplay) brightDisplay.textContent = slider.value;
                         }
                     }
                 } catch (e) {
