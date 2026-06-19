@@ -1,0 +1,495 @@
+<div id="energy" class="page">
+            <div class="header">
+                <h1>Energy Usage</h1>
+                <p>Real-time &amp; historical energy monitoring &mdash; MySQL Database (iotlabun_sbms)</p>
+            </div>
+
+            <!-- ===== LIVE ENERGY MONITOR ===== -->
+            <div style="background:var(--bg-card);border-radius:18px;border:1px solid rgba(37,99,235,0.2);overflow:hidden;margin-bottom:22px;box-shadow:0 4px 24px rgba(0,0,0,0.07);">
+                <!-- Header -->
+                <div style="padding:14px 20px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,rgba(37,99,235,0.10),rgba(79,70,229,0.06));border-bottom:1px solid rgba(37,99,235,0.15);">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="width:38px;height:38px;border-radius:10px;background:rgba(37,99,235,0.2);display:flex;align-items:center;justify-content:center;font-size:18px;">&#9889;</div>
+                        <div>
+                            <div style="font-size:15px;font-weight:700;color:var(--text);">Live Energy Monitor</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">MySQL iotlabun_sbms &mdash; updates every 5 seconds</div>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <div style="font-size:11px;color:var(--text-secondary);">Update: <span id="energy-last-update" style="color:var(--text);font-weight:600;">--</span></div>
+                        <div id="mysql-live-badge" style="padding:4px 14px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(107,114,128,0.15);color:#6b7280;border:1px solid rgba(107,114,128,0.3);transition:all 0.4s ease;">
+                            <i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Waiting...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AC + Outlet + Lamp columns -->
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;">
+                    <!-- ── AC ── -->
+                    <div style="padding:18px 20px;border-right:1px solid rgba(30,64,175,0.15);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#1e40af;"><i class="fas fa-snowflake" style="margin-right:6px;"></i>AC (id_kwh=1)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(30,64,175,0.1);color:#1e40af;border:1px solid rgba(30,64,175,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#1e40af;line-height:1;transition:color 0.3s;"><span id="ac-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(30,64,175,0.12);overflow:hidden;">
+                                <div id="eu-ac-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#1e40af,#93c5fd);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 3.0 kW max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-ac-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(30,64,175,0.05);border:1px solid rgba(30,64,175,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-ac-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(30,64,175,0.04);border:1px solid rgba(30,64,175,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-ac-pf">--</span>
+                                <span id="eu-ac-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-ac-ts">--</span></div>
+                    </div>
+
+                    <!-- ── Outlet ── -->
+                    <div style="padding:18px 20px;border-right:1px solid rgba(5,150,105,0.15);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#059669;"><i class="fas fa-plug" style="margin-right:6px;"></i>Outlet (id_kwh=2)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(5,150,105,0.1);color:#059669;border:1px solid rgba(5,150,105,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#059669;line-height:1;transition:color 0.3s;"><span id="outlet-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(5,150,105,0.12);overflow:hidden;">
+                                <div id="eu-outlet-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#059669,#34d399);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 1.0 kW max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-outlet-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-outlet-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(5,150,105,0.04);border:1px solid rgba(5,150,105,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-outlet-pf">--</span>
+                                <span id="eu-outlet-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-outlet-ts">--</span></div>
+                    </div>
+
+                    <!-- ── Lamp ── -->
+                    <div style="padding:18px 20px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <div style="font-size:13px;font-weight:700;color:#eab308;"><i class="fas fa-lightbulb" style="margin-right:6px;"></i>Lamp (id_kwh=3)</div>
+                            <div style="font-size:10px;padding:2px 10px;border-radius:20px;background:rgba(234,179,8,0.1);color:#eab308;border:1px solid rgba(234,179,8,0.2);">Live</div>
+                        </div>
+                        <!-- Big power -->
+                        <div style="text-align:center;margin-bottom:12px;">
+                            <div style="font-size:48px;font-weight:800;color:#eab308;line-height:1;transition:color 0.3s;"><span id="lamp-power">--</span></div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">kW &mdash; Power Active</div>
+                            <div style="margin-top:8px;height:7px;border-radius:4px;background:rgba(234,179,8,0.12);overflow:hidden;">
+                                <div id="eu-lamp-pbar" style="height:100%;border-radius:4px;background:linear-gradient(90deg,#eab308,#fde047);width:0%;transition:width 0.6s ease;"></div>
+                            </div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">of 0.5 kW max</div>
+                        </div>
+                        <!-- Metrics 3-col -->
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;">
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Voltage</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-voltage">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">V</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Current</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-current">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">A</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Energy</div>
+                                <div style="font-size:17px;font-weight:700;color:#3b82f6;transition:all 0.3s;"><span id="eu-lamp-kwh">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">kWh</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Reaktif</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-reactive">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VAR</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Semu</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-apparent">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">VA</div>
+                            </div>
+                            <div style="text-align:center;padding:8px 5px;border-radius:10px;background:rgba(234,179,8,0.05);border:1px solid rgba(234,179,8,0.1);">
+                                <div style="font-size:10px;color:var(--text-secondary);">Frequency</div>
+                                <div style="font-size:17px;font-weight:700;color:var(--text);transition:all 0.3s;"><span id="eu-lamp-freq">--</span></div>
+                                <div style="font-size:10px;color:var(--text-secondary);">Hz</div>
+                            </div>
+                        </div>
+                        <!-- PF -->
+                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-radius:10px;background:rgba(234,179,8,0.04);border:1px solid rgba(234,179,8,0.1);">
+                            <span style="font-size:11px;color:var(--text-secondary);">Power Factor</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="font-size:17px;font-weight:700;color:var(--text);" id="eu-lamp-pf">--</span>
+                                <span id="eu-lamp-pf-quality" style="font-size:10px;padding:2px 8px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;transition:all 0.4s;">--</span>
+                            </div>
+                        </div>
+                        <div style="margin-top:6px;font-size:10px;color:var(--text-secondary);">Updated: <span id="eu-lamp-ts">--</span></div>
+                    </div>
+                </div>
+
+                <!-- Total footer row -->
+                <div style="padding:14px 20px;background:linear-gradient(135deg,rgba(37,99,235,0.07),rgba(79,70,229,0.04));border-top:1px solid rgba(37,99,235,0.12);display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Power</div>
+                        <div style="font-size:20px;font-weight:800;color:#2563eb;"><span id="total-power">--</span><span style="font-size:11px;"> kW</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Current</div>
+                        <div style="font-size:20px;font-weight:800;color:#2563eb;"><span id="total-current">--</span><span style="font-size:11px;"> A</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Total Energy</div>
+                        <div style="font-size:20px;font-weight:800;color:#3b82f6;"><span id="total-energy-kwh">--</span><span style="font-size:11px;"> kWh</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Frequency</div>
+                        <div style="font-size:20px;font-weight:800;color:var(--text);"><span id="total-freq-card">--</span><span style="font-size:11px;"> Hz</span></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);margin-bottom:3px;">Est. Cost</div>
+                        <div style="font-size:17px;font-weight:800;color:#0ea5e9;">Rp <span id="daily-cost">--</span></div>
+                        <div style="font-size:9px;color:var(--text-secondary);">@ Rp 1.500/kWh</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== REAL-TIME CHARTS (last 30 points) ===== -->
+            <div style="background:var(--bg-card);border-radius:16px;border:1px solid rgba(37,99,235,0.18);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-chart-line" style="margin-right:8px;color:#2563eb;"></i>Real-time Charts &mdash; Last 30 Points</h2>
+                <div class="chart-container" style="margin-bottom:16px;">
+                    <div class="chart-header">
+                        <div class="chart-title">Frequency <span style="color:#0ea5e9;">&#9632;</span> (Hz)</div>
+                    </div>
+                    <canvas id="mysqlVoltFreqChart" height="80"></canvas>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title">Current &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> (A)</div>
+                    </div>
+                    <canvas id="mysqlCurrentChart" height="80"></canvas>
+                </div>
+            </div>
+
+            <!-- ===== GRAFIK HISTORIS (InfluxDB) ===== -->
+            <div style="background:var(--bg-card);border-radius:16px;border:1px solid var(--border);padding:20px;margin-bottom:22px;box-shadow:0 4px 16px rgba(0,0,0,0.05);">
+                <h2 style="font-size:15px;font-weight:700;color:var(--text);margin:0 0 16px;"><i class="fas fa-history" style="margin-right:8px;color:#3b82f6;"></i>Historical Data (InfluxDB)</h2>
+
+                <!-- Power -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title">Active Power &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (kW)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('power', '24h', this)">Daily</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '7d', this)">Weekly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '30d', this)">Monthly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('power', '12mo', this)">Annual</button>
+                        </div>
+                    </div>
+                    <div class="chart-visibility-toggles" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;padding:6px 10px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:12px;">
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text-secondary);"><input type="checkbox" checked onchange="toggleDataset('energyPower',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
+                    </div>
+                    <canvas id="energyPowerChart" height="80"></canvas>
+                    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
+                        <span style="color:#1e40af;font-weight:600;">AC</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="energy-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Min: <strong id="energy-power-min" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Max: <strong id="energy-power-max" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="energy-power-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#059669;font-weight:600;margin-left:10px;">Outlet</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="outlet-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="outlet-power-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#eab308;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:var(--text-secondary);">Latest: <strong id="lamp-power-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Avg: <strong id="lamp-power-avg" style="color:var(--text);">--</strong></span>
+                    </div>
+                </div>
+
+                <!-- Voltage + Current side by side -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Voltage &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> (V)</div>
+                            <div class="chart-options">
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('voltage', '24h', this)">Daily</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '7d', this)">Weekly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '30d', this)">Monthly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('voltage', '12mo', this)">Annual</button>
+                            </div>
+                        </div>
+                        <div class="chart-visibility-toggles" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px;padding:5px 8px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:11px;">
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyVoltage',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                        </div>
+                        <canvas id="energyVoltageChart" height="100"></canvas>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                            <span>Latest: <strong id="energy-voltage-latest" style="color:var(--text);">--</strong></span>
+                            <span>Min: <strong id="energy-voltage-min" style="color:var(--text);">--</strong></span>
+                            <span>Max: <strong id="energy-voltage-max" style="color:var(--text);">--</strong></span>
+                            <span>Avg: <strong id="energy-voltage-avg" style="color:var(--text);">--</strong></span>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <div class="chart-title">Current &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (A)</div>
+                            <div class="chart-options">
+                                <button class="chart-option-btn active" onclick="loadEnergyHistory('current', '24h', this)">Daily</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '7d', this)">Weekly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '30d', this)">Monthly</button>
+                                <button class="chart-option-btn" onclick="loadEnergyHistory('current', '12mo', this)">Annual</button>
+                            </div>
+                        </div>
+                        <div class="chart-visibility-toggles" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px;padding:5px 8px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:11px;">
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyCurrent',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
+                        </div>
+                        <canvas id="energyCurrentChart" height="100"></canvas>
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;">
+                            <span style="color:#1e40af;font-weight:600;">AC</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="energy-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="energy-current-avg" style="color:var(--text);">--</strong></span>
+                            <span style="color:#059669;font-weight:600;margin-left:8px;">Outlet</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="outlet-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="outlet-current-avg" style="color:var(--text);">--</strong></span>
+                            <span style="color:#eab308;font-weight:600;margin-left:8px;">Lamp</span>
+                            <span style="color:var(--text-secondary);">Latest: <strong id="lamp-current-latest" style="color:var(--text);">--</strong></span>
+                            <span style="color:var(--text-secondary);">Avg: <strong id="lamp-current-avg" style="color:var(--text);">--</strong></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- kWh -->
+                <div class="chart-container" style="margin-top:16px;">
+                    <div class="chart-header">
+                        <div class="chart-title">Energy per Interval &mdash; AC <span style="color:#1e40af;">&#9632;</span> &amp; Outlet <span style="color:#059669;">&#9632;</span> &amp; Lamp <span style="color:#eab308;">&#9632;</span> &amp; Total <span style="color:#7c3aed;">&#9632;</span> (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadEnergyHistory('energy_kwh', '24h', this)">Daily</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '7d', this)">Weekly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '30d', this)">Monthly</button>
+                            <button class="chart-option-btn" onclick="loadEnergyHistory('energy_kwh', '12mo', this)">Annual</button>
+                        </div>
+                    </div>
+                    <div class="chart-visibility-toggles" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;padding:6px 10px;background:rgba(148,163,184,0.06);border-radius:8px;font-size:12px;">
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',0,this)" style="accent-color:#1e40af;"> <span style="color:#1e40af;font-weight:600;">AC</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',1,this)" style="accent-color:#059669;"> <span style="color:#059669;font-weight:600;">Outlet</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',2,this)" style="accent-color:#eab308;"> <span style="color:#eab308;font-weight:600;">Lamp</span></label>
+                        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" checked onchange="toggleDataset('energyKwh',3,this)" style="accent-color:#7c3aed;"> <span style="color:#7c3aed;font-weight:600;">Total</span></label>
+                    </div>
+                    <canvas id="energyKwhChart" height="80"></canvas>
+                    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:12px;">
+                        <span style="color:#1e40af;font-weight:600;">AC</span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="energy-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="energy-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#059669;font-weight:600;margin-left:10px;">Outlet</span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="outlet-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="outlet-kwh-avg" style="color:var(--text);">--</strong></span>
+                        <span style="color:#eab308;font-weight:600;margin-left:10px;">Lamp</span>
+                        <span style="color:var(--text-secondary);">Last Interval: <strong id="lamp-kwh-latest" style="color:var(--text);">--</strong></span>
+                        <span style="color:var(--text-secondary);">Total: <strong id="lamp-kwh-avg" style="color:var(--text);">--</strong></span>
+                    </div>
+                </div>
+
+            </div>
+
+
+
+            <!-- ===== DAILY SUMMARY ===== -->
+            <div id="daily-summary-section" style="margin-top: 28px; padding: 22px; border-radius: 18px; border: 1px solid rgba(59,130,246,0.2); background: linear-gradient(160deg, rgba(59,130,246,0.06), rgba(241,245,249,0.94)); box-shadow: 0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:10px;">
+                    <div>
+                        <h2 style="font-size:18px; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Daily Summary</h2>
+                        <p style="color:var(--text-secondary); font-size:12px; margin:0;">Today's energy statistics — <span id="daily-summary-date">--</span></p>
+                    </div>
+                    <button onclick="loadDailySummary()" style="padding:7px 16px; border-radius:8px; border:1px solid rgba(59,130,246,0.4); background:rgba(59,130,246,0.1); color:#3b82f6; font-size:12px; cursor:pointer;">↻ Refresh</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:14px;">
+                    <!-- AC kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.07); border:1px solid rgba(30,64,175,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#1e40af;"><span id="ds-ac-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Lamp kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.07); border:1px solid rgba(59,130,246,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Total kWh -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.07); border:1px solid rgba(59,130,246,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Total Energy</div>
+                        <div style="font-size:22px; font-weight:700; color:#3b82f6;"><span id="ds-total-kwh">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">kWh</div>
+                    </div>
+                    <!-- Estimated Cost -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(14,165,233,0.07); border:1px solid rgba(14,165,233,0.18); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Est. Cost</div>
+                        <div style="font-size:18px; font-weight:700; color:#0ea5e9;">Rp<span id="ds-cost">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">@ Rp 1,500/kWh</div>
+                    </div>
+                    <!-- AC Peak Power -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.05); border:1px solid rgba(30,64,175,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Peak Power</div>
+                        <div style="font-size:20px; font-weight:700; color:#1e40af;"><span id="ds-ac-peak">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">W</div>
+                    </div>
+                    <!-- Lamp Peak Power -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.05); border:1px solid rgba(59,130,246,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Peak Power</div>
+                        <div style="font-size:20px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-peak">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">W</div>
+                    </div>
+                    <!-- AC Runtime -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(30,64,175,0.05); border:1px solid rgba(30,64,175,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">AC Runtime</div>
+                        <div style="font-size:20px; font-weight:700; color:#1e40af;"><span id="ds-ac-runtime">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">hours</div>
+                    </div>
+                    <!-- Lamp Runtime -->
+                    <div style="padding:14px; border-radius:12px; background:rgba(59,130,246,0.05); border:1px solid rgba(59,130,246,0.12); text-align:center;">
+                        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">Lamp Runtime</div>
+                        <div style="font-size:20px; font-weight:700; color:#3b82f6;"><span id="ds-lamp-runtime">--</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">hours</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== PANEL EXPORT ENERGY FROM DATABASE ===== -->
+            <div style="margin-top:22px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),rgba(241,245,249,0.96));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-database" style="color:#3b82f6;margin-right:8px;"></i>Export Energy Data from Database</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Fetch energy data directly from InfluxDB — select date range &amp; device, export to CSV</p>
+                    </div>
+                    <div style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.12);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);">
+                        <i class="fas fa-database" style="font-size:9px;vertical-align:middle;margin-right:5px;"></i> InfluxDB
+                    </div>
+                </div>
+
+                <!-- Row 1: Date + AC -->
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+                    <div>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">From Date</label>
+                        <input type="date" id="db-energy-from" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:11px;color:var(--text-secondary);margin-bottom:4px;">To Date</label>
+                        <input type="date" id="db-energy-to" style="padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;">
+                    </div>
+                    <button onclick="dbExportCSV('energy_ac')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#1e40af,#1d4ed8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export AC
+                    </button>
+                    <button onclick="dbExportCSV('energy_outlet')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Outlet
+                    </button>
+                    <button onclick="dbExportCSV('energy_lamp')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#eab308,#ca8a04);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Lamp
+                    </button>
+                    <button onclick="dbExportCSV('energy_total')"
+                        style="padding:10px 20px;border-radius:10px;border:none;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;">
+                        <i class="fas fa-download"></i> Export Total
+                    </button>
+
+                    <button onclick="dbExportSetToday('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                        Today
+                    </button>
+                    <button onclick="dbExportSet7d('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                        7 Days
+                    </button>
+                    <button onclick="dbExportSet30d('energy')"
+                        style="padding:10px 14px;border-radius:10px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.08);color:#3b82f6;font-size:12px;font-weight:600;cursor:pointer;">
+                        30 Days
+                    </button>
+                </div>
+                <div style="font-size:12px;color:var(--text-secondary);padding:10px 14px;background:rgba(59,130,246,0.05);border-radius:8px;border:1px solid rgba(59,130,246,0.12);">
+                    <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:6px;"></i>
+                    Data fetched directly from InfluxDB — columns: <strong>Time, Voltage (V), Current (A), Power (W), Energy (kWh)</strong>
+                </div>
+            </div>
+        </div>

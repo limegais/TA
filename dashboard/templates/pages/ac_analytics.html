@@ -1,0 +1,110 @@
+<div id="ac-analytics" class="page">
+            <div class="header">
+                <h1>AC Analytics</h1>
+                <p>Air Conditioning performance and optimization</p>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Set Temperature</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acTemp', 'Set Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acTemp', 'Set Temperature (C)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('acTemp', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acTemp', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acTemp', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acTempChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Set RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('acHum', 'Set RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('acHum', 'Set RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('acHum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acHum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acHumChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual Temperature</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('temp', 'Actual Temperature (C)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('temp', 'Actual Temperature (C)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('temp', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('temp', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="tempChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Actual RH</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportChartData('hum', 'Actual RH (%)')" title="Export CSV"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('hum', 'Actual RH (%)')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn active" onclick="changeChartRange('hum', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('hum', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="humChart" height="80"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">AC Power (kW)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="changeChartRange('acPower', 1)">1h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acPower', 6)">6h</button>
+                        <button class="chart-option-btn" onclick="changeChartRange('acPower', 24)">24h</button>
+                    </div>
+                </div>
+                <canvas id="acPowerChart" height="80"></canvas>
+            </div>
+
+            <!-- AC Energy Usage Section -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(59,130,246,0.25);background:linear-gradient(160deg,rgba(59,130,246,0.06),var(--bg-card));box-shadow:0 8px 28px rgba(15,23,42,0.08);">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                    <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,0.18);display:flex;align-items:center;justify-content:center;font-size:17px;">&#9889;</div>
+                    <div>
+                        <div style="font-size:16px;font-weight:700;color:var(--text);">AC Energy Consumption</div>
+                        <div style="font-size:11px;color:var(--text-secondary);">Energy consumption per interval from PZEM sensor</div>
+                    </div>
+                </div>
+                <div class="chart-container" style="border:none;box-shadow:none;padding:0;">
+                    <div class="chart-header">
+                        <div class="chart-title">AC Energy Consumption (kWh)</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('ac','24h',this)">24h</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','7d',this)">7d</button>
+                            <button class="chart-option-btn" onclick="loadAnalyticsEnergy('ac','30d',this)">30d</button>
+                        </div>
+                    </div>
+                    <canvas id="acEnergyKwhChart" height="90"></canvas>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px;">
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Last Interval</div>
+                        <div id="ac-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Total Period</div>
+                        <div id="ac-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
+                    </div>
+                    <div style="padding:12px 16px;border-radius:12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);text-align:center;">
+                        <div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Avg per Interval</div>
+                        <div id="ac-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#3b82f6;">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>

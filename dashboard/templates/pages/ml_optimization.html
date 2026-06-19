@@ -1,0 +1,202 @@
+<div id="ml-optimization" class="page">
+            <div class="header">
+                <h1>Machine Learning Optimization</h1>
+                <p>GA &rarr; Adaptive AC | PSO &rarr; Adaptive Lamp | Auto-optimized in ADAPTIVE mode</p>
+            </div>
+
+            <!-- ML Summary Cards -->
+            <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">GA -> AC</span>
+                        <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">GA</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #3b82f6;">0.00</span></div>
+                    <div class="stat-change"><span>Best Fitness</span></div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Optimized Temp</span>
+                        <div class="stat-icon" style="background: rgba(30, 64, 175, 0.2); color: #1e40af;">T</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #1e40af;">--</span>°C</div>
+                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#1e40af;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">PSO -> Lamp</span>
+                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">PSO</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #0ea5e9;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
+                    <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">PWM Optimal</span>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">PWM</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
+                        PWM1: <span id="ml-pso-pwm1" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
+                        PWM2: <span id="ml-pso-pwm2" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
+                    </div>
+                    <div class="stat-change">
+                        Lux1: <span id="ml-pso-lux1" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux2: <span id="ml-pso-lux2" style="color:#22d3ee;font-weight:600;">--</span>
+                        &nbsp;Lux3: <span id="ml-pso-lux3" style="color:#22d3ee;font-weight:600;">--</span> lx
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Current Conditions</span>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">DB</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
+                        Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
+                        Lux: <span id="ml-cur-lux">--</span> lux &nbsp; Person: <span id="ml-cur-person">--</span>
+                    </div>
+                    <div class="stat-change"><span>From InfluxDB</span></div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Optimization Runs</span>
+                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">#</div>
+                    </div>
+                    <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #2563eb;">0</span></div>
+                    <div class="stat-change"><span>Total Cycles</span></div>
+                </div>
+            </div>
+
+            <!-- GA Fitness Convergence Chart -->
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export GA Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
+                    </div>
+                </div>
+                <canvas id="gaFitnessChart" height="80"></canvas>
+            </div>
+
+            <!-- PSO Iteration Detail Chart -->
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export PSO Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
+                    </div>
+                </div>
+                <!-- Iteration detail table -->
+                <div id="pso-iter-table-wrap" style="overflow-x:auto;margin-bottom:8px;display:none;">
+                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                        <thead>
+                            <tr style="background:rgba(14,165,233,0.15);">
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Iteration</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 1</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 2</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 3</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux Avg</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Fitness (%)</th>
+                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pso-iter-tbody"></tbody>
+                    </table>
+                </div>
+                <canvas id="psoFitnessChart" height="100"></canvas>
+            </div>
+
+
+            <!-- Optimization History Table -->
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">Optimization History</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn" onclick="exportMLHistory()">
+                            <i class="fas fa-download"></i> Export CSV
+                        </button>
+                        <button class="chart-option-btn" onclick="refreshMLHistory()">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                <div style="overflow-x: auto;">
+                    <table class="ml-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Time</th>
+                                <th>GA Fitness</th>
+                                <th>AC Temp</th>
+                                <th>Fan Speed</th>
+                                <th>PSO Fitness</th>
+                                <th>Brightness</th>
+                                <th>Combined</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ml-history-body">
+                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Set mode to ADAPTIVE to start automatic optimization.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Parameter Configuration -->
+            <div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
+                <div class="chart-container" style="margin-bottom: 0;">
+                    <div class="chart-header">
+                        <div class="chart-title">GA Parameters</div>
+                    </div>
+                    <div class="ml-param-grid">
+                        <div class="ml-param-item">
+                            <label>Population Size</label>
+                            <input type="number" id="ml-ga-pop" value="15" min="5" max="100" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>Generations</label>
+                            <input type="number" id="ml-ga-gen" value="30" min="10" max="500" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>Mutation Rate</label>
+                            <input type="number" id="ml-ga-mut" value="0.25" min="0.01" max="0.5" step="0.01" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>Crossover Rate</label>
+                            <input type="number" id="ml-ga-cross" value="0.8" min="0.1" max="1.0" step="0.05" class="ml-input">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chart-container" style="margin-bottom: 0;">
+                    <div class="chart-header">
+                        <div class="chart-title">PSO Parameters</div>
+                    </div>
+                    <div class="ml-param-grid">
+                        <div class="ml-param-item">
+                            <label>Swarm Size</label>
+                            <input type="number" id="ml-pso-swarm" value="30" min="5" max="100" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>Iterations</label>
+                            <input type="number" id="ml-pso-iter" value="100" min="10" max="500" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>Inertia (w)</label>
+                            <input type="number" id="ml-pso-w" value="0.7" min="0.1" max="1.5" step="0.05" class="ml-input">
+                        </div>
+                        <div class="ml-param-item">
+                            <label>c1 / c2</label>
+                            <input type="number" id="ml-pso-c" value="1.5" min="0.5" max="3.0" step="0.1" class="ml-input">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>

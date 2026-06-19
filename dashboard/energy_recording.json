@@ -1,0 +1,30 @@
+{
+  "phase": "idle",
+  "recording": {
+    "before": {
+      "active": false,
+      "start": "2026-04-22T07:57:53.804245",
+      "end": "2026-04-27T11:25:25.167339"
+    },
+    "after": {
+      "active": false,
+      "start": null,
+      "end": null
+    }
+  },
+  "lamp_phase": "idle",
+  "lamp_recording": {
+    "before": {
+      "active": false,
+      "start": null,
+      "end": null
+    },
+    "after": {
+      "active": false,
+      "start": null,
+      "end": null
+    }
+  },
+  "lamp_energy_kwh": 0.002689,
+  "saved_at": "2026-04-27T11:25:25.167478Z"
+}

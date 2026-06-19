@@ -1,0 +1,121 @@
+<div id="outlet-analysis" class="page">
+            <div class="header">
+                <h1>Outlet Analysis</h1>
+                <p>Power consumption monitoring per outlet over time</p>
+            </div>
+
+            <!-- MySQL Outlet Energy Consumption Chart -->
+            <div class="chart-container" style="margin-bottom:18px;">
+                <div class="chart-header">
+                    <div class="chart-title">MySQL Outlet Energy Consumption (kWh)</div>
+                    <div class="chart-options">
+                        <button class="chart-option-btn active" onclick="loadAnalyticsEnergy('outlet','24h',this)">24h</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('outlet','7d',this)">7d</button>
+                        <button class="chart-option-btn" onclick="loadAnalyticsEnergy('outlet','30d',this)">30d</button>
+                    </div>
+                </div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:15px;padding:0 10px;">
+                    <div>
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Latest Interval</div>
+                        <div id="outlet-analytics-kwh-last" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                    <div style="text-align:center;">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Total Period</div>
+                        <div id="outlet-analytics-kwh-total" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;">Average</div>
+                        <div id="outlet-analytics-kwh-avg" style="font-size:18px;font-weight:700;color:#059669;">--</div>
+                    </div>
+                </div>
+                <canvas id="outletEnergyKwhMySQLChart" height="90"></canvas>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Total Power</span>
+                        <div class="stat-icon" style="background:rgba(37,99,235,0.15);color:#2563eb;"><i class="fas fa-bolt"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-total-power" style="color:#2563eb;">--</span><small style="font-size:13px;color:var(--text-secondary);">W</small></div>
+                    <div class="stat-change">All outlets combined</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Today Energy</span>
+                        <div class="stat-icon" style="background:rgba(14,165,233,0.15);color:#0ea5e9;"><i class="fas fa-chart-bar"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-today-kwh" style="color:#0ea5e9;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
+                    <div class="stat-change">Energy used today</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Total Energy</span>
+                        <div class="stat-icon" style="background:rgba(5,150,105,0.15);color:#059669;"><i class="fas fa-plug"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-analytics-total-energy" style="color:#059669;">--</span><small style="font-size:13px;color:var(--text-secondary);">kWh</small></div>
+                    <div class="stat-change">Cumulative energy usage</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Active Outlets</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15);color:#3b82f6;"><i class="fas fa-plug"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-active-count" style="color:#3b82f6;">--</span><small style="font-size:13px;color:var(--text-secondary);">/4</small></div>
+                    <div class="stat-change">Currently ON</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Peak Power</span>
+                        <div class="stat-icon" style="background:rgba(30,64,175,0.15);color:#1e40af;"><i class="fas fa-arrow-up"></i></div>
+                    </div>
+                    <div class="stat-value"><span id="outlet-peak-power" style="color:#1e40af;">--</span><small style="font-size:13px;color:var(--text-secondary);">W</small></div>
+                    <div class="stat-change">Peak in selected period</div>
+                </div>
+            </div>
+
+            <!-- Live Electrical Parameters -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:20px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:15px;display:flex;align-items:center;">
+                    <i class="fas fa-bolt" style="color:#059669;margin-right:8px;"></i> Live Electrical Parameters
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Voltage</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-voltage">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">V</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Current</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-current">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">A</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Apparent</div>
+                        <div style="font-size:20px;font-weight:700;color:#3b82f6;"><span id="oa-live-apparent">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VA</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Reactive</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-reactive">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">VAR</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Frequency</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-freq">--</span><small style="font-size:12px;margin-left:2px;color:var(--text-secondary);">Hz</small></div>
+                    </div>
+                    <div style="text-align:center;padding:12px;border-radius:12px;background:rgba(5,150,105,0.05);border:1px solid rgba(5,150,105,0.1);">
+                        <div style="font-size:11px;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Power Factor</div>
+                        <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="oa-live-pf">--</span> <span id="oa-live-pf-quality" style="font-size:10px;padding:2px 6px;border-radius:8px;background:rgba(107,114,128,0.15);color:#6b7280;vertical-align:middle;">--</span></div>
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- Per-Outlet Breakdown -->
+            <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;">
+                <div style="padding:16px;border-radius:14px;border:1px solid rgba(37,99,235,0.2);background:rgba(37,99,235,0.04);">
+                    <div style="font-size:12px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Outlet</div>
+                    <div style="font-size:22px;font-weight:700;color:#2563eb;"><span id="oa-o1-power">--</span><small style="font-size:12px;color:var(--text-secondary);">W</small></div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Energy: <span id="oa-o1-kwh" style="font-weight:600;color:#2563eb;">--</span> kWh</div>
+                    <div id="oa-o1-bar" style="height:4px;border-radius:2px;background:rgba(37,99,235,0.15);margin-top:8px;"><div id="oa-o1-bar-fill" style="height:100%;border-radius:2px;background:#2563eb;width:0%;"></div></div>
+                </div>
+            </div>
+        </div>

@@ -1,0 +1,59 @@
+<div class="sidebar" id="sidebar">
+        <div class="logo">
+            Smart Room
+        </div>
+        <!-- Role badge -->
+        <div id="role-badge" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 10px;border-radius:8px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.25);">
+            <i class="fas fa-user-circle" style="color:#2563eb;font-size:16px;"></i>
+            <span id="role-username" style="color:var(--text-primary);font-size:13px;font-weight:600;">-</span>
+            <span id="role-label" style="margin-left:auto;padding:2px 8px;border-radius:12px;background:#2563eb;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.5px;">-</span>
+        </div>
+        <div class="nav-item active" onclick="showPage('dashboard-ac')">
+            <i class="fas fa-snowflake"></i>
+            <span>AC Dashboard</span>
+        </div>
+        <div class="nav-item" onclick="showPage('dashboard-lamp')">
+            <span>Lamp Dashboard</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('ac-analytics')">
+            <span>AC Analytics</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('lamp-analytics')">
+            <span>Lamp Analytics</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('outlet-analysis')">
+            <span>Outlet Analytics</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('camera')">
+            <span>Camera</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('energy')">
+            <span>Energy Usage</span>
+        </div>
+        <div class="nav-item" onclick="showPage('control-ac')">
+            <span>AC Control</span>
+        </div>
+        <div class="nav-item" onclick="showPage('control-lamp')">
+            <span>Lamp Control</span>
+        </div>
+        <div class="nav-item" onclick="showPage('control-outlet')">
+            <span>Outlet Control</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('ml-optimization')">
+            <span>ML Optimization</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('logs')">
+            <span>System Logs</span>
+        </div>
+        <div class="nav-item admin-only" onclick="showPage('occupancy-feedback')">
+            <span>Occupancy Trend & Feedback</span>
+        </div>
+        <hr class="theme-divider">
+        <button class="theme-toggle" onclick="toggleTheme()" id="theme-toggle-btn">
+            <i class="fas fa-moon" id="theme-icon"></i>
+            <span id="theme-label">Dark Mode</span>
+        </button>
+        <a href="/logout" class="theme-toggle" style="text-decoration: none; color: var(--danger); border-color: var(--danger);">
+            <span>Logout</span>
+        </a>
+    </div>

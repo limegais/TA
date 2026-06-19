@@ -1,0 +1,127 @@
+<div id="camera" class="page">
+            <div class="header">
+                <h1>Live Camera Feed - YOLOv8 Detection</h1>
+                <p>Real-time person detection using YOLOv8n</p>
+            </div>
+
+            <div class="camera-view">
+                <div class="camera-feed-container" id="camera-feed-container">
+                    <div class="camera-overlay-bar">
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <span class="camera-rec-badge"><i class="fas fa-circle"></i> LIVE</span>
+                            <span class="person-badge not-detected" id="overlay-person-badge">
+                                No Person
+                            </span>
+                        </div>
+                        <span class="camera-time-badge" id="camera-time">00:00:00</span>
+                    </div>
+                    <img id="camera-img" src="/video_feed" alt="Camera Feed"
+                         onerror="this.style.display='none'; document.getElementById('camera-error').style.display='flex';">
+                    <div id="camera-error" class="camera-error" style="display:none; flex-direction:column; align-items:center;">
+                        <h3>Camera Not Available</h3>
+                        <p style="margin-top:10px; font-size:14px; color:var(--text-secondary);">
+                            Make sure USB camera is properly connected
+                        </p>
+                        <button class="btn btn-primary" style="margin-top:15px;" onclick="retryCamera()">
+                            Retry Connection
+                        </button>
+                    </div>
+                </div>
+
+                <div class="camera-info-grid">
+                    <div class="camera-info-card">
+                        <div class="camera-info-label">Status</div>
+                        <div class="camera-info-value" id="cam-status">Connecting...</div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label">Resolution</div>
+                        <div class="camera-info-value" id="cam-resolution">Loading...</div>
+                    </div>
+                    <div class="camera-info-card">
+                        <div class="camera-info-label">Frame Rate</div>
+                        <div class="camera-info-value" id="cam-fps">Loading...</div>
+                    </div>
+                    <div class="camera-info-card" id="person-detected-card" style="transition: all 0.3s;">
+                        <div class="camera-info-label">Person Detected</div>
+                        <div class="camera-info-value" id="cam-person" style="color: var(--danger);">No</div>
+                    </div>
+                    <div class="camera-info-card" style="transition: all 0.3s;">
+                        <div class="camera-info-label">Person Count</div>
+                        <div class="camera-info-value" id="cam-count-display">0</div>
+                    </div>
+                    <div class="camera-info-card" style="transition: all 0.3s;">
+                        <div class="camera-info-label">Confidence</div>
+                        <div class="camera-info-value" id="cam-confidence-display">0%</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; transition: all 0.3s;">
+                        <span id="camera-toggle-text">Camera ON</span>
+                    </button>
+                    <button class="btn" id="sound-toggle-btn" onclick="toggleDetectionSound()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; transition: all 0.3s;">
+                        <span id="sound-toggle-text">Sound ON</span>
+                    </button>
+                    <button class="btn btn-success" onclick="retryCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600;">
+                        Refresh Feed
+                    </button>
+                </div>
+            </div>
+
+            <!-- ===== PANEL OCCUPANCY HARIAN ===== -->
+            <div style="margin-top:24px;padding:22px;border-radius:18px;border:1px solid rgba(37,99,235,0.25);background:linear-gradient(160deg,rgba(37,99,235,0.06),rgba(241,245,249,0.97));box-shadow:0 6px 24px rgba(0,0,0,0.06);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <h2 style="font-size:16px;font-weight:700;color:var(--text);margin:0 0 4px;"><i class="fas fa-users" style="color:#2563eb;margin-right:8px;"></i>Daily Occupancy Chart</h2>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;">Persons detected per hour (auto-recorded every hour) &mdash; max 24 data/day</p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <div id="occ-rec-badge" style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(59,130,246,0.15);color:#3b82f6;border:1px solid rgba(59,130,246,0.3);"><i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;"></i> Auto-Recording</div>
+                        <button onclick="occExportCSV()" style="padding:8px 18px;border-radius:10px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-download" style="margin-right:5px;"></i>Export CSV</button>
+                        <button onclick="dbExportCSV('occupancy')" title="Export from InfluxDB" style="padding:8px 14px;border-radius:10px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-size:12px;font-weight:700;cursor:pointer;"><i class="fas fa-database" style="margin-right:4px;"></i>DB Export</button>
+                        <button onclick="occExportRange()" title="Export date range" style="padding:8px 13px;border-radius:10px;border:1px solid rgba(37,99,235,0.35);background:rgba(37,99,235,0.10);color:#2563eb;font-size:12px;font-weight:700;cursor:pointer;">&#128197; Rentang</button>
+                        <button onclick="occClear()" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(107,114,128,0.3);background:rgba(107,114,128,0.08);color:var(--text-secondary);font-size:12px;font-weight:600;cursor:pointer;"><i class="fas fa-trash-alt"></i></button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
+                    <span style="color:var(--text-secondary);">Data shown: <strong id="occ-count" style="color:#2563eb;">0</strong> hrs</span>
+                    <span style="color:var(--text-secondary);">Next: <strong id="occ-next-in" style="color:var(--text);">--</strong></span>
+                    <span style="color:var(--text-secondary);">Total: <strong id="occ-total-today" style="color:#3b82f6;">0</strong> persons</span>
+                </div>
+                <!-- Range filter occupancy -->
+                <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+                    <button id="occ-tab-today" onclick="occSetRange('today')" style="padding:5px 14px;border-radius:8px;border:none;font-size:11px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff;box-shadow:0 1px 4px rgba(37,99,235,0.3);">Today</button>
+                    <button id="occ-tab-7d" onclick="occSetRange('7d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">7 Days</button>
+                    <button id="occ-tab-30d" onclick="occSetRange('30d')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">30 Days</button>
+                    <button id="occ-tab-all" onclick="occSetRange('all')" style="padding:5px 14px;border-radius:8px;border:1px solid rgba(37,99,235,0.25);font-size:11px;font-weight:600;cursor:pointer;background:rgba(37,99,235,0.12);color:#2563eb;">All</button>
+                </div>
+                <!-- DB Export date range for occupancy -->
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;border-radius:10px;background:rgba(37,99,235,0.04);border:1px solid rgba(37,99,235,0.12);">
+                    <span style="font-size:11px;color:var(--text-secondary);font-weight:600;"><i class="fas fa-database" style="color:#2563eb;margin-right:4px;"></i>DB Export:</span>
+                    <input type="date" id="db-occupancy-from" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
+                    <span style="font-size:11px;color:var(--text-secondary);">to</span>
+                    <input type="date" id="db-occupancy-to" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;">
+                    <button onclick="dbExportSetToday('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">Today</button>
+                    <button onclick="dbExportSet7d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">7 Days</button>
+                    <button onclick="dbExportSet30d('occupancy')" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(37,99,235,0.25);background:rgba(37,99,235,0.08);color:#2563eb;font-size:11px;font-weight:600;cursor:pointer;">30 Days</button>
+                </div>
+                <div style="position:relative;height:220px;background:rgba(0,0,0,0.02);border-radius:12px;padding:12px;border:1px solid var(--border);">
+                    <canvas id="occChart"></canvas>
+                </div>
+                <div style="overflow-x:auto;overflow-y:auto;max-height:280px;border-radius:10px;border:1px solid var(--border);margin-top:14px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                        <thead>
+                            <tr style="background:rgba(37,99,235,0.08);">
+                                <th style="padding:8px 12px;text-align:left;color:var(--text-secondary);font-weight:600;">Time</th>
+                                <th style="padding:8px 12px;text-align:center;color:var(--text-secondary);font-weight:600;">Hour</th>
+                                <th style="padding:8px 12px;text-align:right;color:#2563eb;font-weight:600;">Person Count</th>
+                                <th style="padding:8px 12px;text-align:right;color:#0ea5e9;font-weight:600;">Confidence (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="occ-preview-body">
+                            <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--text-secondary);">Waiting for first hour data&hellip;</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <!-- Hamburger Menu Button (mobile) -->
+    <button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()">
+        <i class="fas fa-bars" id="hamburger-icon"></i>
+    </button>
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+    <!-- Sidebar -->
+    {% include "partials/sidebar.html" %}
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Sensor Health Bar (global, shown on all pages) -->
+        {% include "partials/sensor_health_bar.html" %}
+
+        <!-- Page Sections -->
+        {% include "pages/dashboard_ac.html" %}
+        {% include "pages/dashboard_lamp.html" %}
+        {% include "pages/ac_analytics.html" %}
+        {% include "pages/lamp_analytics.html" %}
+        {% include "pages/camera.html" %}
+        {% include "pages/energy.html" %}
+        {% include "pages/control_ac.html" %}
+        {% include "pages/control_lamp.html" %}
+        {% include "pages/ml_optimization.html" %}
+        {% include "pages/logs.html" %}
+        {% include "pages/occupancy_feedback.html" %}
+        {% include "pages/control_outlet.html" %}
+        {% include "pages/outlet_analytics.html" %}
+
+    </div><!-- /main-content -->
+
+    <!-- Modals -->
+    {% include "partials/modals.html" %}
+{% endblock %}
+
+{% block scripts %}
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

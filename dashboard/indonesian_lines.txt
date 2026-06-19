@@ -1,0 +1,81 @@
+﻿
+Name                                                                                                                   
+----                                                                                                                   
+# Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)                               
+        sigma = 0.8                  # band sangat ketat — GA harus pilih suhu minimum                                 
+    # Trend offset: jika suhu ruangan naik cepat, turunkan target; jika turun, naikkan                                 
+    # >5 orang: kenyamanan & pendinginan lebih prioritas dari efisiensi energi                                         
+    # Overcooling: penalti HANYA untuk tier 1-2 (tier >5 memang inginkan suhu minimum)                                 
+        # AC: pakai mean() — suhu berubah lambat, rata-rata masih relevan untuk GA                                     
+        # Lux: pakai last() bukan mean() — cahaya berubah cepat, nilai terkini yang relevan                            
+        # Emit progress iterasi ke dashboard secara real-time                                                          
+    # Pembacaan lux baru otomatis terjadi saat siklus berikutnya dipanggil (Langkah 1).                                
+# BH1750 kadang menghasilkan spike tinggi (ratusan/ribuan lux) saat kondisi gelap                                      
+    # 2. Ghost lux saat lampu mati                                                                                     
+    # PENTING: lamp_is_off TIDAK berarti ruangan gelap — bisa ada cahaya alami (sinar matahari, dll).                  
+    # - Value JAUH lebih tinggi dari referensi sebelumnya (spike besar saat lampu baru mati)                           
+    # - DAN masih dalam grace period (lampu baru saja dimatikan)                                                       
+            # Dalam grace period: sensor mungkin masih membaca sisa cahaya lampu                                       
+        # Setelah grace period: terima nilai apa adanya — bisa saja ada cahaya alami                                   
+        # Tidak reset ke 0 secara otomatis, biarkan spike detection yang menentukan                                    
+    # Lolos semua cek — simpan sebagai referensi terakhir dan kembalikan langsung                                      
+    # 1. Time-based confirmation from local YOLO camera thread                                                         
+    Jika brightness=0 (lampu dimatikan), schedule EMA reset setelah grace period                                       
+    # Jika lampu dimatikan, reset EMA sekarang ke nilai rendah agar                                                    
+                # kalau ada cahaya alami yang sebenarnya masuk ke ruangan                                              
+                        'message': 'Person detected — AC turned ON automatically',                                     
+            # does NOT fire again on the next YOLO frame while waiting for ESP32 confirmation                          
+                            'message': 'Person detected — Lamps turned ON automatically',                              
+                        'message': f'No person for {int(elapsed/60)} min — AC turned OFF automatically',               
+                        'message': f'No person for {int(elapsed_lamp/60)} min — Lamps turned OFF automatically',       
+    # ── Kondisi Room Saat Run ─────────────────────────────────────────────                                           
+        # dengan siklus otomatis. GA tetap pakai run_optimization_cycle().                                             
+            display: block; animation: fadeIn 0.3s;                                                                    
+            border-color: var(--warning); animation: pulse 1s infinite;                                                
+            animation: slideIn 0.3s;                                                                                   
+            width: 8px; height: 8px; background: #fff; border-radius: 50%; animation: bubblePulse 1s infinite;         
+            font-weight: bold; animation: pulse 1.5s infinite; display: flex; align-items: center; gap: 5px;           
+            border-radius: 12px; box-shadow: 0 10px 40px rgba(239, 68, 68, 0.5); display: none; z-index: 8888; anima...
+            font-size: 24px; animation: bounce 1s infinite;                                                            
+            animation: fadeIn 0.3s;                                                                                    
+            background: #10b981; box-shadow: 0 0 6px #10b981; animation: pulse-green 2s infinite;                      
+            color: white; font-size: 13px; font-weight: 500; box-shadow: 0 10px 30px rgba(0,0,0,0.3); animation: sli...
+                            <div style="font-size: 11px; color: var(--text-secondary);">Batas-batas suhu &amp; kelem...
+                                    <th style="padding: 10px 12px; text-align: left; font-weight: 700; color: var(--...
+                                    <td style="padding: 10px 12px;"><span style="color: #6b7280; font-weight: 600;">...
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">...
+                                    <td style="padding: 10px 12px;"><span style="color: #3b82f6; font-weight: 600;">...
+                                    <td style="padding: 10px 12px;"><span style="color: #f97316; font-weight: 600;">...
+                                    <td style="padding: 10px 12px;"><span style="color: #ef4444; font-weight: 600;">...
+                            <strong style="color: #f59e0b;">&#9432;</strong> GA Optimization secara otomatis menentu...
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">AI controls AC automatically<...
+                    Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization           
+                        <span style="font-size: 11px; font-weight: 400; opacity: 0.9;">PSO controls lamps automatica...
+                    Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization       
+                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet...
+                    animation: false,                                                                                  
+                    responsive: true, maintainAspectRatio: true, animation: false,                                     
+                    responsive: true, maintainAspectRatio: true, animation: { duration: 300 },                         
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color: #ef4444; font-size: 8px; animation:...
+                    statusEl.innerHTML = '<i class="fas fa-circle" style="color:#ef4444;font-size:8px;animation:blin...
+                // Use requestAnimationFrame: fires AFTER browser paints the page with display:block                   
+                requestAnimationFrame(function() {                                                                     
+                // Tampilkan sebagai Lux Avg estimasi (dataset index 2)                                                
+            // Update tabel                                                                                            
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by ...
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically ...
+            const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');                    
+                            badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;m...
+                        tb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-r...
+                        lb.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-r...
+                badge.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:...
+            // Tampilkan rentang tanggal                                                                               
+            // Tampilkan 100 baris terbaru (scroll)                                                                    
+        // ==================== REKAM SUHU & HUMIDITY ====================                                             
+                b.innerHTML = '<i class="fas fa-circle" style="font-size:7px;vertical-align:middle;margin-right:5px;...
+                // Update Lamp Dashboard lux dan brightness secara real-time                                           
+                // Tampilkan bubble notifikasi jika ada daya                                                           
+                        autoOffEl.textContent = 'MATI';                                                                
+            // ML charts initialized on first tab open via requestAnimationFrame (canvas must be visible first)        
+
+

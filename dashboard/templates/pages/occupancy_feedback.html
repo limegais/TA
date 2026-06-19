@@ -1,0 +1,77 @@
+<div id="occupancy-feedback" class="page">
+            <div class="header">
+                <h1>Occupancy Trend & Feedback</h1>
+                <p>Monitor occupancy trends and submit room comfort ratings (1-5)</p>
+            </div>
+
+            <div class="occupancy-top">
+                <div class="occupancy-kpi">
+                    <div class="kpi-label">Current Occupancy</div>
+                    <div class="kpi-value" id="occ-live-count">0</div>
+                    <div class="occupancy-mini-note">Currently detected persons</div>
+                    <div class="occupancy-mini-note">Confidence: <span id="occ-live-confidence">0%</span></div>
+                </div>
+
+                <div class="occupancy-chart-card">
+                    <div class="chart-header" style="margin-bottom: 10px;">
+                        <div class="chart-title">Occupancy Trend</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportChartData('occupancy', 'Person Count')" title="Export CSV"><i class="fas fa-download"></i></button>
+                            <button class="chart-option-btn" onclick="exportChartRange('occupancy', 'Person Count')" title="Export date range">&#128197;</button>
+                            <button class="chart-option-btn active" onclick="changeChartRange('occupancy', 1)">1h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 6)">6h</button>
+                            <button class="chart-option-btn" onclick="changeChartRange('occupancy', 24)">24h</button>
+                        </div>
+                    </div>
+                    <canvas id="occupancyChart" height="48"></canvas>
+                </div>
+            </div>
+
+            <div class="feedback-grid">
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title">Comfort Feedback</div>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">
+                        Scale: 1 = Not Satisfied, 5 = Very Satisfied
+                    </div>
+                    <div class="rating-row" id="rating-row" style="margin-top: 14px;">
+                        <button class="rating-btn" onclick="selectFeedbackRating(1)" title="Not satisfied">1</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(2)" title="Less satisfied">2</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(3)" title="Fair">3</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(4)" title="Satisfied">4</button>
+                        <button class="rating-btn" onclick="selectFeedbackRating(5)" title="Very satisfied">5</button>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-secondary);">
+                        <span>Not Satisfied</span>
+                        <span>Very Satisfied</span>
+                    </div>
+                    <textarea id="feedback-comment" class="feedback-input" rows="4" placeholder="Enter room user feedback..."></textarea>
+                    <input id="google-form-url" class="feedback-input" placeholder="Enter your Google Form URL" />
+
+                    <div style="display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="saveGoogleFormUrl()">
+                            Save Form Link
+                        </button>
+                        <button class="btn btn-success" onclick="openGoogleForm()">
+                            Open Google Form
+                        </button>
+                        <button class="btn btn-warning" onclick="submitOccupancyFeedback()">
+                            Submit Feedback
+                        </button>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <div class="chart-title">Recent Feedback</div>
+                        <div class="chart-options">
+                            <button class="chart-option-btn" onclick="exportFeedback()">
+                                <i class="fas fa-download"></i> Export CSV
+                            </button>
+                        </div>
+                    </div>
+                    <div id="feedback-history"></div>
+                </div>
+            </div>
+        </div>

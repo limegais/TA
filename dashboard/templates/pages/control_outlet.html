@@ -1,0 +1,195 @@
+<div id="control-outlet" class="page">
+            <div class="header">
+                <h1>Outlet Control Panel</h1>
+                <p>Kontrol perangkat via SBMS REST API &mdash; Master, AC, Lampu, Outlet</p>
+            </div>
+
+            <!-- SBMS Connection Panel -->
+            <div class="sbms-conn-panel" id="sbms-conn-panel">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <div style="width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#2563eb,#0ea5e9);display:flex;align-items:center;justify-content:center;">
+                            <i class="fas fa-server" style="color:white;font-size:18px;"></i>
+                        </div>
+                        <div>
+                            <div style="font-size:16px;font-weight:700;color:var(--text-primary);">SBMS Server</div>
+                            <div style="font-size:12px;color:var(--text-secondary);">Smart Building Management System</div>
+                        </div>
+                    </div>
+                    <div id="sbms-conn-status" class="sbms-conn-badge offline">
+                        <span class="dot"></span>
+                        <span id="sbms-conn-text">Disconnected</span>
+                    </div>
+                </div>
+
+                <!-- Login Form -->
+                <div id="sbms-login-form">
+                    <div class="sbms-login-grid">
+                        <div class="sbms-field">
+                            <label>Server URL</label>
+                            <input type="text" class="sbms-input" id="sbms-server-url" placeholder="http://192.168.1.10" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>Email</label>
+                            <input type="email" class="sbms-input" id="sbms-email" placeholder="admin@example.com" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>Password</label>
+                            <input type="password" class="sbms-input" id="sbms-password" placeholder="Password" />
+                        </div>
+                        <div class="sbms-field">
+                            <label>&nbsp;</label>
+                            <button class="sbms-btn toggle-btn" id="sbms-connect-btn" onclick="sbmsConnect()" style="padding:10px 24px;white-space:nowrap;">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Connected Info (hidden by default) -->
+                <div id="sbms-connected-info" style="display:none;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <i class="fas fa-user-check" style="color:#059669;"></i>
+                            <span style="font-size:13px;color:var(--text-primary);font-weight:600;">Logged in as <span id="sbms-user-email" style="color:#059669;">-</span></span>
+                            <span style="font-size:12px;color:var(--text-secondary);">| <span id="sbms-server-display">-</span></span>
+                        </div>
+                        <button class="sbms-btn off-btn" onclick="sbmsDisconnect()" style="padding:8px 18px;font-size:12px;">
+                            <i class="fas fa-sign-out-alt"></i> Disconnect
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Device Control Cards -->
+            <div class="sbms-device-grid" id="sbms-device-grid">
+                <!-- Master -->
+                <div class="sbms-device-card is-master" id="sbms-card-5">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(245,158,11,0.15);color:#f59e0b;">
+                            <i class="fas fa-crown"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">Master</div>
+                            <div class="sbms-device-id">ID: 5 &mdash; Kontrol semua device</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-5">
+                            <span class="sdot"></span> <span id="sbms-status-text-5">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(5,1)" id="sbms-on-5"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(5,0)" id="sbms-off-5"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(5)" id="sbms-toggle-5"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
+                </div>
+
+                <!-- AC -->
+                <div class="sbms-device-card" id="sbms-card-6">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(37,99,235,0.15);color:#2563eb;">
+                            <i class="fas fa-snowflake"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">AC</div>
+                            <div class="sbms-device-id">ID: 6 &mdash; Air Conditioner</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-6">
+                            <span class="sdot"></span> <span id="sbms-status-text-6">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(6,1)" id="sbms-on-6"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(6,0)" id="sbms-off-6"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(6)" id="sbms-toggle-6"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
+                </div>
+
+                <!-- Lampu -->
+                <div class="sbms-device-card" id="sbms-card-7">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(14,165,233,0.15);color:#0ea5e9;">
+                            <i class="fas fa-lightbulb"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">Lampu</div>
+                            <div class="sbms-device-id">ID: 7 &mdash; Lamp</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-7">
+                            <span class="sdot"></span> <span id="sbms-status-text-7">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(7,1)" id="sbms-on-7"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(7,0)" id="sbms-off-7"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(7)" id="sbms-toggle-7"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
+                </div>
+
+                <!-- Outlet -->
+                <div class="sbms-device-card" id="sbms-card-8">
+                    <div class="sbms-device-header">
+                        <div class="sbms-device-icon" style="background:rgba(5,150,105,0.15);color:#059669;">
+                            <i class="fas fa-plug"></i>
+                        </div>
+                        <div>
+                            <div class="sbms-device-name">Outlet</div>
+                            <div class="sbms-device-id">ID: 8 &mdash; Power Outlet</div>
+                        </div>
+                        <div class="sbms-device-status off" id="sbms-status-8">
+                            <span class="sdot"></span> <span id="sbms-status-text-8">OFF</span>
+                        </div>
+                    </div>
+                    <div class="sbms-btn-group">
+                        <button class="sbms-btn on-btn" onclick="sbmsControl(8,1)" id="sbms-on-8"><i class="fas fa-power-off"></i> ON</button>
+                        <button class="sbms-btn off-btn" onclick="sbmsControl(8,0)" id="sbms-off-8"><i class="fas fa-power-off"></i> OFF</button>
+                        <button class="sbms-btn toggle-btn" onclick="sbmsToggle(8)" id="sbms-toggle-8"><i class="fas fa-sync-alt"></i> Toggle</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Device Group Status Table -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;margin-top:20px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:14px;display:flex;align-items:center;gap:8px;">
+                    <i class="fas fa-list-alt" style="color:#2563eb;"></i> All Devices Status
+                    <button onclick="sbmsRefreshStatus()" style="margin-left:auto;padding:5px 14px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:all 0.2s;" onmouseover="this.style.background='var(--bg-card-hover)'" onmouseout="this.style.background='transparent'">
+                        <i class="fas fa-refresh"></i> Refresh
+                    </button>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table class="ml-table" id="sbms-devices-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Device</th>
+                                <th>Status</th>
+                                <th>Master</th>
+                                <th>Group</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sbms-devices-tbody">
+                            <tr><td colspan="5" style="color:var(--text-secondary);font-style:italic;">Connect to SBMS to see devices</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top:12px;font-size:11px;color:var(--text-secondary);text-align:center;">
+                    Auto-refresh setiap 5 detik saat connected &bull; Status via <code style="background:rgba(37,99,235,0.08);padding:1px 6px;border-radius:4px;color:#2563eb;">GET /api/device-status</code>
+                </div>
+            </div>
+
+            <!-- MQTT Fallback (collapsed) -->
+            <details style="margin-top:16px;">
+                <summary style="cursor:pointer;padding:12px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:600;color:var(--text-secondary);">
+                    <i class="fas fa-wifi" style="margin-right:6px;"></i> MQTT Direct Control (Fallback)
+                </summary>
+                <div style="padding:16px;background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:0 0 12px 12px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:300px;">
+                        <button class="btn btn-success" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'ON')">Outlet ON</button>
+                        <button class="btn btn-danger" style="padding:14px;font-size:14px;border-radius:10px;" onclick="outletControl(1,'OFF')">Outlet OFF</button>
+                    </div>
+                    <div style="margin-top:10px;font-size:11px;color:var(--text-secondary);">
+                        MQTT topic: <code style="background:rgba(37,99,235,0.1);padding:2px 7px;border-radius:4px;color:#2563eb;">smartroom/outlet/control</code>
+                    </div>
+                </div>
+            </details>
+        </div>
