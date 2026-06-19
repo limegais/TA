@@ -3346,7 +3346,7 @@
             { var _el = document.getElementById('alert-time'); if (_el) _el.textContent = new Date().toLocaleTimeString(); }
             
             const alertBox = document.getElementById('detection-alert');
-            alertBox.classList.add('show');
+            if (alertBox) alertBox.classList.add('show');
             
             // Play 3-beep alert sound if enabled
             if (detectionSoundEnabled) {
@@ -5628,8 +5628,10 @@
                             URL.revokeObjectURL(a.href);
                         });
                     } else {
-                        return r.json().then(function(j) {
-                            showToast((j && j.error) ? j.error : 'Failed to export data', 'error');
+                        return r.json().then(function(err) {
+                            showToast(err.error || err.message || 'Export failed', 'error');
+                        }).catch(function() {
+                            showToast('Export failed: Server Error', 'error');
                         });
                     }
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
