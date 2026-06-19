@@ -3270,9 +3270,7 @@ def export_csv_from_db():
             mysql_rows = None
             influx_err = str(ex)
 
-        if mysql_rows is not None:
-            if not mysql_rows:
-                return jsonify({'error': f'No data for {dev_name} in MySQL for range {from_dt} to {to_dt}'}), 404
+        if mysql_rows:
             output = io.StringIO()
             output.write("sep=,\n")
             fields  = ['timestamp','voltage','current','active_power','reactive_power',
