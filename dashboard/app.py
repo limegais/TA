@@ -3932,8 +3932,7 @@ def energy_history():
                     if start in values_by_bucket:
                         last_value = values_by_bucket[start]
                     val = float(last_value)
-                    if val > 10000:
-                        val = val / 1000.0
+                    val = val / 1000.0
                     points.append({'time': start.strftime(time_format), 'value': round(val, dec)})
                 return points
 
@@ -3986,7 +3985,7 @@ def energy_history():
                 for record in table.records:
                     dec = 5 if field_name == 'energy_kwh' else 2
                     val = float(record.get_value())
-                    if field_name == 'energy_kwh' and val > 10000:
+                    if field_name == 'energy_kwh':
                         val = val / 1000.0
                     points.append({
                         'time': record.get_time().astimezone().strftime(time_format),
@@ -4368,7 +4367,7 @@ def energy_daily_summary():
                         v = rec.get_value()
                         if v is not None:
                             val = float(v)
-                            if field == 'energy_kwh' and val > 10000:
+                            if field == 'energy_kwh':
                                 val = val / 1000.0
                             return round(val, 3)
             except Exception:
@@ -4391,7 +4390,7 @@ def energy_daily_summary():
                         v = rec.get_value()
                         if v is not None:
                             val = float(v)
-                            if field == 'energy_kwh' and val > 10000:
+                            if field == 'energy_kwh':
                                 val = val / 1000.0
                             return round(val, 3)
             except Exception:
