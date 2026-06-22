@@ -3386,11 +3386,15 @@
             const toast = document.getElementById('toast');
             const toastMessage = document.getElementById('toast-message');
             if (!toast || !toastMessage) {
-                if (type === 'error' || type === 'info') {
-                    alert(message);
-                } else {
-                    console.log('[Toast]', type, message);
-                }
+                // Fallback: buat toast dinamis di pojok kanan atas, TANPA alert() native
+                console.log('[Toast]', type, message);
+                var _t = document.createElement('div');
+                var _bg = type === 'error' ? '#ef4444' : (type === 'info' ? '#3b82f6' : '#22c55e');
+                _t.style.cssText = 'position:fixed;top:18px;right:18px;z-index:99999;background:' + _bg + ';color:#fff;padding:12px 20px;border-radius:10px;font-size:14px;max-width:340px;box-shadow:0 4px 20px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.3s;pointer-events:none;';
+                _t.textContent = message;
+                document.body.appendChild(_t);
+                requestAnimationFrame(function(){ _t.style.opacity = '1'; });
+                setTimeout(function(){ _t.style.opacity = '0'; setTimeout(function(){ if (_t.parentNode) _t.parentNode.removeChild(_t); }, 350); }, 3500);
                 return;
             }
             const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
