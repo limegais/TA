@@ -2184,6 +2184,7 @@
             const entry = {
                 run: mlRunCount,
                 time: new Date().toLocaleTimeString(),
+                algo_config: currentAlgoConfig,
                 ga_fitness: data.ga_fitness || 0,
                 ga_temp: data.ga_temp || '--',
                 ga_fan: data.ga_fan || '--',
@@ -2203,16 +2204,18 @@
             if (!tbody) return;
 
             if (mlHistory.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Run GA or PSO to start.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #94a3b8;">No optimization data yet. Run optimization to start.</td></tr>';
                 return;
             }
 
             tbody.innerHTML = mlHistory.map(e => {
                 const getBadgeGA  = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
                 const getBadgePSO = (err) => err <= 100 ? 'good' : err <= 500 ? 'mid' : 'low'; // PSO: lower error = better
+                const cfgStr = (e.algo_config || 'ga_pso').toUpperCase().replace('_', ' | ');
                 return '<tr>' +
                     '<td>' + e.run + '</td>' +
                     '<td>' + e.time + '</td>' +
+                    '<td style="font-size: 11px; font-weight: 600; color: #64748b;">' + cfgStr + '</td>' +
                     '<td><span class="ml-badge ' + getBadgeGA(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.ga_temp + '\u00b0C</td>' +
                     '<td>' + e.ga_fan + '</td>' +
@@ -2244,9 +2247,10 @@
                 showToast('No optimization data to export', 'error');
                 return;
             }
-            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\n';
+            let csv = 'Run,Time,Mode,AC Fitness,AC Temp (C),AC Fan Speed,Lamp Fitness,Brightness (%),Combined\n';
             mlHistory.forEach(e => {
-                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
+                const cfgStr = (e.algo_config || 'ga_pso').toUpperCase().replace('_', ' | ');
+                csv += e.run + ',"' + e.time + '","' + cfgStr + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
