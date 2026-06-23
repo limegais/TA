@@ -2507,6 +2507,7 @@
                 showToast('Error: ' + e, 'error');
             });
         }
+        window.setAlgoConfig = setAlgoConfig;
 
         function runGAOptimization() {
             showToast('Starting AC optimization...', 'success');
