@@ -1285,6 +1285,12 @@ def run_optimization_cycle(algo='both'):
                     'mutation_rate': ga_params['mutation_rate'],
                     'crossover_rate': ga_params['crossover_rate'],
                     'elitism_ratio': ga_params['elitism_ratio'],
+                } if ac_algo == 'ga' else {
+                    'swarm_size': pso_params['swarm_size'],
+                    'iterations': pso_params['iterations'],
+                    'w': pso_params['w'],
+                    'c1': pso_params['c1'],
+                    'c2': pso_params['c2'],
                 },
                 'sensor_snapshot': {
                     'temp_room': round(opt_sensor_data.get('temperature', 0), 1),
@@ -1335,6 +1341,12 @@ def run_optimization_cycle(algo='both'):
                     'w': pso_params['w'],
                     'c1': pso_params['c1'],
                     'c2': pso_params['c2'],
+                } if lamp_algo == 'pso' else {
+                    'population_size': ga_params['population_size'],
+                    'generations': ga_params['generations'],
+                    'mutation_rate': ga_params['mutation_rate'],
+                    'crossover_rate': ga_params['crossover_rate'],
+                    'elitism_ratio': ga_params['elitism_ratio'],
                 },
             }
             print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
