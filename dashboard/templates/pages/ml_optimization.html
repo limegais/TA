@@ -1,15 +1,58 @@
 <div id="ml-optimization" class="page">
             <div class="header">
                 <h1>Machine Learning Optimization</h1>
-                <p>GA &rarr; Adaptive AC | PSO &rarr; Adaptive Lamp | Auto-optimized in ADAPTIVE mode</p>
+                <p>Select optimization algorithm for Adaptive AC & Lamp | Auto-optimized in ADAPTIVE mode</p>
+            </div>
+
+            <!-- Algorithm Selector -->
+            <div class="chart-container" style="margin-bottom: 20px;">
+                <div class="chart-header">
+                    <div class="chart-title">Select Algorithm Configuration</div>
+                    <div class="chart-options">
+                        <span id="algo-status" style="font-size: 14px; color: #10b981; font-weight: 500; margin-right: 15px; opacity: 0; transition: opacity 0.3s;">Saved</span>
+                    </div>
+                </div>
+                <div class="algo-selector-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 15px;">
+                    <!-- Option 1: GA | PSO (Default) -->
+                    <div class="algo-card active" data-config="ga_pso" onclick="setAlgoConfig('ga_pso')" style="border: 2px solid #3b82f6; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; background: rgba(59, 130, 246, 0.05); transition: all 0.2s;">
+                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">GA <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> PSO</div>
+                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
+                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
+                        <div class="algo-badge" style="position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
+                    </div>
+
+                    <!-- Option 2: PSO | GA -->
+                    <div class="algo-card" data-config="pso_ga" onclick="setAlgoConfig('pso_ga')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
+                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">PSO <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> GA</div>
+                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
+                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
+                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
+                    </div>
+
+                    <!-- Option 3: GA | GA -->
+                    <div class="algo-card" data-config="ga_ga" onclick="setAlgoConfig('ga_ga')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
+                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">GA <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> GA</div>
+                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
+                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
+                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
+                    </div>
+
+                    <!-- Option 4: PSO | PSO -->
+                    <div class="algo-card" data-config="pso_pso" onclick="setAlgoConfig('pso_pso')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
+                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">PSO <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> PSO</div>
+                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
+                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
+                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
+                    </div>
+                </div>
             </div>
 
             <!-- ML Summary Cards -->
             <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">GA -> AC</span>
-                        <div class="stat-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">GA</div>
+                        <span class="stat-title" id="summary-ac-title">GA -> AC</span>
+                        <div class="stat-icon" id="summary-ac-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">GA</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #3b82f6;">0.00</span></div>
                     <div class="stat-change"><span>Best Fitness</span></div>
@@ -26,8 +69,8 @@
 
                 <div class="stat-card">
                     <div class="stat-header">
-                        <span class="stat-title">PSO -> Lamp</span>
-                        <div class="stat-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">PSO</div>
+                        <span class="stat-title" id="summary-lamp-title">PSO -> Lamp</span>
+                        <div class="stat-icon" id="summary-lamp-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">PSO</div>
                     </div>
                     <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #0ea5e9;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
                     <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
@@ -74,10 +117,10 @@
             <!-- GA Fitness Convergence Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">GA Fitness Convergence (AC Optimization)</div>
+                    <div class="chart-title" id="chart-ac-title">GA Fitness Convergence (AC Optimization)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export GA Report"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'GA Fitness')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export AC Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'AC Fitness')" title="Export date range">&#128197;</button>
                     </div>
                 </div>
                 <canvas id="gaFitnessChart" height="80"></canvas>
@@ -86,10 +129,10 @@
             <!-- PSO Iteration Detail Chart -->
             <div class="chart-container">
                 <div class="chart-header">
-                    <div class="chart-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
+                    <div class="chart-title" id="chart-lamp-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
                     <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export PSO Report"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'PSO Fitness')" title="Export date range">&#128197;</button>
+                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Lamp Report"><i class="fas fa-download"></i></button>
+                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'Lamp Fitness')" title="Export date range">&#128197;</button>
                     </div>
                 </div>
                 <!-- Iteration detail table -->
@@ -134,10 +177,10 @@
                             <tr>
                                 <th>#</th>
                                 <th>Time</th>
-                                <th>GA Fitness</th>
+                <th><span id="hist-ac-title">GA</span> Fitness</th>
                                 <th>AC Temp</th>
                                 <th>Fan Speed</th>
-                                <th>PSO Fitness</th>
+                                <th><span id="hist-lamp-title">PSO</span> Fitness</th>
                                 <th>Brightness</th>
                                 <th>Combined</th>
                             </tr>
