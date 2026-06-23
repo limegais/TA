@@ -1936,6 +1936,9 @@
         var mlRunCount = 0;
 
         function refreshMLData() {
+            if (typeof loadAlgoConfig === 'function') {
+                loadAlgoConfig();
+            }
             fetch('/api/ml/status')
                 .then(r => r.json())
                 .then(data => {
@@ -2414,8 +2417,99 @@
             }
         }
 
+        let currentAlgoConfig = 'ga_pso';
+
+        function updateAlgoUI(config, acAlgo, lampAlgo) {
+            // Update active card
+            document.querySelectorAll('.algo-card').forEach(card => {
+                if (card.dataset.config === config) {
+                    card.classList.add('active');
+                    card.style.border = '2px solid #3b82f6';
+                    card.style.background = 'rgba(59, 130, 246, 0.05)';
+                    card.querySelector('.algo-badge').style.display = 'block';
+                } else {
+                    card.classList.remove('active');
+                    card.style.border = '1px solid #e2e8f0';
+                    card.style.background = 'transparent';
+                    card.querySelector('.algo-badge').style.display = 'none';
+                }
+            });
+
+            // Update Summary Card Titles & Icons
+            const acTitle = document.getElementById('summary-ac-title');
+            const acIcon = document.getElementById('summary-ac-icon');
+            const lampTitle = document.getElementById('summary-lamp-title');
+            const lampIcon = document.getElementById('summary-lamp-icon');
+            
+            const chartAcTitle = document.getElementById('chart-ac-title');
+            const chartLampTitle = document.getElementById('chart-lamp-title');
+            const histAcTitle = document.getElementById('hist-ac-title');
+            const histLampTitle = document.getElementById('hist-lamp-title');
+
+            if (acTitle) {
+                const acName = acAlgo.toUpperCase();
+                acTitle.innerText = acName + ' -> AC';
+                acIcon.innerText = acName;
+                if (chartAcTitle) chartAcTitle.innerText = acName + ' Fitness Convergence (AC Optimization)';
+                if (histAcTitle) histAcTitle.innerText = acName;
+            }
+
+            if (lampTitle) {
+                const lampName = lampAlgo.toUpperCase();
+                lampTitle.innerText = lampName + ' -> Lamp';
+                lampIcon.innerText = lampName;
+                if (chartLampTitle) chartLampTitle.innerText = lampName + ' — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)';
+                if (histLampTitle) histLampTitle.innerText = lampName;
+            }
+        }
+
+        function loadAlgoConfig() {
+            fetch('/api/ml/algo')
+                .then(r => r.json())
+                .then(d => {
+                    if (d.status === 'success') {
+                        currentAlgoConfig = d.config;
+                        updateAlgoUI(d.config, d.ac_algo, d.lamp_algo);
+                    }
+                })
+                .catch(e => console.error('Failed to load algo config:', e));
+        }
+
+        function setAlgoConfig(config) {
+            const statusEl = document.getElementById('algo-status');
+            statusEl.style.opacity = '1';
+            statusEl.innerText = 'Saving...';
+            statusEl.style.color = '#f59e0b'; // amber
+
+            fetch('/api/ml/algo', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ config: config })
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status === 'success') {
+                    currentAlgoConfig = d.config;
+                    updateAlgoUI(d.config, d.ac_algo, d.lamp_algo);
+                    statusEl.innerText = 'Saved';
+                    statusEl.style.color = '#10b981'; // green
+                    setTimeout(() => { statusEl.style.opacity = '0'; }, 2000);
+                    showToast('Algorithm updated: ' + d.config, 'success');
+                } else {
+                    statusEl.innerText = 'Failed';
+                    statusEl.style.color = '#ef4444'; // red
+                    showToast('Error: ' + d.message, 'error');
+                }
+            })
+            .catch(e => {
+                statusEl.innerText = 'Failed';
+                statusEl.style.color = '#ef4444';
+                showToast('Error: ' + e, 'error');
+            });
+        }
+
         function runGAOptimization() {
-            showToast('Starting GA \u2192 AC optimization...', 'success');
+            showToast('Starting AC optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2424,16 +2518,16 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('GA optimization triggered!', 'success');
+                    showToast('AC optimization triggered!', 'success');
                 } else {
-                    showToast('GA error: ' + d.message, 'error');
+                    showToast('AC opt error: ' + d.message, 'error');
                 }
             })
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
         function runPSOOptimization() {
-            showToast('Starting PSO \u2192 Lamp optimization...', 'success');
+            showToast('Starting Lamp optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2442,16 +2536,16 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('PSO optimization triggered!', 'success');
+                    showToast('Lamp optimization triggered!', 'success');
                 } else {
-                    showToast('PSO error: ' + d.message, 'error');
+                    showToast('Lamp opt error: ' + d.message, 'error');
                 }
             })
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
         function runBothOptimization() {
-            showToast('Starting GA + PSO optimization...', 'success');
+            showToast('Starting AC + Lamp optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2463,7 +2557,7 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('GA + PSO optimization triggered!', 'success');
+                    showToast('AC + Lamp optimization triggered!', 'success');
                 } else {
                     showToast('Error: ' + d.message, 'error');
                 }
@@ -4986,8 +5080,14 @@
                 }
             }
 
-            // Real-time optimization (GA->AC / PSO->Lamp) updates
+            // Real-time optimization updates
             if (data.type === 'system') {
+                if (data.data.algo_config && data.data.algo_config !== currentAlgoConfig) {
+                    currentAlgoConfig = data.data.algo_config;
+                    if (typeof updateAlgoUI === 'function') {
+                        updateAlgoUI(currentAlgoConfig, data.data.ac_algo, data.data.lamp_algo);
+                    }
+                }
                 const gaFitness = parseFloat(data.data.ga_fitness) || 0;
                 const psoFitness = parseFloat(data.data.pso_fitness) || 0;
                 const runs = data.data.optimization_runs || 0;
