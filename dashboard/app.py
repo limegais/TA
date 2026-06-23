@@ -251,6 +251,20 @@ last_opt_results = {
 ga_params = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3, 'crossover_rate': 0.85, 'elitism_ratio': 0.2}
 pso_params = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5}  # w=0.5 konstan (sesuai spesifikasi)
 
+# Algorithm configuration: which algorithm to use for AC and Lamp
+# Options: 'ga_pso' (default), 'pso_ga' (swap), 'ga_ga' (all GA), 'pso_pso' (all PSO)
+# Format: '{ac_algo}_{lamp_algo}'
+opt_algo_config = 'ga_pso'
+OPT_ALGO_OPTIONS = {'ga_pso', 'pso_ga', 'ga_ga', 'pso_pso'}
+
+def _get_ac_algo():
+    """Return 'ga' or 'pso' for AC based on current config."""
+    return 'pso' if opt_algo_config in ('pso_ga', 'pso_pso') else 'ga'
+
+def _get_lamp_algo():
+    """Return 'pso' or 'ga' for Lamp based on current config."""
+    return 'ga' if opt_algo_config in ('pso_ga', 'ga_ga') else 'pso'
+
 def _gaussian_score(value, target, sigma, max_score):
     return max_score * math.exp(-((value - target) ** 2) / (2 * sigma ** 2))
 
@@ -781,6 +795,114 @@ def run_ga_optimization(verbose=False):
     final = [int(round(best_solution[0])), best_solution[1], best_solution[2], best_solution[3]]
     return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
+def run_pso_for_ac(verbose=False):
+    """PSO optimizer for AC settings — same search space as GA.
+    Particles: [temp (float), fan_speed (int), mode_idx (int), set_rh (int)]
+    Fitness: maximize calculate_ac_fitness() (same as GA).
+    Returns same format as run_ga_optimization() for drop-in replacement.
+    """
+    swarm_size = pso_params.get('swarm_size', 10)
+    iterations = pso_params.get('iterations', 20)
+    w  = pso_params.get('w', 0.5)
+    c1 = pso_params.get('c1', 1.5)
+    c2 = pso_params.get('c2', 1.5)
+    DIM = 4  # [temp, fan, mode, rh]
+
+    # Bounds for each dimension
+    lo = [OPT_TEMP_MIN, OPT_FAN_MIN, OPT_MODE_MIN, OPT_RH_MIN]
+    hi = [OPT_TEMP_MAX, OPT_FAN_MAX, OPT_MODE_MAX, OPT_RH_MAX]
+    max_vel = [(hi[d] - lo[d]) * 0.3 for d in range(DIM)]
+
+    # Initialize swarm
+    positions = []
+    velocities = []
+    for _ in range(swarm_size):
+        pos = [
+            round(random.uniform(OPT_TEMP_MIN, OPT_TEMP_MAX), 1),
+            random.randint(OPT_FAN_MIN, OPT_FAN_MAX),
+            random.randint(OPT_MODE_MIN, OPT_MODE_MAX),
+            random.randint(OPT_RH_MIN, OPT_RH_MAX),
+        ]
+        vel = [random.uniform(-max_vel[d], max_vel[d]) for d in range(DIM)]
+        positions.append(pos)
+        velocities.append(vel)
+
+    # Seed with previous best (if available)
+    if last_opt_results['ga']['temp'] > 0 and last_opt_results['ga']['fan'] > 0:
+        seed = [
+            float(last_opt_results['ga']['temp']),
+            int(last_opt_results['ga']['fan']),
+            int(last_opt_results['ga'].get('mode_idx', 0)),
+            int(last_opt_results['ga'].get('set_rh', 50)),
+        ]
+        positions[0] = seed[:]
+        velocities[0] = [0.0] * DIM
+
+    # Evaluate initial fitness (maximize)
+    def eval_particle(p):
+        return calculate_ac_fitness(int(round(p[0])), int(round(p[1])),
+                                    int(round(p[2])), int(round(p[3])))
+
+    pb_pos = [p[:] for p in positions]
+    pb_fit = [eval_particle(p) for p in positions]
+    g_idx  = pb_fit.index(max(pb_fit))
+    g_pos  = pb_pos[g_idx][:]
+    g_fit  = pb_fit[g_idx]
+
+    fitness_history = []
+
+    for it in range(iterations):
+        # Adaptive inertia
+        current_w = w - (w - 0.3) * (it / max(1, iterations))
+
+        for i in range(swarm_size):
+            for d in range(DIM):
+                r1, r2 = random.random(), random.random()
+                velocities[i][d] = (current_w * velocities[i][d]
+                    + c1 * r1 * (pb_pos[i][d] - positions[i][d])
+                    + c2 * r2 * (g_pos[d] - positions[i][d]))
+                velocities[i][d] = max(-max_vel[d], min(max_vel[d], velocities[i][d]))
+                positions[i][d] += velocities[i][d]
+
+            # Clip to bounds and discretize integer dimensions
+            positions[i][0] = round(max(lo[0], min(hi[0], positions[i][0])), 1)  # temp (float)
+            positions[i][1] = int(round(max(lo[1], min(hi[1], positions[i][1]))))  # fan (int)
+            positions[i][2] = int(round(max(lo[2], min(hi[2], positions[i][2]))))  # mode (int)
+            positions[i][3] = int(round(max(lo[3], min(hi[3], positions[i][3]))))  # rh (int)
+
+            fit = eval_particle(positions[i])
+
+            # Update personal best (maximize)
+            if fit > pb_fit[i]:
+                pb_fit[i] = fit
+                pb_pos[i] = positions[i][:]
+
+            # Update global best
+            if fit > g_fit:
+                g_fit = fit
+                g_pos = positions[i][:]
+
+        fitness_history.append(g_fit)
+
+    # Brute-force validation (same as GA)
+    bf_best_fit, bf_best_sol = -1, None
+    rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
+    for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
+        for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
+            for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
+                for rh in rh_samples:
+                    fit = calculate_ac_fitness(t, f, m, rh)
+                    if fit > bf_best_fit:
+                        bf_best_fit, bf_best_sol = fit, [t, f, m, rh]
+    if bf_best_fit > g_fit:
+        g_pos = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2], bf_best_sol[3]]
+        g_fit = bf_best_fit
+
+    final = [int(round(g_pos[0])), int(round(g_pos[1])), int(round(g_pos[2])), int(round(g_pos[3]))]
+    print(f"[PSO-AC] Done: {final[0]}°C Fan={final[1]} Mode={AC_MODE_NAMES.get(final[2],'COOL')} "
+          f"RH={final[3]}% fitness={g_fit:.2f}")
+    return final, g_fit, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
+
 def run_pso_optimization(verbose=False):
     """2D PSO with real lux read per iteration.
 
@@ -955,16 +1077,198 @@ def run_pso_optimization(verbose=False):
     initial_error = fitness_history[0] if fitness_history else g_fit
     return list(g_pos), g_fit, fitness_history, initial_error, iteration_log
 
+def run_ga_for_lamp(verbose=False):
+    """GA optimizer for Lamp brightness — same search space as PSO.
+    Chromosome: [PWM1 (0-255), PWM2 (0-255)]
+    Fitness: minimize calculate_lamp_fitness_2d() (same as PSO, lower = better).
+    Real sensor feedback per generation: send best → wait → read lux.
+    Returns same format as run_pso_optimization() for drop-in replacement.
+    """
+    pop_size = ga_params.get('population_size', 15)
+    generations = min(ga_params.get('generations', 10), 10)  # cap at 10 (5s per gen)
+    mutation_rate = ga_params.get('mutation_rate', 0.3)
+    crossover_rate = ga_params.get('crossover_rate', 0.85)
+    elitism_ratio = ga_params.get('elitism_ratio', 0.2)
+    elite_count = max(2, int(pop_size * elitism_ratio))
+    SENSOR_SETTLE_S = 5.0
+    TIMEOUT_S = 60.0
+
+    # Initialize population
+    def create_ind():
+        return [random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX),
+                random.randint(OPT_BRIGHTNESS_MIN, OPT_BRIGHTNESS_MAX)]
+
+    population = [create_ind() for _ in range(pop_size)]
+
+    # Seed with current brightness if available
+    b1_pct = opt_sensor_data.get('curr_brightness1', 0)
+    b2_pct = opt_sensor_data.get('curr_brightness2', 0)
+    if b1_pct > 0 or b2_pct > 0:
+        seed_pwm1 = int(round(b1_pct * 255.0 / 100.0))
+        seed_pwm2 = int(round(b2_pct * 255.0 / 100.0))
+        population[0] = [seed_pwm1, seed_pwm2]
+
+    fitness_history = []
+    iteration_log = []
+    start_time = time.time()
+    best_solution = population[0][:]
+    best_fitness = float('inf')
+
+    for gen in range(generations):
+        elapsed = time.time() - start_time
+        if elapsed >= TIMEOUT_S:
+            print(f"[GA-LAMP] Timeout {TIMEOUT_S:.0f}s at generation {gen}")
+            break
+
+        # Evaluate fitness using estimation for all individuals
+        scores = [calculate_lamp_fitness_2d(ind[0], ind[1]) for ind in population]
+
+        # Sort by fitness (ascending — minimize)
+        paired = sorted(zip(population, scores), key=lambda x: x[1])
+        population = [p[0] for p in paired]
+        scores = [p[1] for p in paired]
+
+        # Best individual of this generation (estimated)
+        gen_best = population[0][:]
+
+        # Send best individual to lamp for real sensor reading
+        b1_send = round(gen_best[0] * 100.0 / 255.0, 1)
+        b2_send = round(gen_best[1] * 100.0 / 255.0, 1)
+        b1_send, b2_send = _safe_lamp_brightness(b1_send, b2_send)
+        mqtt_client.publish(
+            'smartroom/lamp/control',
+            json.dumps({'brightness1': b1_send, 'brightness2': b2_send, 'source': 'ga_lamp_gen'})
+        )
+
+        # Emit progress
+        socketio.emit('pso_iter_progress', {
+            'iter': gen + 1, 'pwm1': gen_best[0], 'pwm2': gen_best[1],
+            'b1': b1_send, 'b2': b2_send, 'status': 'waiting'
+        })
+
+        print(f"[GA-LAMP] Gen {gen+1}/{generations} — B1={b1_send}% B2={b2_send}% "
+              f"(PWM1={gen_best[0]} PWM2={gen_best[1]}), waiting sensor...")
+
+        # Wait for sensor to stabilize
+        time.sleep(SENSOR_SETTLE_S)
+
+        # Read real lux
+        lux1_r = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
+        lux2_r = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
+        lux3_r = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
+        lux_real = round((lux1_r + lux2_r + lux3_r) / 3.0, 1)
+
+        # Compute real fitness
+        person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
+        TARGET_LUX = 350.0 if person_now else 0.0
+        MIN_LUX = 200.0
+
+        err_avg = (lux_real - TARGET_LUX) ** 2
+        var_real = ((lux1_r - lux_real)**2 + (lux2_r - lux_real)**2 + (lux3_r - lux_real)**2) / 3.0
+        err_min = sum((MIN_LUX - lv) ** 2 for lv in [lux1_r, lux2_r, lux3_r] if lv < MIN_LUX)
+
+        real_fit = err_avg + 0.5 * var_real + 1.5 * err_min
+        if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0 and lux1_r >= MIN_LUX and lux2_r >= MIN_LUX and lux3_r >= MIN_LUX:
+            real_fit = 0.0
+        real_fit = round(real_fit, 4)
+
+        print(f"[GA-LAMP] Real lux={lux_real} | fitness={real_fit} | target={TARGET_LUX:.0f}")
+
+        # Record iteration log
+        log_entry = {
+            'iter': gen + 1, 'pwm1': gen_best[0], 'pwm2': gen_best[1],
+            'b1': b1_send, 'b2': b2_send,
+            'lux1': round(lux1_r, 1), 'lux2': round(lux2_r, 1), 'lux3': round(lux3_r, 1),
+            'lux_avg': lux_real, 'fitness': real_fit,
+        }
+        iteration_log.append(log_entry)
+        fitness_history.append(real_fit)
+
+        socketio.emit('pso_iter_progress', {**log_entry, 'status': 'done'})
+
+        # Track overall best
+        if real_fit < best_fitness:
+            best_fitness = real_fit
+            best_solution = gen_best[:]
+
+        # Stop early if converged
+        if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0:
+            if lux1_r >= 200.0 and lux2_r >= 200.0 and lux3_r >= 200.0:
+                print(f"[GA-LAMP] Stop early gen {gen+1} — lux {lux_real} in 315-385")
+                break
+
+        # --- GA operators for next generation ---
+        next_pop = [ind[:] for ind in population[:elite_count]]
+
+        # Tournament selection
+        selected = []
+        for _ in range(len(population)):
+            contestants = random.sample(range(len(population)), min(3, len(population)))
+            best_idx = min(contestants, key=lambda i: scores[i])  # minimize
+            selected.append(population[best_idx][:])
+
+        # Crossover & mutation
+        while len(next_pop) < pop_size:
+            p1, p2 = random.sample(selected, 2)
+            if random.random() < crossover_rate:
+                # BLX-alpha crossover
+                alpha = 0.3
+                children = []
+                for p in [p1, p2]:
+                    child = []
+                    for d in range(2):
+                        lo_v, hi_v = min(p1[d], p2[d]), max(p1[d], p2[d])
+                        span = hi_v - lo_v
+                        val = random.uniform(lo_v - alpha * span, hi_v + alpha * span)
+                        child.append(int(round(max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX, val)))))
+                    children.append(child)
+                child1, child2 = children
+            else:
+                child1, child2 = p1[:], p2[:]
+
+            # Mutate
+            progress = gen / max(1, generations)
+            adaptive_rate = mutation_rate * (1.0 - 0.7 * progress)
+            for child in [child1, child2]:
+                for d in range(2):
+                    if random.random() < adaptive_rate:
+                        step = int((30 * (1 - progress) + 5))
+                        child[d] = max(OPT_BRIGHTNESS_MIN, min(OPT_BRIGHTNESS_MAX,
+                                       child[d] + random.randint(-step, step)))
+
+            next_pop.append(child1)
+            if len(next_pop) < pop_size:
+                next_pop.append(child2)
+
+        population = next_pop[:pop_size]
+
+    elapsed_total = time.time() - start_time
+    print(f"[GA-LAMP] Done {len(fitness_history)} generations in {elapsed_total:.1f}s | "
+          f"Best: PWM1={best_solution[0]} PWM2={best_solution[1]} | fitness={best_fitness:.2f}")
+
+    initial_error = fitness_history[0] if fitness_history else best_fitness
+    return list(best_solution), best_fitness, fitness_history, initial_error, iteration_log
+
 def run_optimization_cycle(algo='both'):
     global optimization_run_count
     if not optimization_lock.acquire(blocking=False):
         print("[OPT] Already running, skipping")
         return False
     try:
-        socketio.emit('ml_status', {'status': 'running', 'algorithm': algo})
+        ac_algo = _get_ac_algo()
+        lamp_algo = _get_lamp_algo()
+        socketio.emit('ml_status', {'status': 'running', 'algorithm': algo,
+                                    'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
+                                    'algo_config': opt_algo_config})
         fetch_sensor_data_from_db(30)
         if algo in ('ga', 'both'):
-            sol, fit, hist, bf = run_ga_optimization()
+            # Dynamic dispatch: GA or PSO for AC
+            if ac_algo == 'pso':
+                sol, fit, hist, bf = run_pso_for_ac()
+                print(f"[OPT] AC using PSO (config: {opt_algo_config})")
+            else:
+                sol, fit, hist, bf = run_ga_optimization()
+                print(f"[OPT] AC using GA (config: {opt_algo_config})")
             mode_idx = sol[2] if len(sol) > 2 else 0
             opt_set_rh = sol[3] if len(sol) > 3 else 50
             last_opt_results['ga'] = {
@@ -990,10 +1294,16 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[GA] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
+            print(f"[{ac_algo.upper()}-AC] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
-            sol, fit, hist, initial_err, iter_log = run_pso_optimization()
+            # Dynamic dispatch: PSO or GA for Lamp
+            if lamp_algo == 'ga':
+                sol, fit, hist, initial_err, iter_log = run_ga_for_lamp()
+                print(f"[OPT] Lamp using GA (config: {opt_algo_config})")
+            else:
+                sol, fit, hist, initial_err, iter_log = run_pso_optimization()
+                print(f"[OPT] Lamp using PSO (config: {opt_algo_config})")
             # sol is PWM 0-255 directly from algorithm
             pwm1_val = int(round(min(255, max(0, sol[0]))))
             pwm2_val = int(round(min(255, max(0, sol[1]))))
@@ -1032,6 +1342,8 @@ def run_optimization_cycle(algo='both'):
         optimization_run_count += 1
         # Update mqtt_data system
         mqtt_data['system'].update({
+            'algo_config': opt_algo_config,
+            'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
             'ga_fitness': last_opt_results['ga']['fitness'],
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_runs': optimization_run_count,
@@ -1094,6 +1406,8 @@ def run_optimization_cycle(algo='both'):
         # Emit status — only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
+            'algo_config': opt_algo_config,
+            'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
             'ga_fitness': last_opt_results['ga']['fitness'],
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
@@ -4196,6 +4510,45 @@ def pso_export_csv():
         mimetype='text/csv',
         headers={'Content-Disposition': f'attachment; filename=pso_iterations_{ts}.csv'}
     )
+
+@app.route('/api/ml/algo', methods=['GET', 'POST'])
+def ml_algo_config_api():
+    """Get or set the active ML algorithm configuration."""
+    global opt_algo_config
+    if request.method == 'GET':
+        return jsonify({
+            'status': 'success',
+            'config': opt_algo_config,
+            'ac_algo': _get_ac_algo(),
+            'lamp_algo': _get_lamp_algo(),
+            'options': list(OPT_ALGO_OPTIONS)
+        })
+    elif request.method == 'POST':
+        if session.get('role') != 'admin':
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+        data = request.json or {}
+        new_config = data.get('config')
+        if new_config in OPT_ALGO_OPTIONS:
+            opt_algo_config = new_config
+            log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Algorithm config changed to {new_config}', 'level': 'info'})
+            # Broadcast the change
+            socketio.emit('mqtt_update', {
+                'type': 'system',
+                'data': {
+                    'algo_config': opt_algo_config,
+                    'ac_algo': _get_ac_algo(),
+                    'lamp_algo': _get_lamp_algo()
+                }
+            })
+            return jsonify({
+                'status': 'success',
+                'message': f'Algorithm configuration updated to {new_config}',
+                'config': opt_algo_config,
+                'ac_algo': _get_ac_algo(),
+                'lamp_algo': _get_lamp_algo()
+            })
+        else:
+            return jsonify({'status': 'error', 'message': f'Invalid config. Must be one of {OPT_ALGO_OPTIONS}'}), 400
 
 @app.route('/api/ml/run', methods=['POST'])
 @admin_required
