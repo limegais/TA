@@ -4385,6 +4385,9 @@ def ml_status():
         'pso_history':      mqtt_data['system'].get('pso_history', []),
         # iteration_log for detailed PSO chart (PWM1, PWM2, Lux per iteration)
         'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
+        'algo_config':      mqtt_data['system'].get('algo_config', 'ga_pso'),
+        'ac_algo':          mqtt_data['system'].get('ac_algo', 'ga'),
+        'lamp_algo':        mqtt_data['system'].get('lamp_algo', 'pso'),
     })
 
 @app.route('/api/ga/export-csv')
@@ -4422,18 +4425,27 @@ def ga_export_csv():
     wr  = csv_mod.writer(buf)
 
     # ── Header ──────────────────────────────────────────────────────────────
-    wr.writerow(['=== GA RESULT REPORT (GENETIC ALGORITHM) - SMART ROOM ==='])
+    ac_algo_name = 'Genetic Algorithm' if mqtt_data['system'].get('ac_algo', 'ga') == 'ga' else 'Particle Swarm Optimization'
+    wr.writerow([f'=== AC OPTIMIZATION RESULT ({ac_algo_name.upper()}) - SMART ROOM ==='])
     wr.writerow([])
     wr.writerow(['Run Date', run_time])
+    wr.writerow(['Algorithm Used', ac_algo_name])
     wr.writerow([])
 
-    # ── Parameter GA ────────────────────────────────────────────────────────
-    wr.writerow(['--- PARAMETER GA ---'])
-    wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
-    wr.writerow(['Generation Count',   params.get('generations', '-')])
-    wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
-    wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
-    wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
+    # ── Parameter ────────────────────────────────────────────────────────
+    wr.writerow([f'--- PARAMETER {ac_algo_name.upper()} ---'])
+    if mqtt_data['system'].get('ac_algo', 'ga') == 'ga':
+        wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
+        wr.writerow(['Generation Count',  params.get('generations', '-')])
+        wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
+        wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
+        wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
+    else:
+        wr.writerow(['Swarm Size',        params.get('swarm_size', '-')])
+        wr.writerow(['Iterations',        params.get('iterations', '-')])
+        wr.writerow(['Inertia (w)',       params.get('w', '-')])
+        wr.writerow(['Cognitive (c1)',    params.get('c1', '-')])
+        wr.writerow(['Social (c2)',       params.get('c2', '-')])
     wr.writerow([])
 
     # ── Room Condition on Run ─────────────────────────────────────────────
@@ -4500,6 +4512,27 @@ def pso_export_csv():
     wr  = csv_mod.writer(buf)
 
     # Header
+    lamp_algo_name = 'Particle Swarm Optimization' if mqtt_data['system'].get('lamp_algo', 'pso') == 'pso' else 'Genetic Algorithm'
+    wr.writerow([f'=== LAMP OPTIMIZATION LOG ({lamp_algo_name.upper()}) ==='])
+    wr.writerow(['Algorithm Used:', lamp_algo_name])
+    wr.writerow([])
+
+    # Parameters
+    params = pso.get('params', {})
+    wr.writerow([f'--- PARAMETER {lamp_algo_name.upper()} ---'])
+    if mqtt_data['system'].get('lamp_algo', 'pso') == 'pso':
+        wr.writerow(['Swarm Size',        params.get('swarm_size', '-')])
+        wr.writerow(['Iterations',        params.get('iterations', '-')])
+        wr.writerow(['Inertia (w)',       params.get('w', '-')])
+        wr.writerow(['Cognitive (c1)',    params.get('c1', '-')])
+        wr.writerow(['Social (c2)',       params.get('c2', '-')])
+    else:
+        wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
+        wr.writerow(['Generation Count',  params.get('generations', '-')])
+        wr.writerow(['Mutation Rate',     params.get('mutation_rate', '-')])
+        wr.writerow(['Crossover Rate',    params.get('crossover_rate', '-')])
+        wr.writerow(['Elitism Ratio',     params.get('elitism_ratio', '-')])
+    wr.writerow([])
     wr.writerow(['Iteration', 'PWM 1', 'PWM 2', 'Lux 1', 'Lux 2', 'Lux 3',
                  'Average Lux', 'Fitness'])
 
