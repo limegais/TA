@@ -3317,6 +3317,144 @@ def get_data():
 def get_tz_status():
     return jsonify({'warning': _system_tz_warn, 'ok': _system_tz_warn == ''})
 
+# ==================== OUTDOOR WEATHER (Open-Meteo — UNS Surakarta) ====================
+# Lokasi: Universitas Sebelas Maret, Surakarta, Jawa Tengah
+# Koordinat: -7.5561, 110.8316
+# API: Open-Meteo (https://open-meteo.com) — 100% gratis, tidak butuh API key
+
+WEATHER_LAT  = -7.5561
+WEATHER_LON  = 110.8316
+WEATHER_FETCH_INTERVAL = 600  # Update setiap 10 menit
+_last_weather_fetch    = 0.0
+
+outdoor_weather_data = {
+    'temperature':       None,
+    'apparent_temp':     None,
+    'humidity':          None,
+    'wind_speed':        None,
+    'precipitation':     None,
+    'cloud_cover':       None,
+    'uv_index':          None,
+    'weather_code':      None,
+    'weather_desc':      'Memuat data...',
+    'weather_icon':      '🌤️',
+    'is_day':            True,
+    'last_updated':      None,
+    'fetch_ok':          False,
+    'error':             None,
+}
+
+def _wmo_to_desc_icon(code, is_day=True):
+    """Convert WMO weather interpretation code to Indonesian description + emoji icon."""
+    if code == 0:
+        return ('Cerah', '☀️') if is_day else ('Langit Cerah', '🌙')
+    elif code in (1, 2, 3):
+        labels = {1: 'Sebagian Cerah', 2: 'Berawan Sebagian', 3: 'Mendung'}
+        icons  = {1: '🌤️', 2: '⛅', 3: '☁️'}
+        return (labels[code], icons[code])
+    elif code in (45, 48):
+        return ('Berkabut', '🌫️')
+    elif code in (51, 53, 55):
+        return ('Gerimis', '🌦️')
+    elif code in (61, 63, 65):
+        return ('Hujan', '🌧️')
+    elif code in (71, 73, 75, 77):
+        return ('Salju/Es', '🌨️')
+    elif code in (80, 81, 82):
+        return ('Hujan Lebat', '🌧️')
+    elif code in (85, 86):
+        return ('Hujan Salju', '🌨️')
+    elif code in (95,):
+        return ('Hujan + Petir', '⛈️')
+    elif code in (96, 99):
+        return ('Badai Petir', '⛈️')
+    else:
+        return ('Tidak Diketahui', '❓')
+
+def fetch_outdoor_weather():
+    """Fetch current weather from Open-Meteo API for UNS Surakarta.
+    Updates outdoor_weather_data global dict.
+    Called by the background thread every WEATHER_FETCH_INTERVAL seconds.
+    """
+    global _last_weather_fetch
+    now = time.time()
+    if now - _last_weather_fetch < WEATHER_FETCH_INTERVAL:
+        return
+    _last_weather_fetch = now
+
+    url = (
+        f'https://api.open-meteo.com/v1/forecast'
+        f'?latitude={WEATHER_LAT}&longitude={WEATHER_LON}'
+        f'&current=temperature_2m,relative_humidity_2m,apparent_temperature,'
+        f'weather_code,wind_speed_10m,precipitation,cloud_cover,uv_index,is_day'
+        f'&timezone=Asia%2FJakarta'
+        f'&forecast_days=1'
+    )
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'SmartRoom-Weather/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = json.loads(resp.read().decode('utf-8'))
+
+        cur = raw.get('current', {})
+        code   = int(cur.get('weather_code', 0))
+        is_day = bool(cur.get('is_day', 1))
+        desc, icon = _wmo_to_desc_icon(code, is_day)
+
+        outdoor_weather_data.update({
+            'temperature':   round(float(cur.get('temperature_2m')    or 0), 1),
+            'apparent_temp': round(float(cur.get('apparent_temperature') or 0), 1),
+            'humidity':      round(float(cur.get('relative_humidity_2m') or 0), 1),
+            'wind_speed':    round(float(cur.get('wind_speed_10m')    or 0), 1),
+            'precipitation': round(float(cur.get('precipitation')     or 0), 1),
+            'cloud_cover':   round(float(cur.get('cloud_cover')       or 0), 1),
+            'uv_index':      round(float(cur.get('uv_index')          or 0), 1),
+            'weather_code':  code,
+            'weather_desc':  desc,
+            'weather_icon':  icon,
+            'is_day':        is_day,
+            'last_updated':  datetime.now().strftime('%H:%M:%S'),
+            'fetch_ok':      True,
+            'error':         None,
+        })
+        print(f"[WEATHER] {desc} {icon} | Luar: {outdoor_weather_data['temperature']}°C "
+              f"RH={outdoor_weather_data['humidity']}% Angin={outdoor_weather_data['wind_speed']}km/h "
+              f"UV={outdoor_weather_data['uv_index']}")
+    except Exception as e:
+        outdoor_weather_data['fetch_ok']  = False
+        outdoor_weather_data['error']     = str(e)
+        outdoor_weather_data['last_updated'] = datetime.now().strftime('%H:%M:%S')
+        print(f"[WEATHER] Fetch gagal: {e}")
+
+def weather_poll_loop():
+    """Background thread: fetch outdoor weather setiap WEATHER_FETCH_INTERVAL detik."""
+    # Fetch segera saat startup (bypass interval check pertama kali)
+    global _last_weather_fetch
+    _last_weather_fetch = 0.0
+    while True:
+        try:
+            fetch_outdoor_weather()
+        except Exception as e:
+            print(f"[WEATHER] Thread error: {e}")
+        time.sleep(60)   # check setiap 1 menit, fungsi sendiri yang throttle ke 10 menit
+
+@app.route('/api/outdoor-weather')
+def get_outdoor_weather():
+    """Return current outdoor weather data for UNS Surakarta."""
+    # Also include indoor data for comparison
+    indoor = {
+        'temperature': mqtt_data['ac'].get('temperature', 0),
+        'humidity':    mqtt_data['ac'].get('humidity', 0),
+        'heat_index':  mqtt_data['ac'].get('heat_index', 0),
+    }
+    resp = jsonify({
+        'outdoor': outdoor_weather_data,
+        'indoor':  indoor,
+        'location': 'UNS Surakarta, Jawa Tengah',
+        'coords':  {'lat': WEATHER_LAT, 'lon': WEATHER_LON},
+    })
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
 @app.route('/api/mqtt/status')
 def get_mqtt_status():
     return jsonify({
@@ -5572,8 +5710,14 @@ if __name__ == '__main__':
     fault_thread = threading.Thread(target=sensor_fault_loop, daemon=True)
     fault_thread.start()
     print("  [FAULT] Sensor fault detection thread started")
-    
+
+    # Start outdoor weather polling thread (Open-Meteo, UNS Surakarta)
+    weather_thread = threading.Thread(target=weather_poll_loop, daemon=True)
+    weather_thread.start()
+    print(f"  [WEATHER] Outdoor weather polling started (UNS Surakarta, update every {WEATHER_FETCH_INTERVAL}s)")
+
     print("  [URL] Dashboard: http://172.20.0.65:5000")
+
 
     # Start MySQL energy polling (Jagoan Hosting)
     try:
