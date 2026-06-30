@@ -5746,6 +5746,189 @@
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
             };
 
-            console.log('[OK] Dashboard Ready!');
-        };
-    
+            console.log('[OK] Dashboard Ready!');\r
+        };\r
+\r
+        // ==================== OUTDOOR WEATHER (Open-Meteo, UNS Surakarta) ====================\r
+        var _weatherRefreshTimer = null;\r
+\r
+        function updateWeatherUI(data) {\r
+            var out = data.outdoor || {};\r
+            var inn = data.indoor  || {};\r
+\r
+            // Helper: safe set text\r
+            function setText(id, val, fallback) {\r
+                var el = document.getElementById(id);\r
+                if (el) el.textContent = (val !== null && val !== undefined) ? val : (fallback || '--');\r
+            }\r
+\r
+            // --- Outdoor card ---\r
+            setText('weather-icon',      out.weather_icon || '🌤️');\r
+            setText('weather-desc',      out.weather_desc || '--');\r
+            setText('weather-temp-out',  out.temperature  !== null ? out.temperature  : '--');\r
+            setText('weather-apparent',  out.apparent_temp !== null ? out.apparent_temp : '--');\r
+            setText('weather-apparent-2',out.apparent_temp !== null ? out.apparent_temp : '--');\r
+            setText('weather-wind',      out.wind_speed   !== null ? out.wind_speed   : '--');\r
+            setText('weather-uv',        out.uv_index     !== null ? out.uv_index     : '--');\r
+            setText('weather-rain',      out.precipitation !== null ? out.precipitation : '--');\r
+            setText('weather-cloud',     out.cloud_cover  !== null ? out.cloud_cover  : '--');\r
+            setText('weather-last-update', out.last_updated ? 'Update: ' + out.last_updated : 'Belum tersedia');\r
+\r
+            // Cloud bar\r
+            var cloudBar = document.getElementById('cloud-bar');\r
+            if (cloudBar && out.cloud_cover !== null) {\r
+                cloudBar.style.width = Math.min(100, out.cloud_cover) + '%';\r
+            }\r
+\r
+            // --- Comparison: Suhu ---\r
+            var tempIn  = parseFloat(inn.temperature) || 0;\r
+            var tempOut = parseFloat(out.temperature) || 0;\r
+            setText('compare-temp-in',  tempIn.toFixed(1));\r
+            setText('compare-temp-out', tempOut.toFixed(1));\r
+\r
+            var tempBadge = document.getElementById('temp-compare-badge');\r
+            var deltaTemp = tempIn - tempOut;\r
+            if (tempBadge && out.temperature !== null) {\r
+                var absDelta = Math.abs(deltaTemp).toFixed(1);\r
+                if (deltaTemp > 1.5) {\r
+                    tempBadge.textContent = '🏠 Lebih dingin +' + absDelta + '°';\r
+                    tempBadge.style.background = 'rgba(59,130,246,0.18)';\r
+                    tempBadge.style.color = '#3b82f6';\r
+                } else if (deltaTemp < -1.5) {\r
+                    tempBadge.textContent = '🌍 Lebih dingin +' + absDelta + '°';\r
+                    tempBadge.style.background = 'rgba(239,68,68,0.15)';\r
+                    tempBadge.style.color = '#ef4444';\r
+                } else {\r
+                    tempBadge.textContent = '≈ Sama';\r
+                    tempBadge.style.background = 'rgba(16,185,129,0.15)';\r
+                    tempBadge.style.color = '#10b981';\r
+                }\r
+            }\r
+\r
+            // Delta bar\r
+            var deltaWrap = document.getElementById('temp-delta-bar-wrap');\r
+            var deltaBar  = document.getElementById('temp-delta-bar');\r
+            var deltaText = document.getElementById('temp-delta-text');\r
+            if (deltaWrap && out.temperature !== null) {\r
+                deltaWrap.style.display = 'block';\r
+                var pct = Math.min(100, Math.abs(deltaTemp) / 15 * 100);\r
+                if (deltaBar) deltaBar.style.width = pct + '%';\r
+                if (deltaText) deltaText.textContent = (deltaTemp >= 0 ? 'Indoor lebih dingin ' : 'Outdoor lebih dingin ') + Math.abs(deltaTemp).toFixed(1) + '°C';\r
+            }\r
+\r
+            // --- Comparison: Kelembaban ---\r
+            var humIn  = parseFloat(inn.humidity) || 0;\r
+            var humOut = parseFloat(out.humidity) || 0;\r
+            setText('compare-hum-in',  humIn.toFixed(0));\r
+            setText('compare-hum-out', humOut.toFixed(0));\r
+\r
+            var humBadge = document.getElementById('hum-compare-badge');\r
+            if (humBadge && out.humidity !== null) {\r
+                var deltaHum = humIn - humOut;\r
+                var absHum = Math.abs(deltaHum).toFixed(0);\r
+                if (deltaHum > 5) {\r
+                    humBadge.textContent = '🏠 Lebih lembab +' + absHum + '%';\r
+                    humBadge.style.background = 'rgba(14,165,233,0.18)';\r
+                    humBadge.style.color = '#0ea5e9';\r
+                } else if (deltaHum < -5) {\r
+                    humBadge.textContent = '🌍 Lebih lembab +' + absHum + '%';\r
+                    humBadge.style.background = 'rgba(239,68,68,0.15)';\r
+                    humBadge.style.color = '#ef4444';\r
+                } else {\r
+                    humBadge.textContent = '≈ Sama';\r
+                    humBadge.style.background = 'rgba(16,185,129,0.15)';\r
+                    humBadge.style.color = '#10b981';\r
+                }\r
+            }\r
+\r
+            // --- Status badge ---\r
+            var statusBadge = document.getElementById('weather-status-badge');\r
+            if (statusBadge) {\r
+                if (out.fetch_ok) {\r
+                    statusBadge.textContent = '● Online';\r
+                    statusBadge.style.background = 'rgba(16,185,129,0.15)';\r
+                    statusBadge.style.color = '#10b981';\r
+                    statusBadge.style.borderColor = 'rgba(16,185,129,0.3)';\r
+                } else {\r
+                    statusBadge.textContent = '● Offline';\r
+                    statusBadge.style.background = 'rgba(239,68,68,0.15)';\r
+                    statusBadge.style.color = '#ef4444';\r
+                    statusBadge.style.borderColor = 'rgba(239,68,68,0.3)';\r
+                }\r
+            }\r
+\r
+            // --- Smart Insight ---\r
+            var insightEl = document.getElementById('weather-insight-text');\r
+            if (insightEl && out.temperature !== null) {\r
+                var insights = [];\r
+                var tempO = out.temperature;\r
+                var humO  = out.humidity;\r
+                var uvO   = out.uv_index;\r
+                var rainO = out.precipitation;\r
+                var windO = out.wind_speed;\r
+                var desc  = out.weather_desc || '';\r
+\r
+                if (rainO > 0) {\r
+                    insights.push('Hujan ' + rainO + 'mm terdeteksi — pastikan ventilasi tertutup untuk menjaga kelembaban ruangan.');\r
+                } else if (tempO > 33) {\r
+                    insights.push('Suhu luar sangat panas (' + tempO + '°C) — AC bekerja lebih keras. GA akan merekomendasikan setpoint lebih rendah.');\r
+                } else if (tempO > 28 && deltaTemp < 0) {\r
+                    insights.push('Cuaca panas di luar (' + tempO + '°C) — ruangan Anda lebih dingin. AC berjalan optimal.');\r
+                } else if (tempO < 25) {\r
+                    insights.push('Cuaca sejuk di luar (' + tempO + '°C) — pertimbangkan membuka ventilasi untuk hemat energi.');\r
+                }\r
+                if (uvO >= 8) {\r
+                    insights.push('Indeks UV sangat tinggi (' + uvO + ') — hindari paparan sinar matahari langsung.');\r
+                } else if (uvO >= 5) {\r
+                    insights.push('Indeks UV tinggi (' + uvO + ') — gunakan perlindungan jika berada di luar.');\r
+                }\r
+                if (humO > 85) {\r
+                    insights.push('Kelembaban luar sangat tinggi (' + humO + '%) — potensi kondensasi pada kaca jendela.');\r
+                }\r
+                if (windO > 30) {\r
+                    insights.push('Angin kencang (' + windO + ' km/h) terdeteksi di area UNS.');\r
+                }\r
+\r
+                insightEl.textContent = insights.length > 0\r
+                    ? insights[0]\r
+                    : 'Kondisi cuaca ' + (desc || 'normal') + ' di UNS Surakarta. Suhu luar: ' + tempO + '°C, Kelembaban: ' + humO + '%.';\r
+            }\r
+        }\r
+\r
+        function fetchOutdoorWeather() {\r
+            fetch('/api/outdoor-weather')\r
+                .then(function(r) {\r
+                    if (!r.ok) throw new Error('HTTP ' + r.status);\r
+                    return r.json();\r
+                })\r
+                .then(function(data) {\r
+                    try { updateWeatherUI(data); } catch(e) { console.warn('[WEATHER] UI update error:', e); }\r
+                })\r
+                .catch(function(e) {\r
+                    console.warn('[WEATHER] Fetch failed:', e.message);\r
+                    var statusBadge = document.getElementById('weather-status-badge');\r
+                    if (statusBadge) {\r
+                        statusBadge.textContent = '● Error';\r
+                        statusBadge.style.background = 'rgba(239,68,68,0.15)';\r
+                        statusBadge.style.color = '#ef4444';\r
+                        statusBadge.style.borderColor = 'rgba(239,68,68,0.3)';\r
+                    }\r
+                    var insightEl = document.getElementById('weather-insight-text');\r
+                    if (insightEl) insightEl.textContent = 'Gagal memuat data cuaca. Periksa koneksi internet server.';\r
+                });\r
+        }\r
+\r
+        function refreshOutdoorWeather() {\r
+            var btn = document.querySelector('[onclick=\"refreshOutdoorWeather()\"]');\r
+            if (btn) { btn.style.opacity = '0.4'; btn.style.pointerEvents = 'none'; }\r
+            fetchOutdoorWeather();\r
+            setTimeout(function() {\r
+                if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }\r
+            }, 2000);\r
+        }\r
+\r
+        // Fetch pertama saat halaman load\r
+        setTimeout(fetchOutdoorWeather, 800);\r
+        // Auto-refresh setiap 10 menit\r
+        _weatherRefreshTimer = setInterval(fetchOutdoorWeather, 600000);\r
+\r
