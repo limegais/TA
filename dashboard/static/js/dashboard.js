@@ -5968,3 +5968,4 @@
         setTimeout(fetchOutdoorWeather, 800);
         // Auto-refresh setiap 10 menit
         _weatherRefreshTimer = setInterval(fetchOutdoorWeather, 600000);
+df
