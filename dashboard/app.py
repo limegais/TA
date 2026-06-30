@@ -2230,7 +2230,8 @@ def save_lamp_data(lux1, lux2, lux3, brightness1, brightness2, motion):
             write_to_influxdb('lamp_sensor', {
                 'lux1': float(lux1), 'lux2': float(lux2), 'lux3': float(lux3), 'lux_avg': float(lux_avg),
                 'brightness1': float(brightness1), 'brightness2': float(brightness2), 'brightness_avg': float(bright_avg),
-                'motion': bool(motion)
+                'motion': bool(motion),
+                'mode': str(mqtt_data['lamp'].get('mode', 'ADAPTIVE'))
             }, tags={'device': 'esp32_lamp', 'location': 'room'})
         # Estimate lamp energy from brightness (no PZEM on ESP32 Lamp)
         now_ts = time.time()
@@ -3864,7 +3865,7 @@ from(bucket: "{INFLUX_BUCKET}")
                          'temp1', 'hum1', 'temp2', 'hum2', 'temp3', 'hum3',
                          'ac_temp', 'fan_speed', 'ac_fan_mode', 'set_rh', 'ac_state', 'mode',
                      ], None, None),
-        'lux':       ('lamp_sensor',      ['lux1','lux2','lux3','lux_avg','brightness1','brightness2'], None, None),
+        'lux':       ('lamp_sensor',      ['lux1','lux2','lux3','lux_avg','brightness1','brightness2','mode'], None, None),
         'occupancy': ('camera_detection', ['person_count','confidence'],                               None, None),
     }
     measurement, fields, tag_key, tag_val = TYPE_MAP[dtype]
@@ -3890,7 +3891,8 @@ from(bucket: "{INFLUX_BUCKET}")
   |> range(start: {start_iso}, stop: {end_iso})
   |> filter(fn: (r) => r["_measurement"] == "{measurement}")
   |> filter(fn: (r) => r["_field"] == "{field}")
-  {tag_filter}  |> yield(name: "raw")
+  {tag_filter}  |> aggregateWindow(every: 1m, fn: last, createEmpty: false)
+  |> yield(name: "raw")
 '''
             for table in query_api.query(query=q):
                 for record in table.records:
@@ -3911,10 +3913,20 @@ from(bucket: "{INFLUX_BUCKET}")
         writer.writerow(header_row)
         for ts_str in sorted_ts:
             row_d = rows_by_ts[ts_str]
+            
+            # Default missing 'mode' for backward compatibility
+            if 'mode' in fields and 'mode' not in row_d:
+                row_d['mode'] = 'ADAPTIVE'
+                
             row = [ts_str] + [
                 round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '')
                 for f in fields
             ]
+            
+            # Hanya sertakan baris yang datanya lengkap (tidak ada kolom kosong)
+            if '' in row:
+                continue
+                
             writer.writerow(row)
 
         csv_bytes = output.getvalue().encode('utf-8-sig')
