@@ -5918,20 +5918,31 @@
                 })
                 .catch(function(e) {
                     console.warn('[WEATHER] Fetch failed (attempt ' + (retryCount+1) + '):', e.message);
+                    
+                    var statusBadge = document.getElementById('weather-status-badge');
+                    var descEl = document.getElementById('weather-desc');
+                    var insightEl = document.getElementById('weather-insight-text');
+                    
                     if (retryCount < MAX_RETRIES) {
+                        if (statusBadge) {
+                            statusBadge.textContent = 'Retry ' + (retryCount+1) + '/3';
+                            statusBadge.style.background = 'rgba(245,158,11,0.12)';
+                            statusBadge.style.color = '#f59e0b';
+                        }
+                        if (descEl) descEl.textContent = 'Koneksi lambat...';
+                        if (insightEl) insightEl.textContent = 'Gagal memuat (Percobaan ' + (retryCount+1) + '). Akan mencoba lagi otomatis...';
+                        
                         var delay = (retryCount + 1) * 3000;
                         setTimeout(function() { fetchOutdoorWeather(retryCount + 1); }, delay);
                         return;
                     }
-                    var statusBadge = document.getElementById('weather-status-badge');
+                    
                     if (statusBadge) {
                         statusBadge.textContent = 'Error';
                         statusBadge.style.background = 'rgba(239,68,68,0.12)';
                         statusBadge.style.color = '#ef4444';
                     }
-                    var descEl = document.getElementById('weather-desc');
                     if (descEl) descEl.textContent = 'Tidak tersedia';
-                    var insightEl = document.getElementById('weather-insight-text');
                     if (insightEl) insightEl.textContent = 'Gagal memuat cuaca setelah 3x percobaan. Periksa koneksi internet server atau klik tombol refresh.';
                     setTimeout(function() { fetchOutdoorWeather(0); }, 30000);
                 });
