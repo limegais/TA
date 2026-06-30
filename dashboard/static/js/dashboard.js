@@ -1,5 +1,6 @@
         window.onerror = function(msg, url, line, col, error) {
             console.error('[JS ERROR] ' + msg + ' at line ' + line + ':' + col);
+            alert('[JS ERROR] ' + msg + '\nLine: ' + line + ':' + col);
             return false;
         };
 
@@ -55,10 +56,10 @@
             return (unit ? n.toFixed(2) + ' ' + unit : n.toFixed(2));
         }
 
-        // styleLineChart removed — all styling moved into makeOpts/makeEnergyOpts at chart creation
+        // styleLineChart removed - all styling moved into makeOpts/makeEnergyOpts at chart creation
         // Mutating chart.options post-creation causes _scriptable recursion in Chart.js 4.x
 
-        // Gradients removed — CanvasGradient objects cause _scriptable recursion in Chart.js 4.x
+        // Gradients removed - CanvasGradient objects cause _scriptable recursion in Chart.js 4.x
         // Static rgba() backgroundColor set at chart creation provides the fill effect
 
         // ==================== LOCALSTORAGE PERSISTENCE ====================
@@ -422,37 +423,37 @@
 
             charts.energyCompareBefore = new Chart(document.getElementById('energyCompareBeforeChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'Before — Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before - Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareAfter = new Chart(document.getElementById('energyCompareAfterChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'After — Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After - Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareKwhBefore = new Chart(document.getElementById('energyCompareKwhBeforeChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'Before — Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before - Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.energyCompareKwhAfter = new Chart(document.getElementById('energyCompareKwhAfterChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'After — Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After - Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             // Lamp Comparison Charts
             charts.lampCompareBefore = new Chart(document.getElementById('lampCompareBeforeChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'Before — Lamp Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before - Lamp Power', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareAfter = new Chart(document.getElementById('lampCompareAfterChart'), {
                 type: 'line', options: compareLineOpts('W'),
-                data: { labels: [], datasets: [{ label: 'After — Lamp Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After - Lamp Power', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareKwhBefore = new Chart(document.getElementById('lampCompareKwhBeforeChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'Before — Lamp Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'Before - Lamp Energy', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
             charts.lampCompareKwhAfter = new Chart(document.getElementById('lampCompareKwhAfterChart'), {
                 type: 'line', options: compareLineOpts('kWh'),
-                data: { labels: [], datasets: [{ label: 'After — Lamp Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
+                data: { labels: [], datasets: [{ label: 'After - Lamp Energy', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)', tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 5, pointBackgroundColor: '#3b82f6', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
             charts.occupancy = new Chart(document.getElementById('occupancyChart'), {
@@ -460,7 +461,7 @@
                 data: { labels: [], datasets: [{ label: 'Occupancy (person)', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.35, fill: true, pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#0ea5e9', pointBorderColor: '#fff', pointBorderWidth: 1 }] }
             });
 
-            // Energy chart styling is set at creation via makeEnergyOpts — no post-init mutation needed
+            // Energy chart styling is set at creation via makeEnergyOpts - no post-init mutation needed
             // ML charts (gaFitness, psoFitness, comparison) are initialized separately via initMLCharts()
         }
 
@@ -557,7 +558,7 @@
                 return false;
             }
 
-            // Only call initCharts() if core charts (temp, hum) are also missing — meaning initCharts never ran.
+            // Only call initCharts() if core charts (temp, hum) are also missing - meaning initCharts never ran.
             // If charts.temp already exists, initCharts() already ran and calling it again will crash on duplicate canvases.
             if ((!charts.energyPower || !charts.energyVoltage || !charts.energyKwh || !charts.energyCompareBefore || !charts.energyCompareKwhBefore) && !charts.temp) {
                 try {
@@ -568,7 +569,7 @@
                 }
             }
 
-            // ML charts are independent — init separately to avoid destroying already-created canvases
+            // ML charts are independent - init separately to avoid destroying already-created canvases
             // Guard: only init when canvas is visible (has positive width), to avoid 0px Chart.js failures
             if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
                 var mlCanvas = document.getElementById('gaFitnessChart');
@@ -791,7 +792,7 @@
                     var outletLabels = outletData.map(function(d){ return d.time; });
                     var lampLabels = lampData.map(function(d){ return d.time; });
                     
-                    // energy_kwh is cumulative — compute delta per interval
+                    // energy_kwh is cumulative - compute delta per interval
                     if (field === 'energy_kwh') {
                         function computeDeltas(cumValues) {
                             var deltas = [];
@@ -831,7 +832,7 @@
                         }
                     }
 
-                    // ── Determine chart type: Daily (24h) = line, others = bar ──
+                    // -- Determine chart type: Daily (24h) = line, others = bar --
                     var useBarForAll = (period !== '24h');
                     var targetType = useBarForAll ? 'bar' : 'line';
                     var unitMap = { power: 'kW', voltage: 'V', current: 'A', energy_kwh: 'kWh' };
@@ -938,7 +939,7 @@
             .catch(function(e){ console.error('Energy history error:', e); });
         }
 
-        // ── toggleDataset: show/hide chart datasets via visibility checkboxes ──
+        // -- toggleDataset: show/hide chart datasets via visibility checkboxes --
         function toggleDataset(chartName, datasetIndex, checkbox) {
             var chart = charts[chartName];
             if (!chart || !chart.data || !chart.data.datasets[datasetIndex]) return;
@@ -1095,7 +1096,7 @@
                             banner = document.createElement('div');
                             banner.id = 'tz-warning-banner';
                             banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#0ea5e9;color:#1e293b;padding:8px 20px;font-size:13px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;gap:12px;';
-                            banner.innerHTML = '<span>⚠ Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.remove()" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;">✕</button>';
+                            banner.innerHTML = '<span>  Timezone Warning: ' + d.warning + '</span><button onclick="this.parentElement.remove()" style="background:rgba(0,0,0,0.15);border:none;padding:3px 10px;border-radius:5px;cursor:pointer;color:#1e293b;"> </button>';
                             document.body.prepend(banner);
                         }
                     }
@@ -1196,12 +1197,12 @@
                     var afterData = result.after || [];
                     var summary = result.summary || {};
 
-                    // BEFORE chart — its own labels & data
+                    // BEFORE chart - its own labels & data
                     beforeChart.data.labels = beforeData.map(function(d) { return d.label; });
                     beforeChart.data.datasets[0].data = beforeData.map(function(d) { return d.value; });
                     beforeChart.update('none');
 
-                    // AFTER chart — its own labels & data
+                    // AFTER chart - its own labels & data
                     afterChart.data.labels = afterData.map(function(d) { return d.label; });
                     afterChart.data.datasets[0].data = afterData.map(function(d) { return d.value; });
                     afterChart.update('none');
@@ -1419,7 +1420,7 @@
             console.log('[NAV] showPage called:', pageId);
             // Block user role from accessing admin-only pages
             if (userRole !== 'admin' && ADMIN_PAGES.indexOf(pageId) !== -1) {
-                console.warn('[NAV] Access denied for role:', userRole, '→ page:', pageId);
+                console.warn('[NAV] Access denied for role:', userRole, '  page:', pageId);
                 pageId = 'dashboard-ac';
             }
             document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -1461,7 +1462,7 @@
                     if (!charts.gaFitness || !charts.psoFitness || !charts.comparison) {
                         try { initMLCharts(); } catch(e) { console.error('[NAV] initMLCharts rAF error:', e); }
                     } else {
-                        // Charts exist — just resize them for correct dimensions
+                        // Charts exist - just resize them for correct dimensions
                         try {
                             ['gaFitness', 'psoFitness', 'comparison'].forEach(function(k) {
                                 if (charts[k]) { charts[k].resize(); charts[k].update('none'); }
@@ -1766,7 +1767,7 @@
                 btns.forEach(function(b) { b.disabled = false; });
                 if (res.ok && res.data.status === 'ok') {
                     var dev = res.data.device || {};
-                    showToast((names[deviceId]||'Device') + ' → ' + (status ? 'ON' : 'OFF'), 'success');
+                    showToast((names[deviceId]||'Device') + '   ' + (status ? 'ON' : 'OFF'), 'success');
                     // Update all devices from response
                     if (dev.devices && Array.isArray(dev.devices)) {
                         _sbmsUpdateAllDeviceCards(dev.devices);
@@ -1855,7 +1856,7 @@
             var tbody = document.getElementById('sbms-devices-tbody');
             if (!tbody) return;
             var names = {5:'Master', 6:'AC', 7:'Lampu', 8:'Outlet'};
-            var icons = {5:'👑', 6:'❄️', 7:'💡', 8:'🔌'};
+            var icons = {5:' ', 6:'  ', 7:' ', 8:' '};
             if (!devices || devices.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-secondary);font-style:italic;">No devices found</td></tr>';
                 return;
@@ -1870,7 +1871,7 @@
                     + '<td style="font-weight:700;">' + d.id + '</td>'
                     + '<td>' + (icons[d.id]||'') + ' ' + (d.nama || names[d.id] || 'Device ' + d.id) + '</td>'
                     + '<td>' + statusBadge + '</td>'
-                    + '<td>' + (d.is_master ? '✅' : '—') + '</td>'
+                    + '<td>' + (d.is_master ? ' ' : '-') + '</td>'
                     + '<td><code style="font-size:11px;background:rgba(37,99,235,0.06);padding:2px 6px;border-radius:4px;">' + (d.group_key || '-') + '</code></td>'
                     + '</tr>';
             });
@@ -1985,7 +1986,7 @@
             if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
             setEl('ml-opt-runs', data.optimization_runs || 0);
 
-            // GA chart — use server data, or fallback to localStorage
+            // GA chart - use server data, or fallback to localStorage
             var gaHistory = (data.ga_history && data.ga_history.length > 0) ? data.ga_history : null;
             if (!gaHistory) {
                 try { gaHistory = JSON.parse(localStorage.getItem('ml_ga_history')); } catch(e) {}
@@ -1994,7 +1995,7 @@
                 updateMLChart('gaFitness', gaHistory, 'GA');
             }
 
-            // PSO chart — use server data, or fallback to localStorage
+            // PSO chart - use server data, or fallback to localStorage
             if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
                 updatePSOIterChart(data.pso_iteration_log);
             } else {
@@ -2023,7 +2024,7 @@
                 if (mlCanvas && mlCanvas.offsetWidth > 0) {
                     try { initMLCharts(); } catch(e) { console.warn('[CHART] initMLCharts failed:', e); return; }
                 } else {
-                    // ML tab not yet active — store data to render when tab opens
+                    // ML tab not yet active - store data to render when tab opens
                     window.__pendingMLData = window.__pendingMLData || {};
                     window.__pendingMLData[chartName] = { history, algo };
                     // Also save to localStorage so data survives refresh
@@ -2072,7 +2073,7 @@
             tbody.innerHTML = iterLog.map(d => {
                 const inRange     = d.lux_avg >= 315 && d.lux_avg <= 385;
                 const statusColor = inRange ? '#3b82f6' : '#0ea5e9';
-                const statusText  = inRange ? '✓ Target' : '✗ Not yet';
+                const statusText  = inRange ? '  Target' : '  Not yet';
                 const fitPct      = Math.max(0, 100.0 - (d.fitness / 122500.0) * 100.0).toFixed(1);
                 return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
@@ -2089,7 +2090,7 @@
         }
 
         socket.on('pso_iter_progress', function(d) {
-            // Local helper — does not depend on outer scope
+            // Local helper - does not depend on outer scope
             const _s = function(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; };
 
             if (d.status === 'done') {
@@ -2106,14 +2107,14 @@
                 const fitPct = Math.max(0, 100.0 - ((d.fitness || 0) / 122500.0) * 100.0).toFixed(1);
                 _s('ml-pso-fitness', fitPct);
 
-                // Iteration table — replace waiting row with full data
+                // Iteration table - replace waiting row with full data
                 const tbody = document.getElementById('pso-iter-tbody');
                 const wrap  = document.getElementById('pso-iter-table-wrap');
                 if (!tbody) return;
                 wrap.style.display = 'block';
                 const inRange     = (d.lux_avg || 0) >= 315 && (d.lux_avg || 0) <= 385;
                 const statusColor = inRange ? '#3b82f6' : '#0ea5e9';
-                const statusText  = inRange ? '✓ Target' : '✗ Not yet';
+                const statusText  = inRange ? '  Target' : '  Not yet';
                 const newRow = `<tr data-iter="${d.iter}" style="border-bottom:1px solid rgba(255,255,255,0.05);">
                     <td style="padding:4px 8px;text-align:center;font-weight:600;">${d.iter}</td>
                     <td style="padding:4px 8px;text-align:center;color:#2563eb;">${d.pwm1 != null ? d.pwm1 : '--'}</td>
@@ -2159,7 +2160,7 @@
                         '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + d.iter + '</td>' +
                         '<td style="padding:4px 8px;text-align:center;color:#2563eb;">' + (d.pwm1 != null ? d.pwm1 : '--') + '</td>' +
                         '<td style="padding:4px 8px;text-align:center;color:#2563eb;">' + (d.pwm2 != null ? d.pwm2 : '--') + '</td>' +
-                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">⏳ Reading sensors...</td>' +
+                        '<td colspan="6" style="padding:4px 8px;text-align:center;color:var(--text-secondary);">  Reading sensors...</td>' +
                     '</tr>');
 
             } else if (d.status === 'new_cycle') {
@@ -2186,7 +2187,7 @@
                 ga_fan: data.ga_fan || '--',
                 pso_fitness: data.pso_fitness || 0,
                 pso_brightness: data.pso_brightness || '--',
-                // GA maximize (score) vs PSO minimize (error) — normalize PSO before combining
+                // GA maximize (score) vs PSO minimize (error) - normalize PSO before combining
                 combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100 - (data.pso_fitness || 0) / 100) * 0.5
             };
             mlHistory.unshift(entry);
@@ -2707,7 +2708,7 @@
                 .then(r => r.json())
                 .then(result => {
                     if (result && result.ac) applyACSnapshot(result.ac);
-                    showToast('AC: ' + temp + '°C, RH ' + rh + '%, Fan ' + fan + ', ' + selectedACMode);
+                    showToast('AC: ' + temp + '\xB0C, RH ' + rh + '%, Fan ' + fan + ', ' + selectedACMode);
                 })
                 .catch(e => showToast('Error: ' + e, 'error'));
             });
@@ -2745,7 +2746,7 @@
                 });
             })
             .then(r => r.json())
-            .then(result => showToast('Lamp → MANUAL | L1=' + b1 + '% L2=' + b2 + '%'))
+            .then(result => showToast('Lamp   MANUAL | L1=' + b1 + '% L2=' + b2 + '%'))
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
@@ -2780,7 +2781,7 @@
                     indicator.style.background = 'rgba(59, 130, 246, 0.1)';
                     indicator.style.color = '#3b82f6';
                     indicator.style.borderColor = 'rgba(59, 130, 246, 0.3)';
-                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — AC controlled automatically by GA optimization';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> - AC controlled automatically by GA optimization';
                 }
                 // Button styles
                 if (btnAdaptive) {
@@ -2796,7 +2797,7 @@
                     btnManual.style.opacity = '0.6';
                 }
             } else {
-                // Hide overlay — allow manual controls
+                // Hide overlay - allow manual controls
                 if (overlay) overlay.style.display = 'none';
                 if (banner) banner.style.display = 'none';
                 // Indicator
@@ -2804,7 +2805,7 @@
                     indicator.style.background = 'rgba(14, 165, 233, 0.1)';
                     indicator.style.color = '#0ea5e9';
                     indicator.style.borderColor = 'rgba(14, 165, 233, 0.3)';
-                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control AC manually using buttons below';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> - Control AC manually using buttons below';
                 }
                 // Button styles
                 if (btnManual) {
@@ -2831,7 +2832,7 @@
                     const gaTemp = document.getElementById('adaptive-ga-temp');
                     const gaFan = document.getElementById('adaptive-ga-fan');
                     const gaFitness = document.getElementById('adaptive-ga-fitness');
-                    if (gaTemp) gaTemp.textContent = (data.system.ga_temp || 0) > 0 ? data.system.ga_temp + '°C' : '--';
+                    if (gaTemp) gaTemp.textContent = (data.system.ga_temp || 0) > 0 ? data.system.ga_temp + '\xB0C' : '--';
                     if (gaFan) gaFan.textContent = (data.system.ga_fan || 0) > 0 ? 'Lv ' + data.system.ga_fan : '--';
                     if (gaFitness) gaFitness.textContent = (data.system.ga_fitness || 0) > 0 ? parseFloat(data.system.ga_fitness).toFixed(2) : '--';
                 });
@@ -2871,7 +2872,7 @@
                     indicator.style.background = 'rgba(14, 165, 233, 0.1)';
                     indicator.style.color = '#0ea5e9';
                     indicator.style.borderColor = 'rgba(14, 165, 233, 0.3)';
-                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> — Lamps controlled automatically by PSO optimization';
+                    indicator.innerHTML = 'Current mode: <strong>ADAPTIVE</strong> - Lamps controlled automatically by PSO optimization';
                 }
                 if (btnAdaptive) {
                     btnAdaptive.style.background = 'linear-gradient(135deg, #0ea5e9, #0284c7)';
@@ -2891,7 +2892,7 @@
                     indicator.style.background = 'rgba(37, 99, 235, 0.1)';
                     indicator.style.color = '#2563eb';
                     indicator.style.borderColor = 'rgba(37, 99, 235, 0.3)';
-                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> — Control lamps manually using sliders below';
+                    indicator.innerHTML = 'Current mode: <strong>MANUAL</strong> - Control lamps manually using sliders below';
                 }
                 if (btnManual) {
                     btnManual.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
@@ -3190,9 +3191,9 @@
                 .then(data => {
                     const codes = data.codes || data;
                     
-                    let debugInfo = '═══════════════════════════════════\\n';
+                    let debugInfo = '                                   \\n';
                     debugInfo += '  IR CODES DEBUG INFO\\n';
-                    debugInfo += '═══════════════════════════════════\\n\\n';
+                    debugInfo += '                                   \\n\\n';
                     
                     if (Object.keys(codes).length === 0) {
                         debugInfo += '[WARN] No IR codes learned yet\\n\\n';
@@ -3218,7 +3219,7 @@
                             debugInfo += '\\n';
                         });
                         
-                        debugInfo += '═══════════════════════════════════\\n';
+                        debugInfo += '                                   \\n';
                         debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\\n';
                     }
                     
@@ -3295,7 +3296,7 @@
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const now = audioContext.currentTime;
 
-                // Beep 1 — alert tone
+                // Beep 1 - alert tone
                 const osc1 = audioContext.createOscillator();
                 const gain1 = audioContext.createGain();
                 osc1.connect(gain1);
@@ -3307,7 +3308,7 @@
                 osc1.start(now);
                 osc1.stop(now + 0.25);
 
-                // Beep 2 — higher pitched
+                // Beep 2 - higher pitched
                 const osc2 = audioContext.createOscillator();
                 const gain2 = audioContext.createGain();
                 osc2.connect(gain2);
@@ -3319,7 +3320,7 @@
                 osc2.start(now + 0.3);
                 osc2.stop(now + 0.55);
 
-                // Beep 3 — highest
+                // Beep 3 - highest
                 const osc3 = audioContext.createOscillator();
                 const gain3 = audioContext.createGain();
                 osc3.connect(gain3);
@@ -3375,9 +3376,9 @@
             updateSoundToggleUI();
             if (detectionSoundEnabled) {
                 playDetectionSound();
-                showToast('Sound alerts ON — you will hear a sound when a person is detected', 'success');
+                showToast('Sound alerts ON - you will hear a sound when a person is detected', 'success');
             } else {
-                showToast('Sound alerts OFF — sound notifications disabled', 'info');
+                showToast('Sound alerts OFF - sound notifications disabled', 'info');
             }
         }
 
@@ -3513,7 +3514,7 @@
                     const temperature = num(ac.temperature);
                     setText('dash-temp', temperature.toFixed(1));
                     setText('dash-hum', num(ac.humidity).toFixed(1));
-                    // Individual sensor readings — sorted coldest→hottest (S1→S3)
+                    // Individual sensor readings - sorted coldest hottest (S1 S3)
                     var rawTemps = [
                         { t: num(ac.temp1), h: num(ac.hum1) },
                         { t: num(ac.temp2), h: num(ac.hum2) },
@@ -3583,7 +3584,7 @@
                         fanLabel.textContent = fanNames[fanSpeed] || 'Level ' + fanSpeed;
                     }
                     
-                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color — uses ac_fan_mode from ESP32
+                    // AC Mode (COOL/HEAT/DRY/FAN/AUTO) with icon + color - uses ac_fan_mode from ESP32
                     const acMode = ac.ac_fan_mode || 'COOL';
                     setText('dash-ac-mode', acMode);
                     const modeIconEl = document.getElementById('dash-ac-mode-icon');
@@ -3740,7 +3741,7 @@
                         psoEl.style.color = psoFitness > 0 ? '#3b82f6' : '#94a3b8';
                     }
                     
-                    // PSO Brightness — pso-brightness element not on main page (only on ML page)
+                    // PSO Brightness - pso-brightness element not on main page (only on ML page)
                     const psoBrightEl = document.getElementById('pso-brightness');
                     if (psoBrightEl) {
                         psoBrightEl.textContent = Math.round(num(system.pso_brightness));
@@ -3968,7 +3969,7 @@
         var _mysqlBuf = { labels: [], acV: [], outletV: [], lampV: [], freq: [], acP: [], outletP: [], lampP: [], acA: [], outletA: [], lampA: [] };
         var _MYSQL_MAX = 30;
 
-        // ── Fungsi update DOM energi (dipakai socket DAN direct-poll) ──
+        // -- Fungsi update DOM energi (dipakai socket DAN direct-poll) --
         var _lastEnergyUpdate = 0;
         function _applyEnergyData(ac, outlet, lamp) {
             outlet = outlet || {};
@@ -3982,7 +3983,7 @@
                 return num.toFixed(4).replace(/\\.0+$/, '').replace(/(\\.\\d*?)0+$/, '$1');
             };
 
-            // ── Overview page badge + mini cards ──
+            // -- Overview page badge + mini cards --
             var badge = document.getElementById('mysql-energy-badge');
             if (badge) {
                 badge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Online';
@@ -3997,7 +3998,7 @@
             s('mysql-lamp-freq',    f(lamp.frequency, 2)); s('mysql-lamp-pf',     f(lamp.pf, 2));
             s('mysql-lamp-ts',      lamp.updated_at || '--');
 
-            // ── Energy Usage page live values ──
+            // -- Energy Usage page live values --
             var liveBadge = document.getElementById('mysql-live-badge');
             if (liveBadge) {
                 liveBadge.innerHTML = '<i class="fas fa-circle" style="font-size:6px;vertical-align:middle;margin-right:4px;"></i> Live';
@@ -4022,7 +4023,7 @@
             s('eu-lamp-freq',    f(lamp.frequency, 2)); s('eu-lamp-pf',     f(lamp.pf, 2));
             s('eu-lamp-ts',      lamp.updated_at || '--');
 
-            // ── Reactive / Apparent / PF quality / Power bars ──
+            // -- Reactive / Apparent / PF quality / Power bars --
             s('eu-ac-reactive',   f(ac.reactive_power,  1));
             s('eu-ac-apparent',   f(ac.apparent_power,  1));
             s('eu-outlet-reactive', f(outlet.reactive_power, 1));
@@ -4051,7 +4052,7 @@
             if (outletBar) outletBar.style.width = Math.min(100, (parseFloat(outlet.power||0) / 1.0 * 100)).toFixed(1) + '%';
             if (lpBar)  lpBar.style.width  = Math.min(100, (parseFloat(lamp.power||0) / 0.5 * 100)).toFixed(1) + '%';
 
-            // ── Update power-grid summary cards ──
+            // -- Update power-grid summary cards --
             var acPow  = parseFloat(ac.power||0);
             var outletPow = parseFloat(outlet.power||0);
             var lampPow = parseFloat(lamp.power||0);
@@ -4085,7 +4086,7 @@
             var costEst = Math.round(totKwh * 1500);
             s('daily-cost', costEst > 0 ? costEst.toLocaleString() : '0');
 
-            // ── Ring buffer & chart ──
+            // -- Ring buffer & chart --
             var now2 = new Date();
             var ts2  = now2.getHours() + ':' + String(now2.getMinutes()).padStart(2,'0') + ':' + String(now2.getSeconds()).padStart(2,'0');
             _mysqlBuf.labels.push(ts2);
@@ -4116,7 +4117,7 @@
             }
         }
 
-        // ── Socket handler ──
+        // -- Socket handler --
         socket.on('mysql_energy_update', function(data) {
             var ac = data.ac || {};
             var outlet = data.outlet || {};
@@ -4130,7 +4131,7 @@
             _applyEnergyData(ac, outlet, lamp);
         });
 
-        // ── Direct PHP polling fallback ──
+        // -- Direct PHP polling fallback --
         // If socket sends no data for 10 seconds, browser fetches directly from PHP
         var _PHP_ENERGY_URL = 'https://iotlab-uns.com/api_energy.php?key=iotlab_smartroom_2024';
         var _phpPollErr = 0;
@@ -4159,7 +4160,7 @@
                     ac.pf   = acAp > 0 ? parseFloat((parseFloat(ac.active_power||0) / acAp).toFixed(3)) : 0;
                     outlet.pf = outletAp > 0 ? parseFloat((parseFloat(outlet.active_power||0) / outletAp).toFixed(3)) : 0;
                     lamp.pf = lpAp > 0 ? parseFloat((parseFloat(lamp.active_power||0) / lpAp).toFixed(3)) : 0;
-                    // Adjust field names: active_power → power, frequency → frequency
+                    // Adjust field names: active_power   power, frequency   frequency
                     ac.power       = ac.active_power;
                     // total_energy from DB is actually in Wh, divide by 1000 for kWh
                     ac.energy      = parseFloat(ac.total_energy || 0) / 1000.0;
@@ -4231,7 +4232,7 @@
 
         function _recFmt(v, d) { return (parseFloat(v)||0).toFixed(d !== undefined ? d : 1); }
 
-        // ── Server-side data sync ──
+        // -- Server-side data sync --
         function _recServerPush() {
             fetch('/api/rec/data?type=energy', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -4244,7 +4245,7 @@
         function _recServerFetch() {
             fetch('/api/rec/data?type=energy').then(function(r){ return r.json(); }).then(function(d){
                 if (!d.rows) return;
-                // Always sync from server when not recording — server is source of truth
+                // Always sync from server when not recording - server is source of truth
                 // This fixes stale sessionStorage showing wrong data on other devices
                 if (d.rows.length !== _recRows.length ||
                     JSON.stringify(d.rows[d.rows.length-1]) !== JSON.stringify(_recRows[_recRows.length-1])) {
@@ -4393,7 +4394,7 @@
             _recUpdateBadge();
             _recStatePush({energy: false});
             _recServerPush();
-            showToast('Recording stopped — ' + _recRows.length + ' rows saved', 'info');
+            showToast('Recording stopped - ' + _recRows.length + ' rows saved', 'info');
         }
 
         function energyRecClear() {
@@ -4436,7 +4437,7 @@
             showToast(rows.length + ' rows exported: ' + fname, 'success');
         }
 
-        // Hook to _applyEnergyData — record every 6 minutes (360 seconds)
+        // Hook to _applyEnergyData - record every 6 minutes (360 seconds)
         var _lastRecTime = 0;
         var _REC_INTERVAL_MS = 300000; // 5 minutes
         var _origApply = _applyEnergyData;
@@ -4558,7 +4559,7 @@
             _tempUpdateBadge();
             _recStatePush({temp: false});
             _tempServerPush();
-            showToast('Recording stopped — ' + _tempRows.length + ' rows saved', 'info');
+            showToast('Recording stopped - ' + _tempRows.length + ' rows saved', 'info');
         }
 
         function tempRecClear() {
@@ -4692,7 +4693,7 @@
             _luxUpdateBadge();
             _recStatePush({lux: false});
             _luxServerPush();
-            showToast('Recording stopped — ' + _luxRows.length + ' rows saved', 'info');
+            showToast('Recording stopped - ' + _luxRows.length + ' rows saved', 'info');
         }
 
         function luxRecClear() {
@@ -4858,7 +4859,7 @@
             _occLastHour = h;
             _ssSave('_occRows', _occRows);
             _occRefreshChart();
-            showToast('Occupancy at ' + String(h).padStart(2,'0') + ':00 recorded — ' + count + ' persons', 'info');
+            showToast('Occupancy at ' + String(h).padStart(2,'0') + ':00 recorded - ' + count + ' persons', 'info');
         }
 
         function occClear() {
@@ -4929,7 +4930,7 @@
                 const lamp = data.data;
                 const luxAvg    = parseFloat(lamp.lux_avg)    || 0;
                 const brightAvg = parseFloat(lamp.brightness_avg) || 0;
-                // local setText — does not depend on outer scope
+                // local setText - does not depend on outer scope
                 const _set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
 
                 // Update Lamp Dashboard lux dan brightness secara real-time
@@ -5018,9 +5019,9 @@
                 
                 // Show toast with actual PWM values
                 if (gaFitness > 0 && psoFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(1) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '\xB0C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(1) + ')', 'success');
                 } else if (gaFitness > 0) {
-                    showToast('GA->AC: ' + gaTemp + '°C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
+                    showToast('GA->AC: ' + gaTemp + '\xB0C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
                 } else if (psoFitness > 0) {
                     showToast('PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
                 }
