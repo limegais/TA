@@ -5628,6 +5628,33 @@
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
             };
 
+            function fetchOutdoorWeather() {
+                fetch('/api/outdoor-weather')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.outdoor && data.outdoor.fetch_ok) {
+                            var tempEl = document.getElementById('dash-outdoor-temp');
+                            var humEl = document.getElementById('dash-outdoor-hum');
+                            var windEl = document.getElementById('dash-outdoor-wind');
+                            var uvEl = document.getElementById('dash-outdoor-uv');
+                            var descEl = document.getElementById('dash-weather-desc');
+                            var iconEl = document.getElementById('dash-weather-icon');
+                            
+                            if(tempEl) tempEl.textContent = data.outdoor.temperature;
+                            if(humEl) humEl.textContent = data.outdoor.humidity;
+                            if(windEl) windEl.textContent = data.outdoor.wind_speed + ' km/h';
+                            if(uvEl) uvEl.textContent = data.outdoor.uv_index;
+                            if(descEl) descEl.textContent = data.outdoor.weather_desc;
+                            if(iconEl) iconEl.textContent = data.outdoor.weather_icon;
+                        }
+                    })
+                    .catch(err => console.error('[WEATHER] Fetch error:', err));
+            }
+            
+            // Initial fetch and interval (every 10 minutes)
+            fetchOutdoorWeather();
+            setInterval(fetchOutdoorWeather, 600000);
+
             console.log('[OK] Dashboard Ready!');
         };
     
