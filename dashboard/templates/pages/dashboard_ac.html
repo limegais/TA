@@ -45,168 +45,7 @@
                 </div>
             </div>
 
-            <!-- ===== PANEL CUACA LUAR RUANGAN ===== -->
-            <div id="outdoor-weather-panel" style="
-                margin-bottom: 20px;
-                border-radius: 14px;
-                overflow: hidden;
-                border: 1px solid var(--border);
-                background: var(--bg-card);
-            ">
-                <!-- Header -->
-                <div style="
-                    padding: 12px 18px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    border-bottom: 1px solid var(--border);
-                ">
-                    <div style="display:flex;align-items:center;gap:10px;">
-                        <div style="font-size:15px;font-weight:700;color:var(--text);">Kondisi Lingkungan Luar</div>
-                        <span style="font-size:11px;color:var(--text-secondary);">UNS Surakarta — Open-Meteo API</span>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:8px;">
-                        <div id="weather-status-badge" style="
-                            padding: 3px 10px; border-radius: 6px;
-                            font-size: 11px; font-weight: 600;
-                            background: rgba(148,163,184,0.12); color: #94a3b8;
-                        ">Memuat</div>
-                        <span id="weather-last-update" style="font-size:11px;color:var(--text-secondary);"></span>
-                        <button onclick="refreshOutdoorWeather()" title="Refresh cuaca" style="
-                            width: 30px; height: 30px; border-radius: 6px;
-                            border: 1px solid var(--border);
-                            background: transparent; color: var(--text-secondary);
-                            cursor: pointer; font-size: 14px; display: flex;
-                            align-items: center; justify-content: center;
-                            transition: background 0.15s;
-                        " onmouseover="this.style.background='rgba(148,163,184,0.1)'" onmouseout="this.style.background='transparent'">↻</button>
-                    </div>
-                </div>
 
-                <!-- Body -->
-                <div style="padding: 16px 18px; display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: start;">
-
-                    <!-- Left: Current outdoor weather -->
-                    <div style="
-                        padding: 16px;
-                        border-radius: 10px;
-                        background: var(--bg-secondary);
-                        border: 1px solid var(--border);
-                        text-align: center;
-                    ">
-                        <div id="weather-icon" style="font-size: 42px; line-height: 1; margin-bottom: 6px;">🌤️</div>
-                        <div id="weather-desc" style="font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 8px;">Memuat...</div>
-                        <div style="font-size: 36px; font-weight: 700; color: var(--text); line-height: 1;">
-                            <span id="weather-temp-out">--</span><span style="font-size:16px;color:var(--text-secondary);font-weight:400;">°C</span>
-                        </div>
-                        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">
-                            Terasa <span id="weather-apparent">--</span>°C
-                        </div>
-                        <div style="display:flex;justify-content:center;gap:12px;margin-top:12px;font-size:11px;color:var(--text-secondary);">
-                            <div style="text-align:center;">
-                                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">Angin</div>
-                                <div style="font-weight:600;color:var(--text);"><span id="weather-wind">--</span> km/h</div>
-                            </div>
-                            <div style="width:1px;background:var(--border);"></div>
-                            <div style="text-align:center;">
-                                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">UV</div>
-                                <div style="font-weight:600;color:var(--text);"><span id="weather-uv">--</span></div>
-                            </div>
-                            <div style="width:1px;background:var(--border);"></div>
-                            <div style="text-align:center;">
-                                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;">Hujan</div>
-                                <div style="font-weight:600;color:var(--text);"><span id="weather-rain">--</span> mm</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Right: Comparison indoor vs outdoor -->
-                    <div style="display: flex; flex-direction: column; gap: 10px;">
-
-                        <!-- Column headers -->
-                        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;padding-bottom:2px;">
-                            <div style="text-align:center;font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;">Dalam Ruangan</div>
-                            <div style="width:40px;"></div>
-                            <div style="text-align:center;font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;">Luar Ruangan</div>
-                        </div>
-
-                        <!-- Suhu comparison -->
-                        <div style="background:var(--bg-secondary);border-radius:10px;padding:12px 14px;border:1px solid var(--border);">
-                            <div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;margin-bottom:8px;">Suhu Udara</div>
-                            <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:6px;">
-                                <div style="text-align:center;">
-                                    <div style="font-size:24px;font-weight:700;color:var(--text);"><span id="compare-temp-in">--</span><span style="font-size:13px;font-weight:400;color:var(--text-secondary);">°C</span></div>
-                                    <div style="font-size:10px;color:var(--text-secondary);">Sensor ESP32</div>
-                                </div>
-                                <div id="temp-compare-badge" style="
-                                    padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;
-                                    background:rgba(148,163,184,0.1);color:#94a3b8;white-space:nowrap;text-align:center;
-                                ">—</div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:24px;font-weight:700;color:var(--text);"><span id="compare-temp-out">--</span><span style="font-size:13px;font-weight:400;color:var(--text-secondary);">°C</span></div>
-                                    <div style="font-size:10px;color:var(--text-secondary);">Open-Meteo</div>
-                                </div>
-                            </div>
-                            <div id="temp-delta-bar-wrap" style="margin-top:8px;display:none;">
-                                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);margin-bottom:3px;">
-                                    <span>Selisih suhu</span>
-                                    <span id="temp-delta-text">--</span>
-                                </div>
-                                <div style="height:4px;border-radius:2px;background:rgba(148,163,184,0.12);overflow:hidden;">
-                                    <div id="temp-delta-bar" style="height:100%;border-radius:2px;background:#3b82f6;width:0%;transition:width 0.6s ease;"></div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Kelembaban comparison -->
-                        <div style="background:var(--bg-secondary);border-radius:10px;padding:12px 14px;border:1px solid var(--border);">
-                            <div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;margin-bottom:8px;">Kelembaban Relatif</div>
-                            <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:6px;">
-                                <div style="text-align:center;">
-                                    <div style="font-size:24px;font-weight:700;color:var(--text);"><span id="compare-hum-in">--</span><span style="font-size:13px;font-weight:400;color:var(--text-secondary);">%</span></div>
-                                    <div style="font-size:10px;color:var(--text-secondary);">DHT22 Indoor</div>
-                                </div>
-                                <div id="hum-compare-badge" style="
-                                    padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;
-                                    background:rgba(148,163,184,0.1);color:#94a3b8;white-space:nowrap;text-align:center;
-                                ">—</div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:24px;font-weight:700;color:var(--text);"><span id="compare-hum-out">--</span><span style="font-size:13px;font-weight:400;color:var(--text-secondary);">%</span></div>
-                                    <div style="font-size:10px;color:var(--text-secondary);">Open-Meteo</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Extra outdoor details -->
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                            <div style="background:var(--bg-secondary);border-radius:10px;padding:10px 12px;border:1px solid var(--border);text-align:center;">
-                                <div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;margin-bottom:4px;">Tutupan Awan</div>
-                                <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="weather-cloud">--</span><span style="font-size:12px;font-weight:400;color:var(--text-secondary);">%</span></div>
-                                <div style="height:3px;border-radius:2px;background:rgba(148,163,184,0.12);margin-top:6px;overflow:hidden;">
-                                    <div id="cloud-bar" style="height:100%;border-radius:2px;background:#64748b;width:0%;transition:width 0.6s ease;"></div>
-                                </div>
-                            </div>
-                            <div style="background:var(--bg-secondary);border-radius:10px;padding:10px 12px;border:1px solid var(--border);text-align:center;">
-                                <div style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.3px;margin-bottom:4px;">Feels Like Luar</div>
-                                <div style="font-size:20px;font-weight:700;color:var(--text);"><span id="weather-apparent-2">--</span><span style="font-size:12px;font-weight:400;color:var(--text-secondary);">°C</span></div>
-                                <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">Apparent Temp</div>
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-
-                <!-- Footer: insight -->
-                <div id="weather-insight-bar" style="
-                    padding: 8px 18px;
-                    border-top: 1px solid var(--border);
-                    font-size: 12px; color: var(--text-secondary);
-                    display: flex; align-items: center; gap: 6px;
-                ">
-                    <span id="weather-insight-text">Menghubungkan ke Open-Meteo API...</span>
-                </div>
-            </div>
-            <!-- ===== END PANEL CUACA LUAR RUANGAN ===== -->
 
             <div class="stats-grid dashboard-grid">
 
@@ -269,6 +108,24 @@
                     <div class="stat-value" style="font-size: 24px;"><span id="dash-rssi">0</span> dBm</div>
                     <div class="stat-change">
                         <span>Uptime: <span id="dash-uptime" style="font-weight: bold;">0</span>s</span>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-title">Outdoor Weather</span>
+                        <div class="stat-icon" style="background: rgba(234, 179, 8, 0.2); color: #eab308; font-size: 16px;">
+                            <span id="dash-weather-icon">🌤️</span>
+                        </div>
+                    </div>
+                    <div class="stat-value"><span id="dash-outdoor-temp">--</span>°C</div>
+                    <div class="stat-change">
+                        <span id="dash-weather-desc">Loading...</span>
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                        <span style="flex:1; text-align:center; background: rgba(234, 179, 8, 0.08); border-radius: 6px; padding: 3px 0;">RH: <strong id="dash-outdoor-hum">--</strong>%</span>
+                        <span style="flex:1; text-align:center; background: rgba(234, 179, 8, 0.08); border-radius: 6px; padding: 3px 0;">Angin: <strong id="dash-outdoor-wind">--</strong></span>
+                        <span style="flex:1; text-align:center; background: rgba(234, 179, 8, 0.08); border-radius: 6px; padding: 3px 0;">UV: <strong id="dash-outdoor-uv">--</strong></span>
                     </div>
                 </div>
 
