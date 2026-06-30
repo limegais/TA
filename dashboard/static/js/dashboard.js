@@ -3454,7 +3454,7 @@
             
             // Auto hide after 5 seconds
             setTimeout(() => {
-                alertBox.classList.remove('show');
+                if (alertBox) alertBox.classList.remove('show');
             }, 5000);
             
             console.log('[ALERT] PERSON DETECTED:', {
