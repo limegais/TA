@@ -3340,13 +3340,19 @@
             const now = Date.now();
             if (now - lastDetectionTime < DETECTION_COOLDOWN) return;
             
+            const countEl = document.getElementById('alert-person-count');
+            const confEl = document.getElementById('alert-person-confidence');
+            const timeEl = document.getElementById('alert-time');
+            const alertBox = document.getElementById('detection-alert');
+            
+            if (!countEl || !confEl || !timeEl || !alertBox) return;
+            
             lastDetectionTime = now;
             
-            document.getElementById('alert-person-count').textContent = count;
-            document.getElementById('alert-person-confidence').textContent = confidence + '%';
-            document.getElementById('alert-time').textContent = new Date().toLocaleTimeString();
+            countEl.textContent = count;
+            confEl.textContent = confidence + '%';
+            timeEl.textContent = new Date().toLocaleTimeString();
             
-            const alertBox = document.getElementById('detection-alert');
             alertBox.classList.add('show');
             
             // Play 3-beep alert sound if enabled
@@ -5642,10 +5648,13 @@
                             
                             if(tempEl) tempEl.textContent = data.outdoor.temperature;
                             if(humEl) humEl.textContent = data.outdoor.humidity;
-                            if(windEl) windEl.textContent = data.outdoor.wind_speed + ' km/h';
+                            if(windEl) windEl.textContent = data.outdoor.wind_speed;
                             if(uvEl) uvEl.textContent = data.outdoor.uv_index;
                             if(descEl) descEl.textContent = data.outdoor.weather_desc;
                             if(iconEl) iconEl.textContent = data.outdoor.weather_icon;
+                        } else if (data.outdoor && data.outdoor.error) {
+                            var descEl = document.getElementById('dash-weather-desc');
+                            if(descEl) descEl.innerHTML = '<span style="color:#ef4444;font-size:10px;">' + data.outdoor.error + '</span>';
                         }
                     })
                     .catch(err => console.error('[WEATHER] Fetch error:', err));
