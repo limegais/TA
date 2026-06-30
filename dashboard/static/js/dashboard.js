@@ -5951,6 +5951,7 @@
                 if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }
             }, 2000);
         }
+        window.refreshOutdoorWeather = refreshOutdoorWeather;
 
         // Fetch pertama saat halaman load
         setTimeout(fetchOutdoorWeather, 800);
