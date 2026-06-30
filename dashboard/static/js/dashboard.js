@@ -1217,8 +1217,8 @@
                     }
 
                     if (field === 'power') {
-                        { var _el = document.getElementById('compare-avg-before'); if (_el) _el.textContent = summary.avg_before || '--'; }
-                        { var _el = document.getElementById('compare-avg-after'); if (_el) _el.textContent = summary.avg_after || '--'; }
+                        document.getElementById('compare-avg-before').textContent = summary.avg_before || '--';
+                        document.getElementById('compare-avg-after').textContent = summary.avg_after || '--';
                         var savingsEl = document.getElementById('compare-savings');
                         savingsEl.textContent = summary.savings_percent || '--';
                         if (summary.savings_percent > 0) {
@@ -1889,8 +1889,8 @@
                 text.textContent = 'Connected';
                 loginForm.style.display = 'none';
                 connInfo.style.display = 'block';
-                { var _el = document.getElementById('sbms-user-email'); if (_el) _el.textContent = userEmail || '-'; }
-                { var _el = document.getElementById('sbms-server-display'); if (_el) _el.textContent = serverUrl || '-'; }
+                document.getElementById('sbms-user-email').textContent = userEmail || '-';
+                document.getElementById('sbms-server-display').textContent = serverUrl || '-';
             } else {
                 panel.classList.remove('connected');
                 badge.className = 'sbms-conn-badge offline';
@@ -1936,9 +1936,6 @@
         var mlRunCount = 0;
 
         function refreshMLData() {
-            if (typeof loadAlgoConfig === 'function') {
-                loadAlgoConfig();
-            }
             fetch('/api/ml/status')
                 .then(r => r.json())
                 .then(data => {
@@ -2184,7 +2181,6 @@
             const entry = {
                 run: mlRunCount,
                 time: new Date().toLocaleTimeString(),
-                algo_config: currentAlgoConfig,
                 ga_fitness: data.ga_fitness || 0,
                 ga_temp: data.ga_temp || '--',
                 ga_fan: data.ga_fan || '--',
@@ -2204,18 +2200,16 @@
             if (!tbody) return;
 
             if (mlHistory.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #94a3b8;">No optimization data yet. Run optimization to start.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Run GA or PSO to start.</td></tr>';
                 return;
             }
 
             tbody.innerHTML = mlHistory.map(e => {
                 const getBadgeGA  = (f) => f >= 80 ? 'good' : f >= 50 ? 'mid' : 'low';
                 const getBadgePSO = (err) => err <= 100 ? 'good' : err <= 500 ? 'mid' : 'low'; // PSO: lower error = better
-                const cfgStr = (e.algo_config || 'ga_pso').toUpperCase().replace('_', ' | ');
                 return '<tr>' +
                     '<td>' + e.run + '</td>' +
                     '<td>' + e.time + '</td>' +
-                    '<td style="font-size: 11px; font-weight: 600; color: #64748b;">' + cfgStr + '</td>' +
                     '<td><span class="ml-badge ' + getBadgeGA(e.ga_fitness) + '">' + e.ga_fitness.toFixed(2) + '</span></td>' +
                     '<td>' + e.ga_temp + '\u00b0C</td>' +
                     '<td>' + e.ga_fan + '</td>' +
@@ -2233,7 +2227,7 @@
 
         // ==================== EXPORT FUNCTIONS ====================
         function downloadCSV(filename, csvContent) {
-            csvContent = "sep=,\n" + csvContent;
+            csvContent = "sep=,\\n" + csvContent;
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
@@ -2247,10 +2241,9 @@
                 showToast('No optimization data to export', 'error');
                 return;
             }
-            let csv = 'Run,Time,Mode,AC Fitness,AC Temp (C),AC Fan Speed,Lamp Fitness,Brightness (%),Combined\n';
+            let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\\n';
             mlHistory.forEach(e => {
-                const cfgStr = (e.algo_config || 'ga_pso').toUpperCase().replace('_', ' | ');
-                csv += e.run + ',"' + e.time + '","' + cfgStr + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\n';
+                csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\\n';
             });
             downloadCSV('ml_optimization_history.csv', csv);
             showToast('ML history exported', 'success');
@@ -2262,14 +2255,14 @@
                 showToast('No logs to export', 'error');
                 return;
             }
-            let csv = 'Time,Level,Message\n';
+            let csv = 'Time,Level,Message\\n';
             Array.from(container.children).forEach(entry => {
                 const text = entry.textContent || '';
                 const timeMatch = text.match(/\\[(.+?)\\]/);
                 const time = timeMatch ? timeMatch[1] : '';
                 const msg = text.replace(/\\[.+?\\]\\s*/, '').replace(/"/g, '""');
                 const level = entry.className.replace('log-entry ', '').trim();
-                csv += '"' + time + '","' + level + '","' + msg + '"\n';
+                csv += '"' + time + '","' + level + '","' + msg + '"\\n';
             });
             downloadCSV('system_logs.csv', csv);
             showToast('Logs exported', 'success');
@@ -2324,10 +2317,10 @@
                         showToast('No feedback data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Rating,Occupancy Count,Comment\n';
+                    let csv = 'Time,Rating,Occupancy Count,Comment\\n';
                     rows.forEach(item => {
                         const comment = (item.comment || '').replace(/"/g, '""');
-                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\n';
+                        csv += '"' + item.time + '",' + item.rating + ',' + item.occupancy_count + ',"' + comment + '"\\n';
                     });
                     downloadCSV('occupancy_feedback.csv', csv);
                     showToast('Feedback exported', 'success');
@@ -2344,7 +2337,7 @@
                         showToast('No energy data to export', 'error');
                         return;
                     }
-                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\n';
+                    let csv = 'Time,Power (W),Voltage (V),Energy (kWh)\\n';
                     const times = data.power.map(p => p.time);
                     const powers = data.power || [];
                     const voltages = data.voltage || [];
@@ -2353,7 +2346,7 @@
                         const pw = powers[i] ? powers[i].value : '';
                         const vl = voltages[i] ? voltages[i].value : '';
                         const en = energies[i] ? energies[i].value : '';
-                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\n';
+                        csv += '"' + t + '",' + pw + ',' + vl + ',' + en + '\\n';
                     });
                     downloadCSV('energy_history_' + period + '.csv', csv);
                     showToast('Energy data exported (' + period + ')', 'success');
@@ -2368,10 +2361,10 @@
                 showToast('No data to export for ' + chartName, 'error');
                 return;
             }
-            let csv = 'Time,' + valueLabel + '\n';
+            let csv = 'Time,' + valueLabel + '\\n';
             chart.data.labels.forEach((label, i) => {
                 const val = chart.data.datasets[0].data[i];
-                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\n';
+                csv += '"' + label + '",' + (val !== null && val !== undefined ? val : '') + '\\n';
             });
             downloadCSV(chartName + '_data.csv', csv);
             showToast(chartName + ' data exported', 'success');
@@ -2385,14 +2378,14 @@
                 return;
             }
             const dsNames = chart.data.datasets.map(ds => ds.label || valueLabel);
-            let csv = 'Time,' + dsNames.join(',') + '\n';
+            let csv = 'Time,' + dsNames.join(',') + '\\n';
             chart.data.labels.forEach((label, i) => {
                 let row = '"' + label + '"';
                 chart.data.datasets.forEach(ds => {
                     const val = ds.data[i];
                     row += ',' + (val !== null && val !== undefined ? val : '');
                 });
-                csv += row + '\n';
+                csv += row + '\\n';
             });
             downloadCSV(chartName + '_compare.csv', csv);
             showToast(chartName + ' comparison exported', 'success');
@@ -2421,100 +2414,8 @@
             }
         }
 
-        let currentAlgoConfig = 'ga_pso';
-
-        function updateAlgoUI(config, acAlgo, lampAlgo) {
-            // Update active card
-            document.querySelectorAll('.algo-card').forEach(card => {
-                if (card.dataset.config === config) {
-                    card.classList.add('active');
-                    card.style.border = '2px solid #3b82f6';
-                    card.style.background = 'rgba(59, 130, 246, 0.05)';
-                    card.querySelector('.algo-badge').style.display = 'block';
-                } else {
-                    card.classList.remove('active');
-                    card.style.border = '1px solid #e2e8f0';
-                    card.style.background = 'transparent';
-                    card.querySelector('.algo-badge').style.display = 'none';
-                }
-            });
-
-            // Update Summary Card Titles & Icons
-            const acTitle = document.getElementById('summary-ac-title');
-            const acIcon = document.getElementById('summary-ac-icon');
-            const lampTitle = document.getElementById('summary-lamp-title');
-            const lampIcon = document.getElementById('summary-lamp-icon');
-            
-            const chartAcTitle = document.getElementById('chart-ac-title');
-            const chartLampTitle = document.getElementById('chart-lamp-title');
-            const histAcTitle = document.getElementById('hist-ac-title');
-            const histLampTitle = document.getElementById('hist-lamp-title');
-
-            if (acTitle) {
-                const acName = acAlgo.toUpperCase();
-                acTitle.innerText = acName + ' -> AC';
-                acIcon.innerText = acName;
-                if (chartAcTitle) chartAcTitle.innerText = acName + ' Fitness Convergence (AC Optimization)';
-                if (histAcTitle) histAcTitle.innerText = acName;
-            }
-
-            if (lampTitle) {
-                const lampName = lampAlgo.toUpperCase();
-                lampTitle.innerText = lampName + ' -> Lamp';
-                lampIcon.innerText = lampName;
-                if (chartLampTitle) chartLampTitle.innerText = lampName + ' — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)';
-                if (histLampTitle) histLampTitle.innerText = lampName;
-            }
-        }
-
-        function loadAlgoConfig() {
-            fetch('/api/ml/algo')
-                .then(r => r.json())
-                .then(d => {
-                    if (d.status === 'success') {
-                        currentAlgoConfig = d.config;
-                        updateAlgoUI(d.config, d.ac_algo, d.lamp_algo);
-                    }
-                })
-                .catch(e => console.error('Failed to load algo config:', e));
-        }
-
-        function setAlgoConfig(config) {
-            const statusEl = document.getElementById('algo-status');
-            statusEl.style.opacity = '1';
-            statusEl.innerText = 'Saving...';
-            statusEl.style.color = '#f59e0b'; // amber
-
-            fetch('/api/ml/algo', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ config: config })
-            })
-            .then(r => r.json())
-            .then(d => {
-                if (d.status === 'success') {
-                    currentAlgoConfig = d.config;
-                    updateAlgoUI(d.config, d.ac_algo, d.lamp_algo);
-                    statusEl.innerText = 'Saved';
-                    statusEl.style.color = '#10b981'; // green
-                    setTimeout(() => { statusEl.style.opacity = '0'; }, 2000);
-                    showToast('Algorithm updated: ' + d.config, 'success');
-                } else {
-                    statusEl.innerText = 'Failed';
-                    statusEl.style.color = '#ef4444'; // red
-                    showToast('Error: ' + d.message, 'error');
-                }
-            })
-            .catch(e => {
-                statusEl.innerText = 'Failed';
-                statusEl.style.color = '#ef4444';
-                showToast('Error: ' + e, 'error');
-            });
-        }
-        window.setAlgoConfig = setAlgoConfig;
-
         function runGAOptimization() {
-            showToast('Starting AC optimization...', 'success');
+            showToast('Starting GA \u2192 AC optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2523,16 +2424,16 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('AC optimization triggered!', 'success');
+                    showToast('GA optimization triggered!', 'success');
                 } else {
-                    showToast('AC opt error: ' + d.message, 'error');
+                    showToast('GA error: ' + d.message, 'error');
                 }
             })
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
         function runPSOOptimization() {
-            showToast('Starting Lamp optimization...', 'success');
+            showToast('Starting PSO \u2192 Lamp optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2541,16 +2442,16 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('Lamp optimization triggered!', 'success');
+                    showToast('PSO optimization triggered!', 'success');
                 } else {
-                    showToast('Lamp opt error: ' + d.message, 'error');
+                    showToast('PSO error: ' + d.message, 'error');
                 }
             })
             .catch(e => showToast('Error: ' + e, 'error'));
         }
 
         function runBothOptimization() {
-            showToast('Starting AC + Lamp optimization...', 'success');
+            showToast('Starting GA + PSO optimization...', 'success');
             fetch('/api/ml/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2562,7 +2463,7 @@
             .then(r => r.json())
             .then(d => {
                 if (d.status === 'success') {
-                    showToast('AC + Lamp optimization triggered!', 'success');
+                    showToast('GA + PSO optimization triggered!', 'success');
                 } else {
                     showToast('Error: ' + d.message, 'error');
                 }
@@ -2652,15 +2553,15 @@
                     if (data.status === 'active') {
                         statusEl.textContent = 'Active';
                         statusEl.style.color = '#3b82f6';
-                        { var _el = document.getElementById('cam-resolution'); if (_el) _el.textContent = data.width + ' x ' + data.height; }
-                        { var _el = document.getElementById('cam-fps'); if (_el) _el.textContent = data.fps + ' FPS'; }
+                        document.getElementById('cam-resolution').textContent = data.width + ' x ' + data.height;
+                        document.getElementById('cam-fps').textContent = data.fps + ' FPS';
                     } else {
                         statusEl.textContent = 'Inactive';
                         statusEl.style.color = '#1e40af';
                     }
                 })
                 .catch(e => {
-                    { var _el = document.getElementById('cam-status'); if (_el) _el.textContent = 'Error'; }
+                    document.getElementById('cam-status').textContent = 'Error';
                     document.getElementById('cam-status').style.color = '#1e40af';
                 });
         }
@@ -2673,17 +2574,17 @@
 
         // ==================== AC CONTROLS ====================
         function updateACTemp(value) {
-            { var _el = document.getElementById('ac-temp-display'); if (_el) _el.textContent = value; }
+            document.getElementById('ac-temp-display').textContent = value;
             saveSettings();
         }
 
         function updateACRH(value) {
-            { var _el = document.getElementById('ac-rh-display'); if (_el) _el.textContent = value; }
+            document.getElementById('ac-rh-display').textContent = value;
             saveSettings();
         }
 
         function updateFanSpeed(value) {
-            { var _el = document.getElementById('fan-speed-display'); if (_el) _el.textContent = value; }
+            document.getElementById('fan-speed-display').textContent = value;
             saveSettings();
         }
 
@@ -2814,14 +2715,14 @@
 
         // ==================== LAMP CONTROLS ====================
         function updateBrightness(lampNum, value) {
-            { var _el = document.getElementById('brightness-display-' + lampNum); if (_el) _el.textContent = value; }
+            document.getElementById('brightness-display-' + lampNum).textContent = value;
             saveSettings();
         }
 
         function syncAllSliders() {
             const val = document.getElementById('brightness-slider-1').value;
             document.getElementById('brightness-slider-2').value = val;
-            { var _el = document.getElementById('brightness-display-2'); if (_el) _el.textContent = val; }
+            document.getElementById('brightness-display-2').textContent = val;
             saveSettings();
         }
 
@@ -3199,7 +3100,7 @@
         }
 
         function resetAllIRCodes() {
-            if (!confirm('[WARNING] Reset all learned IR codes?\n\nThis will delete ALL saved remote buttons!')) {
+            if (!confirm('[WARNING] Reset all learned IR codes?\\n\\nThis will delete ALL saved remote buttons!')) {
                 return;
             }
             
@@ -3289,43 +3190,43 @@
                 .then(data => {
                     const codes = data.codes || data;
                     
-                    let debugInfo = '═══════════════════════════════════\n';
-                    debugInfo += '  IR CODES DEBUG INFO\n';
-                    debugInfo += '═══════════════════════════════════\n\n';
+                    let debugInfo = '═══════════════════════════════════\\n';
+                    debugInfo += '  IR CODES DEBUG INFO\\n';
+                    debugInfo += '═══════════════════════════════════\\n\\n';
                     
                     if (Object.keys(codes).length === 0) {
-                        debugInfo += '[WARN] No IR codes learned yet\n\n';
-                        debugInfo += 'Steps to learn:\n';
-                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\n';
-                        debugInfo += '2. Click \"Learn\" button\n';
-                        debugInfo += '3. Press remote button (hold 2-3 seconds)\n';
-                        debugInfo += '4. Wait for \"Learned [OK]\" status\n';
-                        debugInfo += '5. Click \"Send\" to test\n';
+                        debugInfo += '[WARN] No IR codes learned yet\\n\\n';
+                        debugInfo += 'Steps to learn:\\n';
+                        debugInfo += '1. Select protocol (RAW recommended for Mitsubishi)\\n';
+                        debugInfo += '2. Click \"Learn\" button\\n';
+                        debugInfo += '3. Press remote button (hold 2-3 seconds)\\n';
+                        debugInfo += '4. Wait for \"Learned [OK]\" status\\n';
+                        debugInfo += '5. Click \"Send\" to test\\n';
                     } else {
                         Object.keys(codes).forEach(button => {
                             const codeStr = codes[button];
                             const codePreview = codeStr.substring(0, 60) + (codeStr.length > 60 ? '...' : '');
-                            debugInfo += '[IR] ' + button + ':\n';
-                            debugInfo += '   Code: ' + codePreview + '\n';
-                            debugInfo += '   Length: ' + codeStr.length + ' chars\n';
+                            debugInfo += '[IR] ' + button + ':\\n';
+                            debugInfo += '   Code: ' + codePreview + '\\n';
+                            debugInfo += '   Length: ' + codeStr.length + ' chars\\n';
                             
                             // Parse protocol
                             if (codeStr.includes(':')) {
                                 const protocol = codeStr.split(':')[0];
-                                debugInfo += '   Protocol: ' + protocol + '\n';
+                                debugInfo += '   Protocol: ' + protocol + '\\n';
                             }
-                            debugInfo += '\n';
+                            debugInfo += '\\n';
                         });
                         
-                        debugInfo += '═══════════════════════════════════\n';
-                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\n';
+                        debugInfo += '═══════════════════════════════════\\n';
+                        debugInfo += 'Total: ' + Object.keys(codes).length + ' codes\\n';
                     }
                     
-                    debugInfo += '\n[TIP] TROUBLESHOOTING:\n';
-                    debugInfo += '- If AC not responding: Use RAW protocol\n';
-                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\n';
-                    debugInfo += '- If code too short: Press remote longer (2-3s)\n';
-                    debugInfo += '- Distance to AC: 1-3 meters, direct line\n';
+                    debugInfo += '\\n[TIP] TROUBLESHOOTING:\\n';
+                    debugInfo += '- If AC not responding: Use RAW protocol\\n';
+                    debugInfo += '- If IR LED not blinking: Check ESP32 connection\\n';
+                    debugInfo += '- If code too short: Press remote longer (2-3s)\\n';
+                    debugInfo += '- Distance to AC: 1-3 meters, direct line\\n';
                     
                     alert(debugInfo);
                     console.log('IR Debug Info:', codes);
@@ -3334,7 +3235,7 @@
         }
 
         function testAllIRCodes() {
-            if (!confirm('Test all learned IR codes?\n\nThis will send all codes one by one with 2 second delay.')) {
+            if (!confirm('Test all learned IR codes?\\n\\nThis will send all codes one by one with 2 second delay.')) {
                 return;
             }
             
@@ -3440,12 +3341,12 @@
             
             lastDetectionTime = now;
             
-            { var _el = document.getElementById('alert-person-count'); if (_el) _el.textContent = count; }
-            { var _el = document.getElementById('alert-person-confidence'); if (_el) _el.textContent = confidence + '%'; }
-            { var _el = document.getElementById('alert-time'); if (_el) _el.textContent = new Date().toLocaleTimeString(); }
+            document.getElementById('alert-person-count').textContent = count;
+            document.getElementById('alert-person-confidence').textContent = confidence + '%';
+            document.getElementById('alert-time').textContent = new Date().toLocaleTimeString();
             
             const alertBox = document.getElementById('detection-alert');
-            if (alertBox) alertBox.classList.add('show');
+            alertBox.classList.add('show');
             
             // Play 3-beep alert sound if enabled
             if (detectionSoundEnabled) {
@@ -3454,7 +3355,7 @@
             
             // Auto hide after 5 seconds
             setTimeout(() => {
-                if (alertBox) alertBox.classList.remove('show');
+                alertBox.classList.remove('show');
             }, 5000);
             
             console.log('[ALERT] PERSON DETECTED:', {
@@ -3484,18 +3385,6 @@
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
             const toastMessage = document.getElementById('toast-message');
-            if (!toast || !toastMessage) {
-                // Fallback: buat toast dinamis di pojok kanan atas, TANPA alert() native
-                console.log('[Toast]', type, message);
-                var _t = document.createElement('div');
-                var _bg = type === 'error' ? '#ef4444' : (type === 'info' ? '#3b82f6' : '#22c55e');
-                _t.style.cssText = 'position:fixed;top:18px;right:18px;z-index:99999;background:' + _bg + ';color:#fff;padding:12px 20px;border-radius:10px;font-size:14px;max-width:340px;box-shadow:0 4px 20px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.3s;pointer-events:none;';
-                _t.textContent = message;
-                document.body.appendChild(_t);
-                requestAnimationFrame(function(){ _t.style.opacity = '1'; });
-                setTimeout(function(){ _t.style.opacity = '0'; setTimeout(function(){ if (_t.parentNode) _t.parentNode.removeChild(_t); }, 350); }, 3500);
-                return;
-            }
             const icon = type === 'success' ? 'check' : (type === 'info' ? 'info' : 'exclamation');
             
             toastMessage.innerHTML = message;
@@ -3868,7 +3757,7 @@
                     //  daily-cost diisi langsung dari MySQL via socket)
 
                     updateModeBadges();
-                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
+                } catch(e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display='block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); } });
         }
 
         function updateLogs() {
@@ -3889,11 +3778,11 @@
         // ==================== DEVICE STATUS ====================
         function diagLog(msg) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent += msg + '\n';
+            if (el) el.textContent += msg + '\\n';
         }
         function diagClear(title) {
             var el = document.getElementById('diag-result');
-            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\n';
+            if (el) el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + title + '\\n';
         }
 
         function checkMqttStatus(showDetail) {
@@ -4533,11 +4422,11 @@
             if (_recRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
             var rows = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
             if (rows.length === 0) { showToast('No data for ' + device, 'error'); return; }
-            var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\n';
+            var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
             var body = rows.map(function(r) {
                 return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                        r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
             var fname = 'energy' + suffix + '_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
@@ -4686,10 +4575,10 @@
 
         function tempExportCSV() {
             if (_tempRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
-            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\n';
+            var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
             var body = _tempRows.map(function(r) {
                 return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'temp_humidity_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -4820,10 +4709,10 @@
 
         function luxExportCSV() {
             if (_luxRows.length === 0) { showToast('No recorded data yet', 'error'); return; }
-            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
+            var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
             var body = _luxRows.map(function(r) {
                 return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'lux_brightness_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '_' +
@@ -4984,10 +4873,10 @@
 
         function occExportCSV() {
             if (_occRows.length === 0) { showToast('No occupancy data yet', 'error'); return; }
-            var header = 'Time,Hour,Person Count,Confidence\n';
+            var header = 'Time,Hour,Person Count,Confidence\\n';
             var body = _occRows.map(function(r) {
                 return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf;
-            }).join('\n');
+            }).join('\\n');
             var now = new Date();
             var fname = 'occupancy_' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') +
                         String(now.getDate()).padStart(2,'0') + '.csv';
@@ -5085,14 +4974,8 @@
                 }
             }
 
-            // Real-time optimization updates
+            // Real-time optimization (GA->AC / PSO->Lamp) updates
             if (data.type === 'system') {
-                if (data.data.algo_config && data.data.algo_config !== currentAlgoConfig) {
-                    currentAlgoConfig = data.data.algo_config;
-                    if (typeof updateAlgoUI === 'function') {
-                        updateAlgoUI(currentAlgoConfig, data.data.ac_algo, data.data.lamp_algo);
-                    }
-                }
                 const gaFitness = parseFloat(data.data.ga_fitness) || 0;
                 const psoFitness = parseFloat(data.data.pso_fitness) || 0;
                 const runs = data.data.optimization_runs || 0;
@@ -5492,7 +5375,7 @@
                         if (p) {
                             p.style.display = 'block';
                             var res = document.getElementById('diag-result');
-                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\nBroker: ' + d.broker + '\nError: ' + (d.error || 'Unknown') + '\n\nClick "Test Frontend" or "Test MQTT Broker" button below.';
+                            if (res) res.textContent = '[AUTO-DIAGNOSE] MQTT NOT CONNECTED!\\nBroker: ' + d.broker + '\\nError: ' + (d.error || 'Unknown') + '\\n\\nClick "Test Frontend" or "Test MQTT Broker" button below.';
                         }
                     }
                 }).catch(function() {});
@@ -5618,11 +5501,11 @@
                         var base = (device && device !== 'all') ? _recRows.filter(function(r){ return r.device === device; }) : _recRows;
                         var rows = drpFilter(base, from, to);
                         if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                        var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\n';
+                        var header = 'Time,Perangkat,Voltage (V),Current (A),Power Active (W),Energy (kWh),Power Reaktif (VAR),Power Semu (VA),Frequency (Hz),Power Factor\\n';
                         var body = rows.map(function(r) {
                             return '"' + r.ts + '",' + r.device + ',' + r.voltage + ',' + r.arus + ',' +
                                    r.daya + ',' + r.energi + ',' + r.reaktif + ',' + r.semu + ',' + r.freq + ',' + r.pf;
-                        }).join('\n');
+                        }).join('\\n');
                         var suffix = (device && device !== 'all') ? '_' + device.toLowerCase() : '';
                         var fname = 'energy' + suffix + '_' + from + '_to_' + to + '.csv';
                         downloadCSV(fname, header + body);
@@ -5635,8 +5518,8 @@
                 showDateRangePicker('Export temperature & humidity recording', _tempRows, function(from, to) {
                     var rows = drpFilter(_tempRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\n');
+                    var header = 'Time,Temp Rata2 (C),Humidity (%),Sensor T1 (C),Sensor T2 (C),Sensor T3 (C),Set Temp (C),Fan Speed,Mode AC,Control\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.temp + ',' + r.hum + ',' + r.t1 + ',' + r.t2 + ',' + r.t3 + ',' + r.setT + ',"' + r.fan + '",' + r.mode + ',' + r.ctrl; }).join('\\n');
                     var fname = 'temp_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' rows exported: ' + fname, 'success');
@@ -5647,8 +5530,8 @@
                 showDateRangePicker('Export rekaman lux & brightness', _luxRows, function(from, to) {
                     var rows = drpFilter(_luxRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\n');
+                    var header = 'Time,Lux 1 (lx),Lux 2 (lx),Lux 3 (lx),Avg Lux (lx),Brightness 1 (%),Brightness 2 (%)\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + r.lux1 + ',' + r.lux2 + ',' + r.lux3 + ',' + r.avg + ',' + r.b1 + ',' + r.b2; }).join('\\n');
                     var fname = 'lux_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' rows exported: ' + fname, 'success');
@@ -5659,8 +5542,8 @@
                 showDateRangePicker('Export rekaman occupancy', _occRows, function(from, to) {
                     var rows = drpFilter(_occRows, from, to);
                     if (rows.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    var header = 'Time,Hour,Person Count,Confidence\n';
-                    var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\n');
+                    var header = 'Time,Hour,Person Count,Confidence\\n';
+                    var body = rows.map(function(r){ return '"' + r.ts + '",' + String(r.hour).padStart(2,'0') + ':00,' + r.count + ',' + r.conf; }).join('\\n');
                     var fname = 'occupancy_' + from + '_to_' + to + '.csv';
                     downloadCSV(fname, header + body);
                     showToast(rows.length + ' data exported: ' + fname, 'success');
@@ -5674,7 +5557,7 @@
                 }
                 var pseudoRows = chart.data.labels.map(function(l){ return {ts: l}; });
                 showDateRangePicker('Export chart: ' + valueLabel, pseudoRows, function(from, to) {
-                    var header = 'Time,' + valueLabel + '\n';
+                    var header = 'Time,' + valueLabel + '\\n';
                     var lines = [];
                     chart.data.labels.forEach(function(label, i) {
                         var d = label.substring(0,10);
@@ -5683,7 +5566,7 @@
                         lines.push('"' + label + '",' + (val !== null && val !== undefined ? val : ''));
                     });
                     if (lines.length === 0) { showToast('No data for range ' + from + ' to ' + to, 'error'); return; }
-                    downloadCSV(chartName + '_' + from + '_to_' + to + '.csv', header + lines.join('\n') + '\n');
+                    downloadCSV(chartName + '_' + from + '_to_' + to + '.csv', header + lines.join('\\n') + '\\n');
                     showToast(lines.length + ' points exported', 'success');
                 });
             };
@@ -5737,235 +5620,13 @@
                             URL.revokeObjectURL(a.href);
                         });
                     } else {
-                        return r.json().then(function(err) {
-                            showToast(err.error || err.message || 'Export failed', 'error');
-                        }).catch(function() {
-                            showToast('Export failed: Server Error', 'error');
+                        return r.json().then(function(j) {
+                            showToast((j && j.error) ? j.error : 'Failed to export data', 'error');
                         });
                     }
                 }).catch(function(e) { showToast('Error: ' + e, 'error'); });
             };
 
-            console.log('[OK] Dashboard Ready!');\r
-        };\r
-\r
-        // ==================== OUTDOOR WEATHER (Open-Meteo, UNS Surakarta) ====================\r
-        var _weatherRefreshTimer = null;\r
-\r
-        function updateWeatherUI(data) {\r
-            var out = data.outdoor || {};\r
-            var inn = data.indoor  || {};\r
-\r
-            // Helper: safe set text\r
-            function setText(id, val, fallback) {\r
-                var el = document.getElementById(id);\r
-                if (el) el.textContent = (val !== null && val !== undefined) ? val : (fallback || '--');\r
-            }\r
-\r
-            // --- Outdoor card ---\r
-            setText('weather-icon',      out.weather_icon || '🌤️');\r
-            setText('weather-desc',      out.weather_desc || '--');\r
-            setText('weather-temp-out',  out.temperature  !== null ? out.temperature  : '--');\r
-            setText('weather-apparent',  out.apparent_temp !== null ? out.apparent_temp : '--');\r
-            setText('weather-apparent-2',out.apparent_temp !== null ? out.apparent_temp : '--');\r
-            setText('weather-wind',      out.wind_speed   !== null ? out.wind_speed   : '--');\r
-            setText('weather-uv',        out.uv_index     !== null ? out.uv_index     : '--');\r
-            setText('weather-rain',      out.precipitation !== null ? out.precipitation : '--');\r
-            setText('weather-cloud',     out.cloud_cover  !== null ? out.cloud_cover  : '--');\r
-            setText('weather-last-update', out.last_updated ? 'Update: ' + out.last_updated : 'Belum tersedia');\r
-\r
-            // Cloud bar\r
-            var cloudBar = document.getElementById('cloud-bar');\r
-            if (cloudBar && out.cloud_cover !== null) {\r
-                cloudBar.style.width = Math.min(100, out.cloud_cover) + '%';\r
-            }\r
-\r
-            // --- Comparison: Suhu ---\r
-            var tempIn  = parseFloat(inn.temperature) || 0;\r
-            var tempOut = parseFloat(out.temperature) || 0;\r
-            setText('compare-temp-in',  tempIn.toFixed(1));\r
-            setText('compare-temp-out', tempOut.toFixed(1));\r
-\r
-            var tempBadge = document.getElementById('temp-compare-badge');\r
-            var deltaTemp = tempIn - tempOut;\r
-            if (tempBadge && out.temperature !== null) {\r
-                var absDelta = Math.abs(deltaTemp).toFixed(1);\r
-                if (deltaTemp > 1.5) {\r
-                    tempBadge.textContent = '🏠 Lebih dingin +' + absDelta + '°';\r
-                    tempBadge.style.background = 'rgba(59,130,246,0.18)';\r
-                    tempBadge.style.color = '#3b82f6';\r
-                } else if (deltaTemp < -1.5) {\r
-                    tempBadge.textContent = '🌍 Lebih dingin +' + absDelta + '°';\r
-                    tempBadge.style.background = 'rgba(239,68,68,0.15)';\r
-                    tempBadge.style.color = '#ef4444';\r
-                } else {\r
-                    tempBadge.textContent = '≈ Sama';\r
-                    tempBadge.style.background = 'rgba(16,185,129,0.15)';\r
-                    tempBadge.style.color = '#10b981';\r
-                }\r
-            }\r
-\r
-            // Delta bar\r
-            var deltaWrap = document.getElementById('temp-delta-bar-wrap');\r
-            var deltaBar  = document.getElementById('temp-delta-bar');\r
-            var deltaText = document.getElementById('temp-delta-text');\r
-            if (deltaWrap && out.temperature !== null) {\r
-                deltaWrap.style.display = 'block';\r
-                var pct = Math.min(100, Math.abs(deltaTemp) / 15 * 100);\r
-                if (deltaBar) deltaBar.style.width = pct + '%';\r
-                if (deltaText) deltaText.textContent = (deltaTemp >= 0 ? 'Indoor lebih dingin ' : 'Outdoor lebih dingin ') + Math.abs(deltaTemp).toFixed(1) + '°C';\r
-            }\r
-\r
-            // --- Comparison: Kelembaban ---\r
-            var humIn  = parseFloat(inn.humidity) || 0;\r
-            var humOut = parseFloat(out.humidity) || 0;\r
-            setText('compare-hum-in',  humIn.toFixed(0));\r
-            setText('compare-hum-out', humOut.toFixed(0));\r
-\r
-            var humBadge = document.getElementById('hum-compare-badge');\r
-            if (humBadge && out.humidity !== null) {\r
-                var deltaHum = humIn - humOut;\r
-                var absHum = Math.abs(deltaHum).toFixed(0);\r
-                if (deltaHum > 5) {
-                    humBadge.textContent = 'Lebih lembab +' + absHum + '%';
-                    humBadge.style.background = 'rgba(14,165,233,0.18)';
-                    humBadge.style.color = '#0ea5e9';
-                } else if (deltaHum < -5) {
-                    humBadge.textContent = 'Lebih lembab +' + absHum + '%';
-                    humBadge.style.background = 'rgba(239,68,68,0.15)';
-                    humBadge.style.color = '#ef4444';
-                } else {
-                    humBadge.textContent = '= Sama';
-                    humBadge.style.background = 'rgba(16,185,129,0.15)';
-                    humBadge.style.color = '#10b981';
-                }
-            }
-
-            // --- Status badge ---
-            var statusBadge = document.getElementById('weather-status-badge');
-            if (statusBadge) {
-                if (out.fetch_ok) {
-                    statusBadge.textContent = 'Online';
-                    statusBadge.style.background = 'rgba(16,185,129,0.12)';
-                    statusBadge.style.color = '#10b981';
-                } else {
-                    statusBadge.textContent = 'Offline';
-                    statusBadge.style.background = 'rgba(239,68,68,0.12)';
-                    statusBadge.style.color = '#ef4444';
-                }
-            }
-
-            // --- Smart Insight ---
-            var insightEl = document.getElementById('weather-insight-text');
-            if (insightEl && out.temperature !== null) {
-                var insights = [];
-                var tempO = out.temperature;
-                var humO  = out.humidity;
-                var uvO   = out.uv_index;
-                var rainO = out.precipitation;
-                var windO = out.wind_speed;
-                var desc  = out.weather_desc || '';
-
-                if (rainO > 0) {
-                    insights.push('Hujan ' + rainO + 'mm terdeteksi — pastikan ventilasi tertutup untuk menjaga kelembaban ruangan.');
-                } else if (tempO > 33) {
-                    insights.push('Suhu luar sangat panas (' + tempO + '°C) — AC bekerja lebih keras. GA akan merekomendasikan setpoint lebih rendah.');
-                } else if (tempO > 28 && deltaTemp < 0) {
-                    insights.push('Cuaca panas di luar (' + tempO + '°C) — ruangan Anda lebih dingin. AC berjalan optimal.');
-                } else if (tempO < 25) {
-                    insights.push('Cuaca sejuk di luar (' + tempO + '°C) — pertimbangkan membuka ventilasi untuk hemat energi.');
-                }
-                if (uvO >= 8) {
-                    insights.push('Indeks UV sangat tinggi (' + uvO + ') — hindari paparan sinar matahari langsung.');
-                } else if (uvO >= 5) {
-                    insights.push('Indeks UV tinggi (' + uvO + ') — gunakan perlindungan jika berada di luar.');
-                }
-                if (humO > 85) {
-                    insights.push('Kelembaban luar sangat tinggi (' + humO + '%) — potensi kondensasi pada kaca jendela.');
-                }
-                if (windO > 30) {
-                    insights.push('Angin kencang (' + windO + ' km/h) terdeteksi di area UNS.');
-                }
-
-                insightEl.textContent = insights.length > 0
-                    ? insights[0]
-                    : 'Kondisi cuaca ' + (desc || 'normal') + ' di UNS Surakarta. Suhu luar: ' + tempO + '°C, Kelembaban: ' + humO + '%.';
-            }
-        }
-
-        function fetchOutdoorWeather(retryCount) {
-            retryCount = retryCount || 0;
-            var MAX_RETRIES = 3;
-            fetch('/api/outdoor-weather')
-                .then(function(r) {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    return r.json();
-                })
-                .then(function(data) {
-                    try {
-                        updateWeatherUI(data);
-                        var out = data.outdoor || {};
-                        if (!out.fetch_ok && out.temperature === null) {
-                            var descEl = document.getElementById('weather-desc');
-                            if (descEl) descEl.textContent = 'Menunggu data...';
-                            var insightEl = document.getElementById('weather-insight-text');
-                            if (insightEl) insightEl.textContent = 'Server belum bisa mengakses Open-Meteo API. Periksa koneksi internet server.';
-                            setTimeout(function() { fetchOutdoorWeather(0); }, 15000);
-                        }
-                    } catch(e) {
-                        console.warn('[WEATHER] UI update error:', e);
-                    }
-                })
-                .catch(function(e) {
-                    console.warn('[WEATHER] Fetch failed (attempt ' + (retryCount+1) + '):', e.message);
-                    
-                    var statusBadge = document.getElementById('weather-status-badge');
-                    var descEl = document.getElementById('weather-desc');
-                    var insightEl = document.getElementById('weather-insight-text');
-                    
-                    if (retryCount < MAX_RETRIES) {
-                        if (statusBadge) {
-                            statusBadge.textContent = 'Retry ' + (retryCount+1) + '/3';
-                            statusBadge.style.background = 'rgba(245,158,11,0.12)';
-                            statusBadge.style.color = '#f59e0b';
-                        }
-                        if (descEl) descEl.textContent = 'Koneksi lambat...';
-                        if (insightEl) insightEl.textContent = 'Gagal memuat (Percobaan ' + (retryCount+1) + '). Akan mencoba lagi otomatis...';
-                        
-                        var delay = (retryCount + 1) * 3000;
-                        setTimeout(function() { fetchOutdoorWeather(retryCount + 1); }, delay);
-                        return;
-                    }
-                    
-                    if (statusBadge) {
-                        statusBadge.textContent = 'Error';
-                        statusBadge.style.background = 'rgba(239,68,68,0.12)';
-                        statusBadge.style.color = '#ef4444';
-                    }
-                    if (descEl) descEl.textContent = 'Tidak tersedia';
-                    if (insightEl) insightEl.textContent = 'Gagal memuat cuaca setelah 3x percobaan. Periksa koneksi internet server atau klik tombol refresh.';
-                    setTimeout(function() { fetchOutdoorWeather(0); }, 30000);
-                });
-        }
-
-        function refreshOutdoorWeather() {
-            var btn = document.querySelector('[onclick="refreshOutdoorWeather()"]');
-            if (btn) { btn.style.opacity = '0.4'; btn.style.pointerEvents = 'none'; }
-            var statusBadge = document.getElementById('weather-status-badge');
-            if (statusBadge) {
-                statusBadge.textContent = 'Memuat';
-                statusBadge.style.background = 'rgba(148,163,184,0.12)';
-                statusBadge.style.color = '#94a3b8';
-            }
-            fetchOutdoorWeather(0);
-            setTimeout(function() {
-                if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }
-            }, 2000);
-        }
-        window.refreshOutdoorWeather = refreshOutdoorWeather;
-
-        // Fetch pertama saat halaman load
-        setTimeout(fetchOutdoorWeather, 800);
-        // Auto-refresh setiap 10 menit
-        _weatherRefreshTimer = setInterval(fetchOutdoorWeather, 600000);
-df
+            console.log('[OK] Dashboard Ready!');
+        };
+    
