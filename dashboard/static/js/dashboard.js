@@ -593,8 +593,8 @@
                 case 'hum': endpoint = '/api/chart/ac_sensor/humidity/' + hours; break;
                 case 'acTemp': endpoint = '/api/chart/ac_sensor/ac_temp/' + hours; break;
                 case 'acHum': endpoint = '/api/chart/ac_sensor/set_rh/' + hours; break;
-                case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux/' + hours; break;
-                case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness/' + hours; break;
+                case 'lampLux': endpoint = '/api/chart/lamp_sensor/lux_avg/' + hours; break;
+                case 'lampBright': endpoint = '/api/chart/lamp_sensor/brightness_avg/' + hours; break;
                 case 'occupancy': endpoint = '/api/chart/camera_detection/person_count/' + hours; break;
                 case 'acPower': endpoint = '/api/chart/ac_power/' + hours; break;
                 case 'lampPower': endpoint = '/api/chart/lamp_power/' + hours; break;
