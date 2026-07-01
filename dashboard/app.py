@@ -280,6 +280,42 @@ def _get_temp_uniformity():
     if len(temps) < 2: return 1.0
     return math.exp(-((max(temps) - min(temps)) ** 2) / 18.0)
 
+def _get_weather_ac_adjustment():
+    """Derive weather-based inputs for AC fitness scoring from outdoor_weather_data.
+
+    Returns (temp_offset, solar_load, out_temp, out_humid, weather_ok):
+      temp_offset  — extra °C heat load from outdoor conditions (0.0 = no extra load)
+      solar_load   — solar radiation intensity 0.0–1.0 (clear sky + high UV = 1.0)
+      out_temp     — outdoor temperature °C (0.0 if unavailable)
+      out_humid    — outdoor relative humidity % (0.0 if unavailable)
+      weather_ok   — True if outdoor_weather_data has valid data
+    """
+    if not outdoor_weather_data.get('fetch_ok'):
+        return 0.0, 0.0, 0.0, 0.0, False
+
+    out_temp  = float(outdoor_weather_data.get('temperature')   or 0.0)
+    cloud     = float(outdoor_weather_data.get('cloud_cover')   or 0.0)  # 0–100 %
+    uv        = float(outdoor_weather_data.get('uv_index')      or 0.0)
+    is_day    = bool(outdoor_weather_data.get('is_day',  True))
+    out_humid = float(outdoor_weather_data.get('humidity')      or 0.0)
+    precip    = float(outdoor_weather_data.get('precipitation') or 0.0)
+
+    # Solar load 0.0–1.0: active only during daytime, low cloud, high UV
+    solar_load = 0.0
+    if is_day:
+        solar_load = max(0.0, min(1.0, (1.0 - cloud / 100.0) * min(1.0, uv / 8.0)))
+
+    # Heat-load temperature offset: how much hotter the room will get due to outdoor conditions
+    temp_offset = 0.0
+    if out_temp > 35.0:                          # conduction through walls/roof at extreme outdoor temp
+        temp_offset += min(1.5, (out_temp - 35.0) * 0.3)
+    temp_offset += solar_load * 0.8             # radiant solar heat gain through windows (max +0.8°C)
+    temp_offset  = min(2.5, temp_offset)        # cap total offset
+    if precip > 0.5:                             # rain cools outdoor → relax offset
+        temp_offset = max(0.0, temp_offset - 1.0)
+
+    return temp_offset, solar_load, out_temp, out_humid, True
+
 def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
     Genes: [temp, fan_speed, mode_idx, set_rh]
@@ -288,6 +324,8 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
       Tier 1 — 1-2 persons: standard temp by time (24-26°C, fan adaptive)
       Tier 2 — 3-5 persons: medium cooling (22°C, fan 3)
       Tier 3 — >5 persons : AC as cold as possible (16°C, fan 4 max)
+    Outdoor weather scoring (max ±12 pts):
+      Solar heat gain, outdoor temp pressure, outdoor humidity → DRY mode, mild weather saving.
     """
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
@@ -438,6 +476,46 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     else:
         # Normal humidity — reward set_rh near 50%
         fitness += _gaussian_score(set_rh, 50, 8.0, 10.0)
+
+    # ── Outdoor weather scoring (max ±12 pts) ─────────────────────────────────
+    # Uses live Open-Meteo data (fetched every 10 min). Skipped if data unavailable.
+    w_offset, solar_load, out_temp_w, out_humid_w, weather_ok = _get_weather_ac_adjustment()
+    if weather_ok:
+        # (a) Solar heat-load: reward lower setpoints when sun is strong (max +5 pts)
+        # Clear sky + high UV during daytime → solar radiation heats room through windows
+        # → GA should prefer colder AC setpoints to counter the heat gain
+        if solar_load > 0.15 and person_detected:
+            solar_target = adjusted_target - solar_load * 1.5   # shift comfort target down
+            fitness += _gaussian_score(temp_set, solar_target, max(1.0, sigma * 0.9),
+                                       solar_load * 5.0)
+
+        # (b) Outdoor temperature pressure on mode selection (max ±5 pts)
+        if out_temp_w > 33.0:
+            # Very hot outdoor → conduction/infiltration heats room → COOL mode is most effective
+            heat_excess = min(1.0, (out_temp_w - 33.0) / 7.0)   # 0.0 at 33°C, 1.0 at 40°C
+            if mode_idx == 0:    # COOL: best choice when outdoor is very hot
+                fitness += heat_excess * 5.0
+            elif mode_idx == 2:  # FAN: circulates hot outdoor air → counter-productive
+                fitness -= heat_excess * 4.0
+        elif out_temp_w < 26.0 and not person_detected:
+            # Mild outdoor + empty room → natural ventilation / high setpoint saves energy
+            mild_factor = min(1.0, (26.0 - out_temp_w) / 6.0)   # 0.0 at 26°C, 1.0 at 20°C
+            if mode_idx == 2:    # FAN: good when outdoor is cool and room is empty
+                fitness += mild_factor * 3.0
+            if temp_set >= 27.0:                                  # don't over-cool when not needed
+                fitness += mild_factor * 4.0
+
+        # (c) Outdoor humidity reinforces DRY mode (max +3 pts)
+        # When outdoor RH > 80%, infiltration keeps bringing humid air in →
+        # AC DRY mode is more impactful than when outdoor is dry
+        if out_humid_w > 80.0 and mode_idx == 1:  # DRY mode
+            fitness += min(3.0, (out_humid_w - 80.0) * 0.15)
+
+        # (d) Penalty: wasteful over-cooling when outdoor is already cool (max −5 pts)
+        # If outdoor temp < 24°C there is little heat pressure — blasting AC to ≤22°C
+        # wastes energy for a small crowd
+        if out_temp_w < 24.0 and temp_set < 22.0 and person_count <= 2:
+            fitness -= min(5.0, (22.0 - temp_set) * 1.5)
 
     return max(0.0, round(fitness, 2))
 
