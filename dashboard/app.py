@@ -257,6 +257,16 @@ pso_params = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5
 opt_algo_config = 'ga_pso'
 OPT_ALGO_OPTIONS = {'ga_pso', 'pso_ga', 'ga_ga', 'pso_pso'}
 
+# GA fitness normalization
+# Raw GA fitness is a composite score (max ~149 pts). Normalize to 0–100% for display.
+# Components: temp(40) + humidity(15) + fan(15) + energy(20) + uniformity(8)
+#             + trend(7) + mode(10) + crowd_bonus(12) + set_rh(10) + weather(12) = 149
+GA_FITNESS_MAX = 149.0
+
+def _ga_fitness_pct(raw_fitness):
+    """Convert raw GA fitness score (0–~149) to a 0–100 percentage for display."""
+    return round(min(100.0, max(0.0, float(raw_fitness) / GA_FITNESS_MAX * 100.0)), 2)
+
 def _get_ac_algo():
     """Return 'ga' or 'pso' for AC based on current config."""
     return 'pso' if opt_algo_config in ('pso_ga', 'pso_pso') else 'ga'
@@ -1408,6 +1418,7 @@ def run_optimization_cycle(algo='both'):
                 'brightness': int((b1 + b2) / 2),           # average brightness % for reference
                 'brightness1': b1, 'brightness2': b2,        # brightness % 0-100 for MQTT/ESP32
                 'stats': hist,
+                'iteration_log': iter_log,                   # per-iteration detail for CSV export
                 'initial_error': round(initial_err, 2),
                 'final_error': round(fit, 2),
                 'lux_achieved': lux_achieved,
@@ -1430,11 +1441,14 @@ def run_optimization_cycle(algo='both'):
             print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
         optimization_run_count += 1
+        # Normalize GA fitness from raw score (0–~149) to percentage (0–100) for display
+        ga_fitness_pct = _ga_fitness_pct(last_opt_results['ga']['fitness'])
         # Update mqtt_data system
         mqtt_data['system'].update({
             'algo_config': opt_algo_config,
             'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
-            'ga_fitness': last_opt_results['ga']['fitness'],
+            'ga_fitness': ga_fitness_pct,             # normalized 0–100%
+            'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score for export/debug
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_runs': optimization_run_count,
             'ga_temp': last_opt_results['ga']['temp'],
@@ -1450,9 +1464,11 @@ def run_optimization_cycle(algo='both'):
             'pso_history': last_opt_results['pso'].get('stats', [])
         })
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
-        # Write to InfluxDB
+        # Write to InfluxDB (ga_fitness stored as normalized % 0-100)
+        pso_fitness_pct = min(100.0, max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 122500.0 * 100.0))
         write_to_influxdb('optimization_result', {
-            'ga_fitness': float(last_opt_results['ga']['fitness']),
+            'ga_fitness': ga_fitness_pct,               # normalized 0–100%
+            'ga_fitness_raw': float(last_opt_results['ga']['fitness']),  # raw score for reference
             'pso_fitness': float(last_opt_results['pso']['fitness']),
             'ga_temp': float(last_opt_results['ga']['temp']),
             'ga_fan': float(last_opt_results['ga']['fan']),
@@ -1463,10 +1479,9 @@ def run_optimization_cycle(algo='both'):
             'pso_brightness': float(last_opt_results['pso']['brightness']),
             'pso_brightness1': float(last_opt_results['pso'].get('brightness1', 0)),
             'pso_brightness2': float(last_opt_results['pso'].get('brightness2', 0)),
-            'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: error value (lower=better)
-            # combined_fitness: GA maximize, PSO minimize — PSO fitness is already in % (0-100)
-            'combined_fitness': float(last_opt_results['ga']['fitness']) * 0.5
-                                + max(0.0, 100.0 - float(last_opt_results['pso']['fitness'])) * 0.5
+            'pso_error': float(last_opt_results['pso']['fitness']),   # PSO: raw error value (lower=better)
+            # combined_fitness: both now in 0-100 scale, equal weight
+            'combined_fitness': ga_fitness_pct * 0.5 + pso_fitness_pct * 0.5
         })
         # Auto-apply AC — only when GA produced fresh results this cycle
         global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
@@ -1498,7 +1513,8 @@ def run_optimization_cycle(algo='both'):
             'status': 'completed', 'algorithm': algo,
             'algo_config': opt_algo_config,
             'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
-            'ga_fitness': last_opt_results['ga']['fitness'],
+            'ga_fitness': ga_fitness_pct,              # normalized 0–100% for display
+            'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
             'ga_history': last_opt_results['ga'].get('stats', []),
@@ -1595,14 +1611,16 @@ def load_opt_results_file():
         pso_data = data.get('pso', {})
         if ga_data and ga_data.get('fitness', 0) > 0:
             last_opt_results['ga'].update(ga_data)
-            mqtt_data['system']['ga_fitness']  = ga_data.get('fitness', 0)
+            mqtt_data['system']['ga_fitness']  = _ga_fitness_pct(ga_data.get('fitness', 0))
+            mqtt_data['system']['ga_fitness_raw'] = ga_data.get('fitness', 0)
             mqtt_data['system']['ga_temp']     = ga_data.get('temp', 0)
             mqtt_data['system']['ga_fan']      = ga_data.get('fan', 0)
             mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
             mqtt_data['system']['ga_set_rh']   = ga_data.get('set_rh', 50)
             mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
             print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
-                  f"fitness={ga_data.get('fitness',0):.2f} stats={len(ga_data.get('stats',[]))} pts")
+                  f"fitness_raw={ga_data.get('fitness',0):.2f} -> {_ga_fitness_pct(ga_data.get('fitness',0)):.1f}% "
+                  f"stats={len(ga_data.get('stats',[]))} pts")
         if pso_data and (pso_data.get('brightness1', 0) > 0 or pso_data.get('fitness', 0) > 0):
             last_opt_results['pso'].update(pso_data)
             mqtt_data['system']['pso_fitness']     = pso_data.get('fitness', 0)
@@ -1711,7 +1729,8 @@ def restore_opt_results():
                     last_opt_results['ga']['stats'] = restored_stats
                 else:
                     last_opt_results['ga']['stats'] = []
-                mqtt_data['system']['ga_fitness']  = last_opt_results['ga']['fitness']
+                mqtt_data['system']['ga_fitness']      = _ga_fitness_pct(last_opt_results['ga']['fitness'])
+                mqtt_data['system']['ga_fitness_raw']   = last_opt_results['ga']['fitness']
                 mqtt_data['system']['ga_temp']     = last_opt_results['ga']['temp']
                 mqtt_data['system']['ga_fan']      = last_opt_results['ga']['fan']
                 mqtt_data['system']['ga_mode']     = last_opt_results['ga']['mode']
