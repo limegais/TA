@@ -2108,8 +2108,6 @@ _pending_calibration = None  # not used, kept for reference compatibility
 # due to I2C noise or reading before conversion completes. This filter prevents
 # anomaly values from entering PSO and InfluxDB.
 LUX_MAX_PHYSICAL   = 65535.0  # batas hardware BH1750 (16-bit)
-LUX_SPIKE_RATIO    = 5.0      # bacaan > 5x EMA sebelumnya dianggap spike
-LUX_DARK_THRESHOLD = 10.0     # if brightness1=brightness2=0, lux should be < this
 LUX_EMA_ALPHA      = 0.3      # bobot data baru dalam smoothing (0=ignore, 1=raw)
 # EMA state per sensor (None = not initialized, use raw for first time)
 _lux_ema = [None, None, None]  # [L1_ema, L2_ema, L3_ema]
@@ -2120,55 +2118,31 @@ _pso_lock_pwm = [None, None]  # [b1%, b2%] locked
 
 def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
     """Validate BH1750 reading received from ESP32.
-
-    ESP32 sudah menjalankan: raw -> kalibrasi -> median filter (5 sampel).
-    Raspi DOES NOT apply EMA again to prevent double-smoothing that
-    menyebabkan nilai dashboard berbeda jauh dari Serial Monitor ESP32.
-
-    Raspi hanya melakukan:
-    1. Physical bounds: negative value or > 65535 -> use last valid value.
-    2. Ghost lux: lampu OFF tapi sensor baca tinggi -> kembalikan 0.
-       - Grace period 8 seconds after PSO sends brightness=0.
-    3. Spike detection: nilai > LUX_SPIKE_RATIO x referensi -> buang.
-       Referensi = nilai valid terakhir (bukan EMA).
+    
+    Membuat lux sepenuhnya adaptif sesuai kondisi ruangan:
+    - Jika gelap, nilai langsung turun.
+    - Jika terang, nilai langsung naik.
+    - Menghilangkan grace period dan spike detection yang menahan nilai.
     """
-    global _lux_ema  # used as "last valid value", not EMA
+    global _lux_ema  # Menyimpan referensi terakhir yang valid
     raw = float(raw_val)
 
     # 1. Batas fisik BH1750 (16-bit)
     if raw < 0 or raw > LUX_MAX_PHYSICAL:
         return round(_lux_ema[sensor_idx], 1) if _lux_ema[sensor_idx] is not None else 0.0
 
-    lamp_is_off = (brightness1 <= 0 and brightness2 <= 0)
+    # 2. Adaptive smoothing (opsional ringan agar grafik tidak terlalu kasar)
+    # Jika nilainya langsung nol (gelap total), turunkan langsung tanpa smoothing
+    if _lux_ema[sensor_idx] is None:
+        _lux_ema[sensor_idx] = raw
+    else:
+        if raw <= 1.0:
+            _lux_ema[sensor_idx] = raw  # Langsung nol
+        else:
+            # EMA sangat cepat (alpha 0.7) agar tetap responsif tapi sedikit smooth
+            _lux_ema[sensor_idx] = (0.7 * raw) + (0.3 * _lux_ema[sensor_idx])
 
-    # 2. Ghost lux when lamp is off
-    # IMPORTANT: lamp_is_off DOES NOT mean room is dark — there could be natural light (sunlight, etc.).
-    # We only suspect ghost lux if:
-    # - Value is MUCH higher than previous reference (large spike when lamp just turned off)
-    # - AND still within grace period (lamp just turned off)
-    if lamp_is_off:
-        time_since_apply = time.time() - _last_adaptive_lamp_apply
-        in_grace = time_since_apply < 8.0
-
-        if in_grace and raw > LUX_DARK_THRESHOLD:
-            # In grace period: sensor might still read residual lamp light
-            # Keep old reference until lamp is fully dark
-            if _lux_ema[sensor_idx] is not None:
-                return round(_lux_ema[sensor_idx], 1)
-            return round(raw, 1)
-        # After grace period: accept value as is — there might be natural light
-        # Do not reset to 0 automatically, let spike detection handle it
-
-    # 3. Spike detection: discard if far exceeds last reference
-    if _lux_ema[sensor_idx] is not None and _lux_ema[sensor_idx] > 5.0:
-        if raw > _lux_ema[sensor_idx] * LUX_SPIKE_RATIO:
-            print(f"[LUX_FILTER] L{sensor_idx+1}: spike {raw:.1f} lx "
-                  f"(ref={_lux_ema[sensor_idx]:.1f}) -> dibuang")
-            return round(_lux_ema[sensor_idx], 1)
-
-    # Passed all checks — save as last reference and return directly
-    _lux_ema[sensor_idx] = raw
-    return round(raw, 1)
+    return round(_lux_ema[sensor_idx], 1)
 
 # Adaptive apply debounce: prevent duplicate AC/Lamp commands within 5 seconds
 _last_adaptive_ac_apply = 0
@@ -2490,14 +2464,7 @@ def _record_lamp_apply(b1, b2):
     _last_sent_lamp_b1 = int(b1)
     _last_sent_lamp_b2 = int(b2)
     _last_adaptive_lamp_apply = time.time()
-    # If lamp is turned off, reset EMA now to low value so
-    # after 8 second grace period, ghost lux detected with exact threshold.
-    if int(b1) == 0 and int(b2) == 0:
-        for i in range(3):
-            if _lux_ema[i] is not None and _lux_ema[i] > LUX_DARK_THRESHOLD:
-                # Set to threshold value, not 0, so spike detection still works
-                # in case real natural light enters the room
-                _lux_ema[i] = LUX_DARK_THRESHOLD
+    # Filter lux sekarang fully adaptive, tidak perlu manipulasi _lux_ema secara paksa.
 
 # ==================== SMART PERSON-BASED CONTROL ====================
 def handle_person_based_control(person_count):
