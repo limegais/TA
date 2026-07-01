@@ -2131,6 +2131,12 @@ def _filter_lux(raw_val, sensor_idx, brightness1=0, brightness2=0):
     if raw < 0 or raw > LUX_MAX_PHYSICAL:
         return round(_lux_ema[sensor_idx], 1) if _lux_ema[sensor_idx] is not None else 0.0
 
+    # 1.5. Hardware Bug Workaround (Ghost Lux)
+    # Jika lampu mati (0%), tapi sensor masih ngirim nilai tinggi (nyangkut), 
+    # kita paksa raw menjadi 0 agar langsung turun seperti permintaan.
+    if brightness1 <= 0 and brightness2 <= 0:
+        raw = 0.0
+
     # 2. Adaptive smoothing (opsional ringan agar grafik tidak terlalu kasar)
     # Jika nilainya langsung nol (gelap total), turunkan langsung tanpa smoothing
     if _lux_ema[sensor_idx] is None:
