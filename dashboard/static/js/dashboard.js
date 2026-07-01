@@ -2187,8 +2187,9 @@
                 ga_fan: data.ga_fan || '--',
                 pso_fitness: data.pso_fitness || 0,
                 pso_brightness: data.pso_brightness || '--',
-                // GA maximize (score) vs PSO minimize (error) - normalize PSO before combining
-                combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100 - (data.pso_fitness || 0) / 100) * 0.5
+                // GA fitness sekarang sudah 0-100% dari server (normalized)
+                // PSO fitness adalah raw error — konversi ke % (100% = error 0, skala 350²=122500)
+                combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100.0 - (data.pso_fitness || 0) / 1225.0) * 0.5
             };
             mlHistory.unshift(entry);
             if (mlHistory.length > 50) mlHistory.pop();
@@ -2273,7 +2274,7 @@
             fetch('/api/ga/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
+                        return r.json().then(function(d) { throw new Error(d.error || d.message || 'Export failed (HTTP ' + r.status + ')'); });
                     }
                     return r.blob();
                 })
@@ -2293,7 +2294,7 @@
             fetch('/api/pso/export-csv')
                 .then(function(r) {
                     if (!r.ok) {
-                        return r.json().then(function(d) { throw new Error(d.error || 'Export failed'); });
+                        return r.json().then(function(d) { throw new Error(d.error || d.message || 'Export failed (HTTP ' + r.status + ')'); });
                     }
                     return r.blob();
                 })
