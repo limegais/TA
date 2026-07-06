@@ -668,12 +668,11 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     _fetch_mysql_power()
 
     # --- Priority 1: use real-time MQTT data if available (freshest) ---
-    # lux di mqtt_data['lamp'] is already filtered by _filter_lux di MQTT callback.
+    # Lux diambil langsung dari mqtt_data['lamp'] tanpa filter tambahan.
     # Only falls back to InfluxDB if ESP32 not connected (MQTT timeout > 2 minutes).
     mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh if < 2 minutes
     if mqtt_has_lux:
-        # MQTT data is fresh — value in mqtt_data['lamp'] already passed _filter_lux
-        # in MQTT callback, so sync directly to opt_sensor_data without refiltering.
+        # MQTT data is fresh — nilai lux langsung dari sensor tanpa pemrosesan.
         # opt_sensor_data lux is already updated in MQTT callback via update_opt_sensor_data,
         # but we sync again here to ensure consistency when PSO reads it.
         l1 = float(mqtt_data['lamp'].get('lux1', 0))
@@ -685,7 +684,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
         opt_sensor_data['lux']  = round((l1 + l2 + l3) / 3.0, 1)
         opt_sensor_data['curr_brightness1'] = mqtt_data['lamp'].get('brightness1', opt_sensor_data['curr_brightness1'])
         opt_sensor_data['curr_brightness2'] = mqtt_data['lamp'].get('brightness2', opt_sensor_data['curr_brightness2'])
-        print(f"[OPT] Lux from MQTT (filtered): L1={l1} L2={l2} L3={l3} "
+        print(f"[OPT] Lux from MQTT (raw): L1={l1} L2={l2} L3={l3} "
               f"B1={opt_sensor_data['curr_brightness1']}% B2={opt_sensor_data['curr_brightness2']}%")
 
     try:
@@ -739,13 +738,8 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                         opt_sensor_data['lux'] = round(float(val), 1)
                         influx_lux_used = True
                     elif field in ('lux1', 'lux2', 'lux3'):
-                        # Skip _filter_lux so stale values from InfluxDB are also filtered
-                        # brightness=0 because this fallback only runs when MQTT is absent
-                        sensor_idx = {'lux1': 0, 'lux2': 1, 'lux3': 2}[field]
-                        filtered = _filter_lux(float(val), sensor_idx,
-                                               brightness1=opt_sensor_data.get('curr_brightness1', 0),
-                                               brightness2=opt_sensor_data.get('curr_brightness2', 0))
-                        opt_sensor_data[field] = filtered
+                        # Gunakan nilai lux langsung dari InfluxDB tanpa filter
+                        opt_sensor_data[field] = round(float(val), 1)
                         influx_lux_used = True
                     elif field == 'brightness1':
                         opt_sensor_data['curr_brightness1'] = round(float(val), 1)
@@ -2975,10 +2969,10 @@ def on_message(client, userdata, msg):
             _last_lamp_mqtt_ts = time.time()
             b1 = payload.get('brightness1', payload.get('brightness', 0))
             b2 = payload.get('brightness2', b1)
-            # Filter BH1750: validasi + ghost lux + spike detection
-            l1 = _filter_lux(payload.get('lux1', payload.get('lux', 0)), 0, b1, b2)
-            l2 = _filter_lux(payload.get('lux2', payload.get('lux', 0)), 1, b1, b2)
-            l3 = _filter_lux(payload.get('lux3', payload.get('lux', 0)), 2, b1, b2)
+            # Gunakan nilai lux langsung dari MQTT tanpa filter
+            l1 = round(float(payload.get('lux1', payload.get('lux', 0))), 1)
+            l2 = round(float(payload.get('lux2', payload.get('lux', 0))), 1)
+            l3 = round(float(payload.get('lux3', payload.get('lux', 0))), 1)
             mqtt_data['lamp'].update({
                 'lux1': l1, 'lux2': l2, 'lux3': l3,
                 'lux_avg': round((l1 + l2 + l3) / 3.0, 1),
