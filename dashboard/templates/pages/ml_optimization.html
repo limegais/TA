@@ -1,246 +1,795 @@
 <div id="ml-optimization" class="page">
-            <div class="header">
-                <h1>Machine Learning Optimization</h1>
-                <p>Select optimization algorithm for Adaptive AC & Lamp | Auto-optimized in ADAPTIVE mode</p>
-            </div>
+  <div class="header">
+    <h1>Machine Learning Optimization</h1>
+    <p>
+      Select optimization algorithm for Adaptive AC & Lamp | Auto-optimized in
+      ADAPTIVE mode
+    </p>
+  </div>
 
-            <!-- Algorithm Selector -->
-            <div class="chart-container" style="margin-bottom: 20px;">
-                <div class="chart-header">
-                    <div class="chart-title">Select Algorithm Configuration</div>
-                    <div class="chart-options">
-                        <span id="algo-status" style="font-size: 14px; color: #10b981; font-weight: 500; margin-right: 15px; opacity: 0; transition: opacity 0.3s;">Saved</span>
-                    </div>
-                </div>
-                <div class="algo-selector-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 15px;">
-                    <!-- Option 1: GA | PSO (Default) -->
-                    <div class="algo-card active" data-config="ga_pso" onclick="setAlgoConfig('ga_pso')" style="border: 2px solid #3b82f6; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; background: rgba(59, 130, 246, 0.05); transition: all 0.2s;">
-                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">GA <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> PSO</div>
-                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
-                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
-                        <div class="algo-badge" style="position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
-                    </div>
-
-                    <!-- Option 2: PSO | GA -->
-                    <div class="algo-card" data-config="pso_ga" onclick="setAlgoConfig('pso_ga')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
-                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">PSO <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> GA</div>
-                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
-                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
-                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
-                    </div>
-
-                    <!-- Option 3: GA | GA -->
-                    <div class="algo-card" data-config="ga_ga" onclick="setAlgoConfig('ga_ga')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
-                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">GA <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> GA</div>
-                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
-                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#3b82f6;font-weight:600;">Genetic Algorithm</span></div>
-                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
-                    </div>
-
-                    <!-- Option 4: PSO | PSO -->
-                    <div class="algo-card" data-config="pso_pso" onclick="setAlgoConfig('pso_pso')" style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; cursor: pointer; position: relative; transition: all 0.2s;">
-                        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px;">PSO <span style="color:#94a3b8;font-weight:400;margin:0 4px;">|</span> PSO</div>
-                        <div style="font-size: 13px; color: #64748b;">AC: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
-                        <div style="font-size: 13px; color: #64748b;">Lamp: <span style="color:#0ea5e9;font-weight:600;">Particle Swarm</span></div>
-                        <div class="algo-badge" style="display: none; position: absolute; top: 15px; right: 15px; background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px; border-radius: 4px;">ACTIVE</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ML Summary Cards -->
-            <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title" id="summary-ac-title">GA -> AC</span>
-                        <div class="stat-icon" id="summary-ac-icon" style="background: rgba(59, 130, 246, 0.2); color: #3b82f6;">GA</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-fitness" style="color: #3b82f6;">0.00</span></div>
-                    <div class="stat-change"><span>Best Fitness</span></div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Optimized Temp</span>
-                        <div class="stat-icon" style="background: rgba(30, 64, 175, 0.2); color: #1e40af;">T</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-ga-temp" style="color: #1e40af;">--</span>°C</div>
-                    <div class="stat-change"><span>Fan: <span id="ml-ga-fan" style="font-weight: bold;">--</span> | Mode: <span id="ml-ga-mode" style="font-weight:bold; color:#1e40af;">--</span> | RH: <span id="ml-ga-rh" style="font-weight:bold; color:#3b82f6;">--</span>%</span></div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title" id="summary-lamp-title">PSO -> Lamp</span>
-                        <div class="stat-icon" id="summary-lamp-icon" style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9;">PSO</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-pso-fitness" style="color: #0ea5e9;">0.0</span><span style="font-size:16px;color:#94a3b8;">%</span></div>
-                    <div class="stat-change"><span>Lux Accuracy (100% = exactly 350 lux)</span></div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">PWM Optimal</span>
-                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">PWM</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 20px; line-height: 1.8;">
-                        PWM1: <span id="ml-pso-pwm1" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small><br>
-                        PWM2: <span id="ml-pso-pwm2" style="color: #2563eb; font-weight:700;">--</span><small style="color:#94a3b8;">/255</small>
-                    </div>
-                    <div class="stat-change">
-                        Lux1: <span id="ml-pso-lux1" style="color:#22d3ee;font-weight:600;">--</span>
-                        &nbsp;Lux2: <span id="ml-pso-lux2" style="color:#22d3ee;font-weight:600;">--</span>
-                        &nbsp;Lux3: <span id="ml-pso-lux3" style="color:#22d3ee;font-weight:600;">--</span> lx
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Current Conditions</span>
-                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">DB</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 14px; line-height: 1.8;">
-                        Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum: <span id="ml-cur-hum">--</span>%<br>
-                        Lux: <span id="ml-cur-lux">--</span> lux &nbsp; Person: <span id="ml-cur-person">--</span>
-                    </div>
-                    <div class="stat-change"><span>From InfluxDB</span></div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">Optimization Runs</span>
-                        <div class="stat-icon" style="background: rgba(37, 99, 235, 0.2); color: #2563eb;">#</div>
-                    </div>
-                    <div class="stat-value" style="font-size: 28px;"><span id="ml-opt-runs" style="color: #2563eb;">0</span></div>
-                    <div class="stat-change"><span>Total Cycles</span></div>
-                </div>
-            </div>
-
-            <!-- GA Fitness Convergence Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title" id="chart-ac-title">GA Fitness Convergence (AC Optimization)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportGAReport()" title="Export AC Report"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('gaFitness', 'AC Fitness')" title="Export date range">&#128197;</button>
-                    </div>
-                </div>
-                <canvas id="gaFitnessChart" height="80"></canvas>
-            </div>
-
-            <!-- PSO Iteration Detail Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title" id="chart-lamp-title">PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportPSOReport()" title="Export Lamp Report"><i class="fas fa-download"></i></button>
-                        <button class="chart-option-btn" onclick="exportChartRange('psoFitness', 'Lamp Fitness')" title="Export date range">&#128197;</button>
-                    </div>
-                </div>
-                <!-- Iteration detail table -->
-                <div id="pso-iter-table-wrap" style="overflow-x:auto;margin-bottom:8px;display:none;">
-                    <table style="width:100%;border-collapse:collapse;font-size:12px;">
-                        <thead>
-                            <tr style="background:rgba(14,165,233,0.15);">
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Iteration</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 1</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">PWM 2</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 1</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 2</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux 3</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Lux Avg</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Fitness (%)</th>
-                                <th style="padding:4px 8px;text-align:center;border-bottom:1px solid rgba(14,165,233,0.3);">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="pso-iter-tbody"></tbody>
-                    </table>
-                </div>
-                <canvas id="psoFitnessChart" height="100"></canvas>
-            </div>
-
-
-            <!-- Optimization History Table -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <div class="chart-title">Optimization History</div>
-                    <div class="chart-options">
-                        <button class="chart-option-btn" onclick="exportMLHistory()">
-                            <i class="fas fa-download"></i> Export CSV
-                        </button>
-                        <button class="chart-option-btn" onclick="refreshMLHistory()">
-                            Refresh
-                        </button>
-                    </div>
-                </div>
-                <div style="overflow-x: auto;">
-                    <table class="ml-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Time</th>
-                                <th>Mode</th>
-                                <th><span id="hist-ac-title">GA</span> Fitness</th>
-                                <th>AC Temp</th>
-                                <th>Fan Speed</th>
-                                <th><span id="hist-lamp-title">PSO</span> Fitness</th>
-                                <th>Brightness</th>
-                                <th>Combined</th>
-                            </tr>
-                        </thead>
-                        <tbody id="ml-history-body">
-                            <tr><td colspan="8" style="text-align: center; color: #94a3b8;">No optimization data yet. Set mode to ADAPTIVE to start automatic optimization.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- Parameter Configuration -->
-            <div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
-                <div class="chart-container" style="margin-bottom: 0;">
-                    <div class="chart-header">
-                        <div class="chart-title">GA Parameters</div>
-                    </div>
-                    <div class="ml-param-grid">
-                        <div class="ml-param-item">
-                            <label>Population Size</label>
-                            <input type="number" id="ml-ga-pop" value="15" min="5" max="100" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>Generations</label>
-                            <input type="number" id="ml-ga-gen" value="30" min="10" max="500" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>Mutation Rate</label>
-                            <input type="number" id="ml-ga-mut" value="0.25" min="0.01" max="0.5" step="0.01" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>Crossover Rate</label>
-                            <input type="number" id="ml-ga-cross" value="0.8" min="0.1" max="1.0" step="0.05" class="ml-input">
-                        </div>
-                    </div>
-                </div>
-
-                <div class="chart-container" style="margin-bottom: 0;">
-                    <div class="chart-header">
-                        <div class="chart-title">PSO Parameters</div>
-                    </div>
-                    <div class="ml-param-grid">
-                        <div class="ml-param-item">
-                            <label>Swarm Size</label>
-                            <input type="number" id="ml-pso-swarm" value="30" min="5" max="100" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>Iterations</label>
-                            <input type="number" id="ml-pso-iter" value="100" min="10" max="500" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>Inertia (w)</label>
-                            <input type="number" id="ml-pso-w" value="0.7" min="0.1" max="1.5" step="0.05" class="ml-input">
-                        </div>
-                        <div class="ml-param-item">
-                            <label>c1 / c2</label>
-                            <input type="number" id="ml-pso-c" value="1.5" min="0.5" max="3.0" step="0.1" class="ml-input">
-                        </div>
-                    </div>
-                </div>
-            </div>
+  <!-- Algorithm Selector -->
+  <div class="chart-container" style="margin-bottom: 20px">
+    <div class="chart-header">
+      <div class="chart-title">Select Algorithm Configuration</div>
+      <div class="chart-options">
+        <span
+          id="algo-status"
+          style="
+            font-size: 14px;
+            color: #10b981;
+            font-weight: 500;
+            margin-right: 15px;
+            opacity: 0;
+            transition: opacity 0.3s;
+          "
+          >Saved</span
+        >
+      </div>
+    </div>
+    <div
+      class="algo-selector-grid"
+      style="
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        padding: 15px;
+      "
+    >
+      <!-- Option 1: GA | PSO (Default) -->
+      <div
+        class="algo-card active"
+        data-config="ga_pso"
+        onclick="setAlgoConfig('ga_pso')"
+        style="
+          border: 2px solid #3b82f6;
+          border-radius: 8px;
+          padding: 15px;
+          cursor: pointer;
+          position: relative;
+          background: rgba(59, 130, 246, 0.05);
+          transition: all 0.2s;
+        "
+      >
+        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px">
+          GA
+          <span style="color: #94a3b8; font-weight: 400; margin: 0 4px">|</span>
+          PSO
         </div>
+        <div style="font-size: 13px; color: #64748b">
+          AC:
+          <span style="color: #3b82f6; font-weight: 600"
+            >Genetic Algorithm</span
+          >
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          Lamp:
+          <span style="color: #0ea5e9; font-weight: 600">Particle Swarm</span>
+        </div>
+        <div
+          class="algo-badge"
+          style="
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #3b82f6;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+          "
+        >
+          ACTIVE
+        </div>
+      </div>
+
+      <!-- Option 2: PSO | GA -->
+      <div
+        class="algo-card"
+        data-config="pso_ga"
+        onclick="setAlgoConfig('pso_ga')"
+        style="
+          border: 1px solid #e2e8f0;
+          border-radius: 8px;
+          padding: 15px;
+          cursor: pointer;
+          position: relative;
+          transition: all 0.2s;
+        "
+      >
+        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px">
+          PSO
+          <span style="color: #94a3b8; font-weight: 400; margin: 0 4px">|</span>
+          GA
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          AC:
+          <span style="color: #0ea5e9; font-weight: 600">Particle Swarm</span>
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          Lamp:
+          <span style="color: #3b82f6; font-weight: 600"
+            >Genetic Algorithm</span
+          >
+        </div>
+        <div
+          class="algo-badge"
+          style="
+            display: none;
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #3b82f6;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+          "
+        >
+          ACTIVE
+        </div>
+      </div>
+
+      <!-- Option 3: GA | GA -->
+      <div
+        class="algo-card"
+        data-config="ga_ga"
+        onclick="setAlgoConfig('ga_ga')"
+        style="
+          border: 1px solid #e2e8f0;
+          border-radius: 8px;
+          padding: 15px;
+          cursor: pointer;
+          position: relative;
+          transition: all 0.2s;
+        "
+      >
+        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px">
+          GA
+          <span style="color: #94a3b8; font-weight: 400; margin: 0 4px">|</span>
+          GA
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          AC:
+          <span style="color: #3b82f6; font-weight: 600"
+            >Genetic Algorithm</span
+          >
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          Lamp:
+          <span style="color: #3b82f6; font-weight: 600"
+            >Genetic Algorithm</span
+          >
+        </div>
+        <div
+          class="algo-badge"
+          style="
+            display: none;
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #3b82f6;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+          "
+        >
+          ACTIVE
+        </div>
+      </div>
+
+      <!-- Option 4: PSO | PSO -->
+      <div
+        class="algo-card"
+        data-config="pso_pso"
+        onclick="setAlgoConfig('pso_pso')"
+        style="
+          border: 1px solid #e2e8f0;
+          border-radius: 8px;
+          padding: 15px;
+          cursor: pointer;
+          position: relative;
+          transition: all 0.2s;
+        "
+      >
+        <div style="font-weight: 600; color: #1e293b; margin-bottom: 10px">
+          PSO
+          <span style="color: #94a3b8; font-weight: 400; margin: 0 4px">|</span>
+          PSO
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          AC:
+          <span style="color: #0ea5e9; font-weight: 600">Particle Swarm</span>
+        </div>
+        <div style="font-size: 13px; color: #64748b">
+          Lamp:
+          <span style="color: #0ea5e9; font-weight: 600">Particle Swarm</span>
+        </div>
+        <div
+          class="algo-badge"
+          style="
+            display: none;
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #3b82f6;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+          "
+        >
+          ACTIVE
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ML Summary Cards -->
+  <div
+    class="stats-grid"
+    style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr))"
+  >
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title" id="summary-ac-title">GA -> AC</span>
+        <div
+          class="stat-icon"
+          id="summary-ac-icon"
+          style="background: rgba(59, 130, 246, 0.2); color: #3b82f6"
+        >
+          GA
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 28px">
+        <span id="ml-ga-fitness" style="color: #3b82f6">0.00</span>
+      </div>
+      <div class="stat-change"><span>Best Fitness</span></div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title">Optimized Temp</span>
+        <div
+          class="stat-icon"
+          style="background: rgba(30, 64, 175, 0.2); color: #1e40af"
+        >
+          T
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 28px">
+        <span id="ml-ga-temp" style="color: #1e40af">--</span>°C
+      </div>
+      <div class="stat-change">
+        <span
+          >Fan: <span id="ml-ga-fan" style="font-weight: bold">--</span> | Mode:
+          <span id="ml-ga-mode" style="font-weight: bold; color: #1e40af"
+            >--</span
+          >
+          | RH:
+          <span id="ml-ga-rh" style="font-weight: bold; color: #3b82f6">--</span
+          >%</span
+        >
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title" id="summary-lamp-title">PSO -> Lamp</span>
+        <div
+          class="stat-icon"
+          id="summary-lamp-icon"
+          style="background: rgba(14, 165, 233, 0.2); color: #0ea5e9"
+        >
+          PSO
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 28px">
+        <span id="ml-pso-fitness" style="color: #0ea5e9">0.0</span
+        ><span style="font-size: 16px; color: #94a3b8">%</span>
+      </div>
+      <div class="stat-change">
+        <span>Lux Accuracy (100% = exactly 350 lux)</span>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title">PWM Optimal</span>
+        <div
+          class="stat-icon"
+          style="background: rgba(37, 99, 235, 0.2); color: #2563eb"
+        >
+          PWM
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 20px; line-height: 1.8">
+        PWM1:
+        <span id="ml-pso-pwm1" style="color: #2563eb; font-weight: 700">--</span
+        ><small style="color: #94a3b8">/255</small><br />
+        PWM2:
+        <span id="ml-pso-pwm2" style="color: #2563eb; font-weight: 700">--</span
+        ><small style="color: #94a3b8">/255</small>
+      </div>
+      <div class="stat-change">
+        Lux1:
+        <span id="ml-pso-lux1" style="color: #22d3ee; font-weight: 600"
+          >--</span
+        >
+        &nbsp;Lux2:
+        <span id="ml-pso-lux2" style="color: #22d3ee; font-weight: 600"
+          >--</span
+        >
+        &nbsp;Lux3:
+        <span id="ml-pso-lux3" style="color: #22d3ee; font-weight: 600"
+          >--</span
+        >
+        lx
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title">Current Conditions</span>
+        <div
+          class="stat-icon"
+          style="background: rgba(37, 99, 235, 0.2); color: #2563eb"
+        >
+          DB
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 14px; line-height: 1.8">
+        Temp: <span id="ml-cur-temp">--</span>°C &nbsp; Hum:
+        <span id="ml-cur-hum">--</span>%<br />
+        Lux: <span id="ml-cur-lux">--</span> lux &nbsp; Person:
+        <span id="ml-cur-person">--</span>
+      </div>
+      <div class="stat-change"><span>From InfluxDB</span></div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-header">
+        <span class="stat-title">Optimization Runs</span>
+        <div
+          class="stat-icon"
+          style="background: rgba(37, 99, 235, 0.2); color: #2563eb"
+        >
+          #
+        </div>
+      </div>
+      <div class="stat-value" style="font-size: 28px">
+        <span id="ml-opt-runs" style="color: #2563eb">0</span>
+      </div>
+      <div class="stat-change"><span>Total Cycles</span></div>
+    </div>
+  </div>
+
+  <!-- GA Fitness Convergence Chart -->
+  <div class="chart-container">
+    <div class="chart-header">
+      <div class="chart-title" id="chart-ac-title">
+        GA Fitness Convergence (AC Optimization)
+      </div>
+      <div class="chart-options">
+        <button
+          class="chart-option-btn"
+          onclick="exportGAReport()"
+          title="Export AC Report"
+        >
+          <i class="fas fa-download"></i>
+        </button>
+        <button
+          class="chart-option-btn"
+          onclick="exportChartRange('gaFitness', 'AC Fitness')"
+          title="Export date range"
+        >
+          &#128197;
+        </button>
+      </div>
+    </div>
+    <canvas id="gaFitnessChart" height="80"></canvas>
+  </div>
+
+  <!-- PSO Iteration Detail Chart -->
+  <div class="chart-container">
+    <div class="chart-header">
+      <div class="chart-title" id="chart-lamp-title">
+        PSO — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)
+      </div>
+      <div class="chart-options">
+        <button
+          class="chart-option-btn"
+          onclick="exportPSOReport()"
+          title="Export Lamp Report"
+        >
+          <i class="fas fa-download"></i>
+        </button>
+        <button
+          class="chart-option-btn"
+          onclick="exportChartRange('psoFitness', 'Lamp Fitness')"
+          title="Export date range"
+        >
+          &#128197;
+        </button>
+      </div>
+    </div>
+    <!-- Iteration detail table -->
+    <div
+      id="pso-iter-table-wrap"
+      style="overflow-x: auto; margin-bottom: 8px; display: none"
+    >
+      <table style="width: 100%; border-collapse: collapse; font-size: 12px">
+        <thead>
+          <tr style="background: rgba(14, 165, 233, 0.15)">
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Iteration
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              PWM 1
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              PWM 2
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Lux 1
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Lux 2
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Lux 3
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Lux Avg
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Fitness (%)
+            </th>
+            <th
+              style="
+                padding: 4px 8px;
+                text-align: center;
+                border-bottom: 1px solid rgba(14, 165, 233, 0.3);
+              "
+            >
+              Status
+            </th>
+          </tr>
+        </thead>
+        <tbody id="pso-iter-tbody"></tbody>
+      </table>
+    </div>
+    <canvas id="psoFitnessChart" height="100"></canvas>
+  </div>
+
+  <!-- Optimization History Table -->
+  <div class="chart-container">
+    <div class="chart-header">
+      <div class="chart-title">Optimization History</div>
+      <div class="chart-options">
+        <button class="chart-option-btn" onclick="exportMLHistory()">
+          <i class="fas fa-download"></i> Export CSV
+        </button>
+        <button class="chart-option-btn" onclick="refreshMLHistory()">
+          Refresh
+        </button>
+      </div>
+    </div>
+    <div style="overflow-x: auto">
+      <table class="ml-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Mode</th>
+            <th><span id="hist-ac-title">GA</span> Fitness</th>
+            <th>AC Temp</th>
+            <th>Fan Speed</th>
+            <th><span id="hist-lamp-title">PSO</span> Fitness</th>
+            <th>Brightness</th>
+            <th>Combined</th>
+          </tr>
+        </thead>
+        <tbody id="ml-history-body">
+          <tr>
+            <td colspan="8" style="text-align: center; color: #94a3b8">
+              No optimization data yet. Set mode to ADAPTIVE to start automatic
+              optimization.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ==================== EXPORT FITNESS HISTORY DATABASE ==================== -->
+  <div class="chart-container" style="margin-bottom: 20px;">
+    <div class="chart-header">
+      <div class="chart-title">📥 Export Fitness History dari Database</div>
+      <div class="chart-options" style="font-size:12px; color:#64748b;">
+        Data tersimpan otomatis setiap kali optimasi dijalankan
+      </div>
+    </div>
+    <div style="padding: 16px 20px;">
+
+      <!-- GA Fitness History -->
+      <div style="background: rgba(59,130,246,0.06); border: 1px solid rgba(59,130,246,0.2);
+                  border-radius: 10px; padding: 16px; margin-bottom: 14px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+          <div style="background:#3b82f6; color:#fff; font-size:11px; font-weight:700;
+                      padding:3px 8px; border-radius:5px; letter-spacing:.5px;">GA</div>
+          <span style="font-size:14px; font-weight:600; color:#e2e8f0;">
+            GA Fitness History — Per Generasi (AC Optimization)
+          </span>
+        </div>
+        <div style="font-size:12px; color:#94a3b8; margin-bottom:12px;">
+          Kolom: Timestamp · Run # · Generasi · Fitness (raw) · Fitness (%) · Set Temp AC · Fan Speed · Mode · Set RH
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+          <div>
+            <label style="display:block; font-size:11px; color:#64748b; margin-bottom:4px; text-transform:uppercase; letter-spacing:.4px;">Dari</label>
+            <input type="date" id="db-ga_fitness-from"
+              style="width:100%; padding:7px 10px; border-radius:7px;
+                     background:#0f172a; border:1px solid rgba(148,163,184,0.25);
+                     color:#e2e8f0; font-size:13px; box-sizing:border-box; cursor:pointer;">
+          </div>
+          <div>
+            <label style="display:block; font-size:11px; color:#64748b; margin-bottom:4px; text-transform:uppercase; letter-spacing:.4px;">Sampai</label>
+            <input type="date" id="db-ga_fitness-to"
+              style="width:100%; padding:7px 10px; border-radius:7px;
+                     background:#0f172a; border:1px solid rgba(148,163,184,0.25);
+                     color:#e2e8f0; font-size:13px; box-sizing:border-box; cursor:pointer;">
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button onclick="dbExportSetToday('ga_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(59,130,246,0.15);
+                     border:1px solid rgba(59,130,246,0.3); color:#93c5fd; font-size:11px; cursor:pointer;">
+              Hari ini
+            </button>
+            <button onclick="dbExportSet7d('ga_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(59,130,246,0.15);
+                     border:1px solid rgba(59,130,246,0.3); color:#93c5fd; font-size:11px; cursor:pointer;">
+              7 Hari
+            </button>
+            <button onclick="dbExportSet30d('ga_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(59,130,246,0.15);
+                     border:1px solid rgba(59,130,246,0.3); color:#93c5fd; font-size:11px; cursor:pointer;">
+              30 Hari
+            </button>
+            <button onclick="dbExportCSV('ga_fitness')"
+              style="padding:7px 16px; border-radius:7px;
+                     background:linear-gradient(135deg,#2563eb,#1d4ed8);
+                     border:none; color:#fff; font-size:12px; font-weight:600; cursor:pointer;
+                     transition:opacity .2s;"
+              onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+              📥 Download CSV
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- PSO Fitness History -->
+      <div style="background: rgba(14,165,233,0.06); border: 1px solid rgba(14,165,233,0.2);
+                  border-radius: 10px; padding: 16px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+          <div style="background:#0ea5e9; color:#fff; font-size:11px; font-weight:700;
+                      padding:3px 8px; border-radius:5px; letter-spacing:.5px;">PSO</div>
+          <span style="font-size:14px; font-weight:600; color:#e2e8f0;">
+            PSO Fitness History — Per Iterasi (Lamp Optimization)
+          </span>
+        </div>
+        <div style="font-size:12px; color:#94a3b8; margin-bottom:12px;">
+          Kolom: Timestamp · Run # · Iterasi · Fitness Error · Akurasi Lux (%) · PWM1 · PWM2 · Brightness 1 · Brightness 2 · Lux 1 · Lux 2 · Lux 3 · Lux Avg
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+          <div>
+            <label style="display:block; font-size:11px; color:#64748b; margin-bottom:4px; text-transform:uppercase; letter-spacing:.4px;">Dari</label>
+            <input type="date" id="db-pso_fitness-from"
+              style="width:100%; padding:7px 10px; border-radius:7px;
+                     background:#0f172a; border:1px solid rgba(148,163,184,0.25);
+                     color:#e2e8f0; font-size:13px; box-sizing:border-box; cursor:pointer;">
+          </div>
+          <div>
+            <label style="display:block; font-size:11px; color:#64748b; margin-bottom:4px; text-transform:uppercase; letter-spacing:.4px;">Sampai</label>
+            <input type="date" id="db-pso_fitness-to"
+              style="width:100%; padding:7px 10px; border-radius:7px;
+                     background:#0f172a; border:1px solid rgba(148,163,184,0.25);
+                     color:#e2e8f0; font-size:13px; box-sizing:border-box; cursor:pointer;">
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button onclick="dbExportSetToday('pso_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(14,165,233,0.15);
+                     border:1px solid rgba(14,165,233,0.3); color:#7dd3fc; font-size:11px; cursor:pointer;">
+              Hari ini
+            </button>
+            <button onclick="dbExportSet7d('pso_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(14,165,233,0.15);
+                     border:1px solid rgba(14,165,233,0.3); color:#7dd3fc; font-size:11px; cursor:pointer;">
+              7 Hari
+            </button>
+            <button onclick="dbExportSet30d('pso_fitness')"
+              style="padding:7px 12px; border-radius:7px; background:rgba(14,165,233,0.15);
+                     border:1px solid rgba(14,165,233,0.3); color:#7dd3fc; font-size:11px; cursor:pointer;">
+              30 Hari
+            </button>
+            <button onclick="dbExportCSV('pso_fitness')"
+              style="padding:7px 16px; border-radius:7px;
+                     background:linear-gradient(135deg,#0891b2,#0e7490);
+                     border:none; color:#fff; font-size:12px; font-weight:600; cursor:pointer;
+                     transition:opacity .2s;"
+              onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+              📥 Download CSV
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:10px; padding:8px 12px; border-radius:6px;
+                  background:rgba(148,163,184,0.05); border:1px solid rgba(148,163,184,0.1);
+                  font-size:11px; color:#64748b;">
+        💡 <strong>Info:</strong> Data fitness history disimpan otomatis ke InfluxDB setiap kali optimasi GA/PSO selesai.
+        Rentang data tersedia sejak optimasi pertama dijalankan setelah fitur ini aktif.
+        Kolom <em>Run #</em> menunjukkan siklus optimasi ke berapa.
+      </div>
+    </div>
+  </div>
+
+  <!-- Parameter Configuration -->
+  <div class="stats-grid ml-params-grid">
+    <div class="chart-container" style="margin-bottom: 0">
+      <div class="chart-header">
+        <div class="chart-title">GA Parameters</div>
+      </div>
+      <div class="ml-param-grid">
+        <div class="ml-param-item">
+          <label>Population Size</label>
+          <input
+            type="number"
+            id="ml-ga-pop"
+            value="15"
+            min="5"
+            max="100"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>Generations</label>
+          <input
+            type="number"
+            id="ml-ga-gen"
+            value="30"
+            min="10"
+            max="500"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>Mutation Rate</label>
+          <input
+            type="number"
+            id="ml-ga-mut"
+            value="0.25"
+            min="0.01"
+            max="0.5"
+            step="0.01"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>Crossover Rate</label>
+          <input
+            type="number"
+            id="ml-ga-cross"
+            value="0.8"
+            min="0.1"
+            max="1.0"
+            step="0.05"
+            class="ml-input"
+          />
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-container" style="margin-bottom: 0">
+      <div class="chart-header">
+        <div class="chart-title">PSO Parameters</div>
+      </div>
+      <div class="ml-param-grid">
+        <div class="ml-param-item">
+          <label>Swarm Size</label>
+          <input
+            type="number"
+            id="ml-pso-swarm"
+            value="30"
+            min="5"
+            max="100"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>Iterations</label>
+          <input
+            type="number"
+            id="ml-pso-iter"
+            value="100"
+            min="10"
+            max="500"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>Inertia (w)</label>
+          <input
+            type="number"
+            id="ml-pso-w"
+            value="0.7"
+            min="0.1"
+            max="1.5"
+            step="0.05"
+            class="ml-input"
+          />
+        </div>
+        <div class="ml-param-item">
+          <label>c1 / c2</label>
+          <input
+            type="number"
+            id="ml-pso-c"
+            value="1.5"
+            min="0.5"
+            max="3.0"
+            step="0.1"
+            class="ml-input"
+          />
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
