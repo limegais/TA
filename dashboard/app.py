@@ -1477,6 +1477,28 @@ def run_optimization_cycle(algo='both'):
             # combined_fitness: both now in 0-100 scale, equal weight
             'combined_fitness': ga_fitness_pct * 0.5 + pso_fitness_pct * 0.5
         })
+        # Save full per-generation / per-iteration fitness history to InfluxDB
+        # (background thread agar tidak menunda response ke dashboard)
+        if algo in ('ga', 'both'):
+            _hist_ga = last_opt_results['ga'].get('stats', [])
+            if _hist_ga:
+                t_hist = threading.Thread(
+                    target=save_ga_fitness_history_to_influx,
+                    args=(_hist_ga,),
+                    daemon=True, name='ga-hist-save'
+                )
+                t_hist.start()
+        if algo in ('pso', 'both'):
+            _hist_pso   = last_opt_results['pso'].get('stats', [])
+            _iter_log   = last_opt_results['pso'].get('iteration_log', [])
+            if _hist_pso or _iter_log:
+                t_hist2 = threading.Thread(
+                    target=save_pso_fitness_history_to_influx,
+                    args=(_hist_pso, _iter_log),
+                    daemon=True, name='pso-hist-save'
+                )
+                t_hist2.start()
+
         # Auto-apply AC — only when GA produced fresh results this cycle
         global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
@@ -1785,6 +1807,113 @@ def restore_opt_results():
                 print(f"  [RESTORE] PSO: PWM1={last_opt_results['pso']['pwm1']}/255 PWM2={last_opt_results['pso']['pwm2']}/255 (B1={last_opt_results['pso']['brightness1']}% B2={last_opt_results['pso']['brightness2']}%) error={last_opt_results['pso']['fitness']:.2f} stats={len(last_opt_results['pso']['stats'])} pts")
     except Exception as e:
         print(f"  [RESTORE] Could not restore opt results: {e}")
+
+# ==================== SAVE FITNESS HISTORY TO INFLUXDB ====================
+def save_ga_fitness_history_to_influx(fitness_history, run_meta=None):
+    """Simpan seluruh nilai fitness GA per generasi ke InfluxDB measurement 'ga_fitness_history'.
+    Setiap titik di-backfill mundur dari sekarang (1 titik per generasi, interval ~1 detik).
+    run_meta: dict opsional berisi info run (temp, fan, mode, set_rh, run_count)
+    """
+    if not fitness_history:
+        return
+    try:
+        _, write_api, _ = _get_influx_client()
+        now_ns = int(datetime.utcnow().timestamp() * 1e9)
+        # Backfill: titik terakhir = sekarang, titik sebelumnya mundur 1 detik per generasi
+        n = len(fitness_history)
+        points = []
+        run_count = int(optimization_run_count)
+        temp_val  = float((run_meta or {}).get('temp', last_opt_results['ga'].get('temp', 0)))
+        fan_val   = float((run_meta or {}).get('fan',  last_opt_results['ga'].get('fan', 0)))
+        mode_str  = str((run_meta or {}).get('mode', last_opt_results['ga'].get('mode', 'COOL')))
+        set_rh    = float((run_meta or {}).get('set_rh', last_opt_results['ga'].get('set_rh', 50)))
+        for i, fit_val in enumerate(fitness_history):
+            # timestamp: (sekarang - (n-1-i) detik)  → titik i=n-1 = sekarang
+            ts_ns = now_ns - (n - 1 - i) * int(1e9)
+            pt = (Point('ga_fitness_history')
+                  .tag('run_count', str(run_count))
+                  .field('fitness',    float(fit_val))
+                  .field('fitness_pct', round(min(100.0, max(0.0, float(fit_val) / GA_FITNESS_MAX * 100.0)), 2))
+                  .field('generation', i + 1)
+                  .field('best_temp',  temp_val)
+                  .field('best_fan',   fan_val)
+                  .field('best_mode',  mode_str)
+                  .field('best_set_rh', set_rh)
+                  .time(ts_ns, WritePrecision.NS))
+            points.append(pt)
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=points)
+        print(f"[HISTORY] GA fitness history saved: {n} generations (run #{run_count})")
+    except Exception as e:
+        print(f"[HISTORY] save_ga_fitness_history_to_influx error: {e}")
+
+
+def save_pso_fitness_history_to_influx(fitness_history, iteration_log=None, run_meta=None):
+    """Simpan seluruh nilai fitness PSO per iterasi ke InfluxDB measurement 'pso_fitness_history'.
+    iteration_log: list of dict {iter, pwm1, pwm2, b1, b2, lux1, lux2, lux3, lux_avg, fitness}
+    Jika iteration_log tersedia, digunakan langsung (lebih detail).
+    Jika tidak, gunakan fitness_history saja.
+    """
+    if not fitness_history and not iteration_log:
+        return
+    try:
+        _, write_api, _ = _get_influx_client()
+        now_ns = int(datetime.utcnow().timestamp() * 1e9)
+        run_count  = int(optimization_run_count)
+        pwm1_val   = float((run_meta or {}).get('pwm1',  last_opt_results['pso'].get('pwm1', 0)))
+        pwm2_val   = float((run_meta or {}).get('pwm2',  last_opt_results['pso'].get('pwm2', 0)))
+        b1_val     = float((run_meta or {}).get('b1',    last_opt_results['pso'].get('brightness1', 0)))
+        b2_val     = float((run_meta or {}).get('b2',    last_opt_results['pso'].get('brightness2', 0)))
+        points = []
+
+        if iteration_log:
+            n = len(iteration_log)
+            for i, entry in enumerate(iteration_log):
+                ts_ns = now_ns - (n - 1 - i) * int(1e9)
+                fit_raw = float(entry.get('fitness', 0))
+                # PSO fitness adalah error (lower=better); konversi ke % akurasi lux
+                # error_max estimasi: (350 lux miss)^2 = 122500; accuracy = 1 - error/error_max
+                accuracy_pct = round(max(0.0, min(100.0, (1.0 - fit_raw / 122500.0) * 100.0)), 2)
+                pt = (Point('pso_fitness_history')
+                      .tag('run_count', str(run_count))
+                      .field('fitness',      fit_raw)
+                      .field('accuracy_pct', accuracy_pct)
+                      .field('iteration',    int(entry.get('iter', i + 1)))
+                      .field('pwm1',         float(entry.get('pwm1', pwm1_val)))
+                      .field('pwm2',         float(entry.get('pwm2', pwm2_val)))
+                      .field('b1_pct',       float(entry.get('b1', b1_val)))
+                      .field('b2_pct',       float(entry.get('b2', b2_val)))
+                      .field('lux1',         float(entry.get('lux1', 0)))
+                      .field('lux2',         float(entry.get('lux2', 0)))
+                      .field('lux3',         float(entry.get('lux3', 0)))
+                      .field('lux_avg',      float(entry.get('lux_avg', 0)))
+                      .time(ts_ns, WritePrecision.NS))
+                points.append(pt)
+        else:
+            n = len(fitness_history)
+            for i, fit_val in enumerate(fitness_history):
+                ts_ns = now_ns - (n - 1 - i) * int(1e9)
+                fit_raw = float(fit_val)
+                accuracy_pct = round(max(0.0, min(100.0, (1.0 - fit_raw / 122500.0) * 100.0)), 2)
+                pt = (Point('pso_fitness_history')
+                      .tag('run_count', str(run_count))
+                      .field('fitness',      fit_raw)
+                      .field('accuracy_pct', accuracy_pct)
+                      .field('iteration',    i + 1)
+                      .field('pwm1',         pwm1_val)
+                      .field('pwm2',         pwm2_val)
+                      .field('b1_pct',       b1_val)
+                      .field('b2_pct',       b2_val)
+                      .field('lux1',         0.0)
+                      .field('lux2',         0.0)
+                      .field('lux3',         0.0)
+                      .field('lux_avg',      0.0)
+                      .time(ts_ns, WritePrecision.NS))
+                points.append(pt)
+
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=points)
+        print(f"[HISTORY] PSO fitness history saved: {len(points)} iterations (run #{run_count})")
+    except Exception as e:
+        print(f"[HISTORY] save_pso_fitness_history_to_influx error: {e}")
 
 # ==================== SENSOR FAULT DETECTION ====================
 # Thresholds: how many seconds without a message = sensor is "stale"
@@ -3737,9 +3866,138 @@ def export_csv_from_db():
     except ValueError:
         return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
 
-    valid_types = ('energy_ac', 'energy_lamp', 'energy_outlet', 'energy_total', 'temp', 'lux', 'occupancy')
+    valid_types = ('energy_ac', 'energy_lamp', 'energy_outlet', 'energy_total',
+                    'temp', 'lux', 'occupancy', 'ga_fitness', 'pso_fitness')
     if dtype not in valid_types:
         return jsonify({'error': f'Invalid type. Options: {", ".join(valid_types)}'}), 400
+
+    wib_tz = timezone(timedelta(hours=7))
+
+    # ── GA Fitness History: query dari InfluxDB measurement ga_fitness_history ─
+    if dtype == 'ga_fitness':
+        try:
+            start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib_tz).astimezone(timezone.utc)
+            end_utc   = datetime.strptime(to_dt, '%Y-%m-%d').replace(
+                hour=23, minute=59, second=59, tzinfo=wib_tz).astimezone(timezone.utc)
+            start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            _, _, query_api = _get_influx_client()
+            # Query semua field dari ga_fitness_history
+            ga_fields = ['fitness', 'fitness_pct', 'generation', 'best_temp', 'best_fan',
+                         'best_mode', 'best_set_rh']
+            rows_by_ts = {}
+            for fld in ga_fields:
+                q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_iso}, stop: {end_iso})
+  |> filter(fn: (r) => r["_measurement"] == "ga_fitness_history")
+  |> filter(fn: (r) => r["_field"] == "{fld}")
+  |> yield(name: "raw")
+'''
+                for table in query_api.query(query=q):
+                    for rec in table.records:
+                        t_wib  = rec.get_time().astimezone(wib_tz)
+                        ts_str = t_wib.strftime('%Y-%m-%d %H:%M:%S')
+                        rows_by_ts.setdefault(ts_str, {'ts': ts_str,
+                                                       'run_count': rec.values.get('run_count', '')})
+                        v = rec.get_value()
+                        if v is not None:
+                            rows_by_ts[ts_str][fld] = v
+            if not rows_by_ts:
+                return jsonify({'error': f'Tidak ada data GA fitness untuk rentang {from_dt} s/d {to_dt}. '
+                                         'Pastikan optimasi sudah dijalankan dan InfluxDB aktif.'}), 404
+            sorted_ts = sorted(rows_by_ts.keys())
+            output = io.StringIO()
+            output.write("sep=,\n")
+            writer = _csv.writer(output)
+            writer.writerow(['Timestamp (WIB)', 'Run #', 'Generasi',
+                             'Fitness (raw)', 'Fitness (%)',
+                             'Set Temp AC (°C)', 'Fan Speed', 'Mode AC', 'Set RH (%)'])
+            for ts in sorted_ts:
+                r = rows_by_ts[ts]
+                writer.writerow([
+                    ts,
+                    r.get('run_count', ''),
+                    int(r['generation']) if r.get('generation') is not None else '',
+                    round(float(r['fitness']), 4)    if r.get('fitness')    is not None else '',
+                    round(float(r['fitness_pct']), 2) if r.get('fitness_pct') is not None else '',
+                    round(float(r['best_temp']), 1)  if r.get('best_temp')  is not None else '',
+                    int(r['best_fan']) if r.get('best_fan') is not None else '',
+                    r.get('best_mode', ''),
+                    int(r['best_set_rh']) if r.get('best_set_rh') is not None else '',
+                ])
+            csv_bytes = output.getvalue().encode('utf-8-sig')
+            fname = f"ga_fitness_{from_dt}_sd_{to_dt}.csv"
+            return Response(csv_bytes, mimetype='text/csv',
+                            headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+        except Exception as e:
+            return jsonify({'error': f'Gagal export GA fitness history: {e}'}), 500
+
+    # ── PSO Fitness History: query dari InfluxDB measurement pso_fitness_history ─
+    if dtype == 'pso_fitness':
+        try:
+            start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib_tz).astimezone(timezone.utc)
+            end_utc   = datetime.strptime(to_dt, '%Y-%m-%d').replace(
+                hour=23, minute=59, second=59, tzinfo=wib_tz).astimezone(timezone.utc)
+            start_iso = start_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            end_iso   = end_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            _, _, query_api = _get_influx_client()
+            pso_fields = ['fitness', 'accuracy_pct', 'iteration',
+                          'pwm1', 'pwm2', 'b1_pct', 'b2_pct',
+                          'lux1', 'lux2', 'lux3', 'lux_avg']
+            rows_by_ts = {}
+            for fld in pso_fields:
+                q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_iso}, stop: {end_iso})
+  |> filter(fn: (r) => r["_measurement"] == "pso_fitness_history")
+  |> filter(fn: (r) => r["_field"] == "{fld}")
+  |> yield(name: "raw")
+'''
+                for table in query_api.query(query=q):
+                    for rec in table.records:
+                        t_wib  = rec.get_time().astimezone(wib_tz)
+                        ts_str = t_wib.strftime('%Y-%m-%d %H:%M:%S')
+                        rows_by_ts.setdefault(ts_str, {'ts': ts_str,
+                                                       'run_count': rec.values.get('run_count', '')})
+                        v = rec.get_value()
+                        if v is not None:
+                            rows_by_ts[ts_str][fld] = v
+            if not rows_by_ts:
+                return jsonify({'error': f'Tidak ada data PSO fitness untuk rentang {from_dt} s/d {to_dt}. '
+                                         'Pastikan optimasi sudah dijalankan dan InfluxDB aktif.'}), 404
+            sorted_ts = sorted(rows_by_ts.keys())
+            output = io.StringIO()
+            output.write("sep=,\n")
+            writer = _csv.writer(output)
+            writer.writerow(['Timestamp (WIB)', 'Run #', 'Iterasi',
+                             'Fitness Error (raw)', 'Akurasi Lux (%)',
+                             'PWM1 (0-255)', 'PWM2 (0-255)',
+                             'Brightness 1 (%)', 'Brightness 2 (%)',
+                             'Lux 1 (lx)', 'Lux 2 (lx)', 'Lux 3 (lx)', 'Lux Avg (lx)'])
+            for ts in sorted_ts:
+                r = rows_by_ts[ts]
+                writer.writerow([
+                    ts,
+                    r.get('run_count', ''),
+                    int(r['iteration']) if r.get('iteration') is not None else '',
+                    round(float(r['fitness']), 4)      if r.get('fitness')      is not None else '',
+                    round(float(r['accuracy_pct']), 2) if r.get('accuracy_pct') is not None else '',
+                    int(r['pwm1']) if r.get('pwm1') is not None else '',
+                    int(r['pwm2']) if r.get('pwm2') is not None else '',
+                    round(float(r['b1_pct']), 1) if r.get('b1_pct') is not None else '',
+                    round(float(r['b2_pct']), 1) if r.get('b2_pct') is not None else '',
+                    round(float(r['lux1']), 1)   if r.get('lux1')   is not None else '',
+                    round(float(r['lux2']), 1)   if r.get('lux2')   is not None else '',
+                    round(float(r['lux3']), 1)   if r.get('lux3')   is not None else '',
+                    round(float(r['lux_avg']), 1) if r.get('lux_avg') is not None else '',
+                ])
+            csv_bytes = output.getvalue().encode('utf-8-sig')
+            fname = f"pso_fitness_{from_dt}_sd_{to_dt}.csv"
+            return Response(csv_bytes, mimetype='text/csv',
+                            headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+        except Exception as e:
+            return jsonify({'error': f'Gagal export PSO fitness history: {e}'}), 500
 
     # ── Energy Total: fetch AC + Outlet + Lamp, merge into one CSV ────────────
     if dtype == 'energy_total':
