@@ -2190,8 +2190,8 @@ INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb
 INFLUX_ORG = "IOTLAB"
 INFLUX_BUCKET = "SENSORDATA"
 
-# MQTT Configuration
-MQTT_BROKER = "localhost"
+# MQTT Configuration — HARUS SAMA dengan ESP32 (esp.cpp line 39)
+MQTT_BROKER = "broker.emqx.io"   # Cloud broker — sama dengan ESP32!
 MQTT_PORT = 1883
 
 # Camera Configuration
@@ -5912,9 +5912,21 @@ def esp32_data_receiver():
     ESP32 mengirim JSON dengan header X-API-Key untuk autentikasi.
     Data disimpan ke opt_sensor_data dan diteruskan ke dashboard via SocketIO.
     """
-    # Validasi API Key
+    # Validasi API Key (buat lebih tangguh dengan .strip() & fallback)
     api_key = request.headers.get('X-API-Key', '')
-    if api_key != ESP32_API_KEY:
+    if not api_key:
+        api_key = request.headers.get('x-api-key', '')  # case fallback
+    if not api_key:
+        api_key = request.args.get('key', '')  # url fallback
+        
+    api_key = api_key.strip()
+    expected_key = ESP32_API_KEY.strip()
+
+    if api_key != expected_key:
+        print(f"[API ERROR] esp32_data_receiver() 401 Unauthorized.")
+        print(f"   Received : '{api_key}'")
+        print(f"   Expected : '{expected_key}'")
+        print(f"   Headers  : {dict(request.headers)}")
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
 
     try:
