@@ -5897,6 +5897,76 @@ def manual_save_ir():
 def get_logs():
     return jsonify(list(log_messages))
 
+
+# ============================================================
+# ESP32 DIRECT HTTPS ENDPOINT
+# ESP32 mengirim data sensor langsung ke domain ini
+# tanpa perlu tahu IP Raspberry Pi
+# ============================================================
+ESP32_API_KEY = "esp32-smartroom-secret"  # Harus cocok dengan cloud_api_key di esp.cpp
+
+@app.route('/api/esp32/data', methods=['POST'])
+def esp32_data_receiver():
+    """
+    Terima data sensor dari ESP32 via HTTPS POST.
+    ESP32 mengirim JSON dengan header X-API-Key untuk autentikasi.
+    Data disimpan ke opt_sensor_data dan diteruskan ke dashboard via SocketIO.
+    """
+    # Validasi API Key
+    api_key = request.headers.get('X-API-Key', '')
+    if api_key != ESP32_API_KEY:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({'status': 'error', 'message': 'No JSON body'}), 400
+
+        # Update opt_sensor_data (sama seperti yang diisi MQTT)
+        if 'temperature' in data:
+            opt_sensor_data['temperature'] = float(data['temperature'])
+        if 'humidity' in data:
+            opt_sensor_data['humidity'] = float(data['humidity'])
+        if 'temp1' in data:
+            opt_sensor_data['temp1'] = float(data['temp1'])
+        if 'hum1' in data:
+            opt_sensor_data['hum1'] = float(data['hum1'])
+        if 'temp2' in data:
+            opt_sensor_data['temp2'] = float(data['temp2'])
+        if 'hum2' in data:
+            opt_sensor_data['hum2'] = float(data['hum2'])
+        if 'temp3' in data:
+            opt_sensor_data['temp3'] = float(data['temp3'])
+        if 'hum3' in data:
+            opt_sensor_data['hum3'] = float(data['hum3'])
+        opt_sensor_data['data_source'] = 'esp32_https'
+
+        # Update device_last_seen agar dashboard tahu ESP32 online
+        device_last_seen['esp32_ac']['last_seen'] = datetime.now()
+        device_last_seen['esp32_ac']['status'] = 'online'
+
+        # Kirim update real-time ke semua client dashboard via SocketIO
+        socketio.emit('sensor_update', {
+            'temperature': opt_sensor_data['temperature'],
+            'humidity':    opt_sensor_data['humidity'],
+            'ac_state':    data.get('ac_state', 'OFF'),
+            'ac_temp':     data.get('ac_temp', 24),
+            'fan_speed':   data.get('fan_speed', 1),
+            'rssi':        data.get('rssi', 0),
+            'uptime':      data.get('uptime', 0),
+            'source':      'esp32_https',
+        })
+
+        print(f"[ESP32-HTTPS] Data diterima: suhu={opt_sensor_data['temperature']}°C "
+              f"hum={opt_sensor_data['humidity']}% AC={data.get('ac_state','?')}")
+
+        return jsonify({'status': 'ok', 'received': True}), 200
+
+    except Exception as e:
+        print(f"[ESP32-HTTPS] Error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/device/status')
 def get_device_status():
     now = datetime.now()
