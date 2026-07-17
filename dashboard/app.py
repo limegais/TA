@@ -2190,9 +2190,11 @@ INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb
 INFLUX_ORG = "IOTLAB"
 INFLUX_BUCKET = "SENSORDATA"
 
-# MQTT Configuration — HARUS SAMA dengan ESP32 (esp.cpp line 39)
-MQTT_BROKER = "broker.emqx.io"   # Cloud broker — sama dengan ESP32!
-MQTT_PORT = 1883
+# MQTT Configuration — Lab IoT Server
+MQTT_BROKER   = "128.199.206.166"
+MQTT_PORT     = 1883
+MQTT_USER     = "labiot"
+MQTT_PASSWORD = "iotlabftuns2023"
 
 # Camera Configuration
 camera = None
@@ -3001,6 +3003,7 @@ def release_camera():
 
 # ==================== MQTT ====================
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+mqtt_client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 mqtt_client.max_message_size = 0  # NO LIMIT! Default could truncate large RAW IR codes
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -3399,7 +3402,7 @@ def admin_required(f):
 
 @app.before_request
 def require_login():
-    public_paths = ['/login', '/api/optimization/update']
+    public_paths = ['/login', '/api/optimization/update', '/api/esp32/data']
     if request.path in public_paths:
         return None
     if request.path.startswith('/socket.io'):
@@ -6084,6 +6087,52 @@ def check_alert_rules():
 #   static/css/dashboard.css
 #   static/js/dashboard.js
 #   templates/ (dashboard.html, pages/, partials/)
+
+# ==================== ESP32 OTA ====================
+import requests
+
+@app.route('/api/esp32-ota/status', methods=['GET'])
+def ota_status():
+    ip = request.args.get('ip')
+    if not ip:
+        return jsonify({"error": "IP is required"}), 400
+    try:
+        r = requests.get(f"http://{ip}/status", timeout=5)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        return jsonify({"error": f"ESP32 returned status {r.status_code}"}), 502
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": str(e)}), 503
+
+@app.route('/api/esp32-ota/upload', methods=['POST'])
+def ota_upload():
+    if 'firmware' not in request.files:
+        return jsonify({"error": "No firmware file part"}), 400
+    
+    file = request.files['firmware']
+    ip = request.form.get('esp32_ip')
+    
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    if not ip:
+        return jsonify({"error": "ESP32 IP not provided"}), 400
+        
+    try:
+        files = {'firmware': (file.filename, file.read(), 'application/octet-stream')}
+        r = requests.post(f"http://{ip}/update", files=files, timeout=60)
+        
+        if r.status_code == 200 and r.text == "OK":
+            return jsonify({"status": "success", "response": r.text})
+        else:
+            return jsonify({"status": "error", "response": r.text, "code": r.status_code}), 500
+    except requests.exceptions.RequestException as e:
+        return jsonify({"status": "error", "error": str(e)}), 503
+
+@app.route('/api/esp32-ota/known-ip', methods=['GET'])
+def ota_known_ip():
+    return jsonify({"ip": ""})
+
+# ====================================================
 
 if __name__ == '__main__':
     print("Smart Room Dashboard starting...")
