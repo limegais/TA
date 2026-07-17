@@ -1961,6 +1961,7 @@ def sensor_fault_loop():
                     socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': level})
                     print(msg)
+                    send_telegram_alert(f"⚠️ *Sensor Terputus!*\n{dev_label} tidak mengirim data selama {age_str}.")
                 elif lvl == 'ok' and prev != 'ok':
                     # Recovery
                     msg = f'[SENSOR OK] {dev_label} back online'
@@ -1968,6 +1969,7 @@ def sensor_fault_loop():
                     socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
                     print(msg)
+                    send_telegram_alert(f"✅ *Sensor Kembali Online!*\n{dev_label} sudah terhubung kembali.")
                 _fault_last_emit[dev_id] = lvl
 
             # Push health snapshot to frontend every cycle
@@ -2195,6 +2197,27 @@ MQTT_BROKER   = "128.199.206.166"
 MQTT_PORT     = 1883
 MQTT_USER     = "labiot"
 MQTT_PASSWORD = "iotlabftuns2023"
+
+# Telegram Alert Configuration
+TELEGRAM_BOT_TOKEN = "8635310992:AAEXVrdT2r2aWg-8lb7txKIShN04wjzgnkI"
+TELEGRAM_CHAT_ID = "6029706835"
+
+def send_telegram_alert(message):
+    """Sends a message to the configured Telegram chat."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN == "ISI_TOKEN_BOT_DISINI":
+        print(f"[TELEGRAM SKIP] Not configured. Msg: {message}")
+        return
+    import requests
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🚨 *Smart Room Alert*\n\n{message}",
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[TELEGRAM ERROR] Failed to send: {e}")
 
 # Camera Configuration
 camera = None
@@ -3329,6 +3352,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     mqtt_status['connected'] = False
     print(f"[WARN] MQTT Disconnected (RC: {reason_code})")
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
+    send_telegram_alert(f"❌ *MQTT Terputus!*\nKoneksi ke broker {MQTT_BROKER} terputus (RC: {reason_code}).")
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
