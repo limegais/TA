@@ -1917,8 +1917,8 @@ def save_pso_fitness_history_to_influx(fitness_history, iteration_log=None, run_
 
 # ==================== SENSOR FAULT DETECTION ====================
 # Thresholds: how many seconds without a message = sensor is "stale"
-SENSOR_STALE_WARN_S  = 120   # 2 min  → WARNING  (yellow)
-SENSOR_STALE_FAULT_S = 300   # 5 min  → FAULT    (red)
+SENSOR_STALE_WARN_S  = 10   # 2 min  → WARNING  (yellow)
+SENSOR_STALE_FAULT_S = 15   # 5 min  → FAULT    (red)
 # Track per-sensor last emit time so we don't spam the same fault
 _fault_last_emit = {}
 
@@ -1961,7 +1961,8 @@ def sensor_fault_loop():
                     socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': level})
                     print(msg)
-                    send_telegram_alert(f"⚠️ *Sensor Terputus!*\n{dev_label} tidak mengirim data selama {age_str}.")
+                    time_str = now.strftime('%H:%M:%S')
+                    send_telegram_alert(f"⚠️ <b>Sensor Terputus!</b>\n{dev_label} tidak mengirim data selama {age_str}.\nWaktu: {time_str}")
                 elif lvl == 'ok' and prev != 'ok':
                     # Recovery
                     msg = f'[SENSOR OK] {dev_label} back online'
@@ -1969,14 +1970,15 @@ def sensor_fault_loop():
                     socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
                     print(msg)
-                    send_telegram_alert(f"✅ *Sensor Kembali Online!*\n{dev_label} sudah terhubung kembali.")
+                    time_str = now.strftime('%H:%M:%S')
+                    send_telegram_alert(f"✅ <b>Sensor Kembali Online!</b>\n{dev_label} sudah terhubung kembali.\nWaktu: {time_str}")
                 _fault_last_emit[dev_id] = lvl
 
             # Push health snapshot to frontend every cycle
             socketio.emit('sensor_health', health)
         except Exception as e:
             print(f"[FAULT] sensor_fault_loop error: {e}")
-        time.sleep(60)
+        time.sleep(5)
 
 def _pso_lamp_cycle():
     """One full lamp PSO cycle with sequence:
@@ -2211,13 +2213,18 @@ def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"🚨 *Smart Room Alert*\n\n{message}",
-        "parse_mode": "Markdown"
+        "text": f"🚨 <b>Smart Room Alert</b>\n\n{message}",
+        "parse_mode": "HTML"
     }
     try:
-        requests.post(url, json=payload, timeout=5)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"[TELEGRAM ERROR] API returned {r.status_code}: {r.text}")
+        else:
+            print("[TELEGRAM] Message sent successfully!")
     except Exception as e:
         print(f"[TELEGRAM ERROR] Failed to send: {e}")
+
 
 # Camera Configuration
 camera = None
@@ -3352,7 +3359,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     mqtt_status['connected'] = False
     print(f"[WARN] MQTT Disconnected (RC: {reason_code})")
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
-    send_telegram_alert(f"❌ *MQTT Terputus!*\nKoneksi ke broker {MQTT_BROKER} terputus (RC: {reason_code}).")
+    send_telegram_alert(f"❌ <b>MQTT Terputus!</b>\nKoneksi ke broker {MQTT_BROKER} terputus (RC: {reason_code}).")
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
