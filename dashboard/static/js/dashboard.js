@@ -2165,6 +2165,23 @@ function loadAlgoConfig() {
         .catch(function (err) { console.warn('[ALGO] loadAlgoConfig error:', err); });
 }
 
+// Explicitly attach to window object for global inline onclick access
+window.setAlgoConfig = setAlgoConfig;
+window.updateAlgoCardUI = updateAlgoCardUI;
+window.updateAlgoLabels = updateAlgoLabels;
+window.loadAlgoConfig = loadAlgoConfig;
+
+// Event delegation fallback for algorithm cards
+document.addEventListener('click', function (e) {
+    var card = e.target.closest ? e.target.closest('.algo-card[data-config]') : null;
+    if (card) {
+        var config = card.getAttribute('data-config');
+        if (config && typeof window.setAlgoConfig === 'function') {
+            window.setAlgoConfig(config);
+        }
+    }
+});
+
 function updateMLChart(chartName, history, algo) {
     // Init chart if not yet created (e.g. ML tab never opened)
     if (!charts[chartName]) {
