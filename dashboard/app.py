@@ -2323,7 +2323,7 @@ mqtt_data = {
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
-    'system': {'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
+    'system': {'algo_config': 'ga_pso', 'ac_algo': 'ga', 'lamp_algo': 'pso', 'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
     'ir_states': {},  # Track toggle states for power buttons
     'outlet': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'}
@@ -5079,22 +5079,23 @@ def ml_algo_config_api():
         new_config = data.get('config')
         if new_config in OPT_ALGO_OPTIONS:
             opt_algo_config = new_config
+            ac_algo = _get_ac_algo()
+            lamp_algo = _get_lamp_algo()
+            mqtt_data['system']['algo_config'] = opt_algo_config
+            mqtt_data['system']['ac_algo'] = ac_algo
+            mqtt_data['system']['lamp_algo'] = lamp_algo
             log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Algorithm config changed to {new_config}', 'level': 'info'})
             # Broadcast the change
             socketio.emit('mqtt_update', {
                 'type': 'system',
-                'data': {
-                    'algo_config': opt_algo_config,
-                    'ac_algo': _get_ac_algo(),
-                    'lamp_algo': _get_lamp_algo()
-                }
+                'data': mqtt_data['system']
             })
             return jsonify({
                 'status': 'success',
                 'message': f'Algorithm configuration updated to {new_config}',
                 'config': opt_algo_config,
-                'ac_algo': _get_ac_algo(),
-                'lamp_algo': _get_lamp_algo()
+                'ac_algo': ac_algo,
+                'lamp_algo': lamp_algo
             })
         else:
             return jsonify({'status': 'error', 'message': f'Invalid config. Must be one of {OPT_ALGO_OPTIONS}'}), 400
