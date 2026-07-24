@@ -1486,6 +1486,7 @@ function showPage(pageId) {
                 } catch (e) { console.warn('[NAV] chart resize error:', e); }
             }
             try { refreshMLData(); } catch (e) { console.error('[NAV] refreshMLData error:', e); }
+            try { loadAlgoConfig(); } catch (e) { console.warn('[NAV] loadAlgoConfig error:', e); }
         });
     }
     if (pageId === 'ac-analytics') {
@@ -2031,6 +2032,137 @@ function updateMLDisplay(data) {
             }
         }
     }
+
+    // Sync algorithm config UI if data includes algo info
+    if (data.algo_config) {
+        updateAlgoCardUI(data.algo_config);
+        updateAlgoLabels(data.ac_algo || 'ga', data.lamp_algo || 'pso');
+    }
+}
+
+// ==================== ALGORITHM SWITCHING ====================
+
+/**
+ * Set algorithm configuration via API and update UI.
+ * Called by onclick on algo cards in ml_optimization.html.
+ * @param {string} config - one of 'ga_pso', 'pso_ga', 'ga_ga', 'pso_pso'
+ */
+function setAlgoConfig(config) {
+    var statusEl = document.getElementById('algo-status');
+    if (statusEl) { statusEl.textContent = 'Saving...'; statusEl.style.opacity = '1'; statusEl.style.color = '#f59e0b'; }
+
+    fetch('/api/ml/algo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: config })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+        if (data.status === 'success') {
+            updateAlgoCardUI(data.config);
+            updateAlgoLabels(data.ac_algo, data.lamp_algo);
+            if (statusEl) { statusEl.textContent = '✓ Saved'; statusEl.style.color = '#10b981'; }
+            if (typeof showToast === 'function') {
+                var acLabel = (data.ac_algo || '').toUpperCase();
+                var lampLabel = (data.lamp_algo || '').toUpperCase();
+                showToast('Algorithm updated — AC: ' + acLabel + ', Lamp: ' + lampLabel, 'success');
+            }
+        } else {
+            if (statusEl) { statusEl.textContent = '✗ Error'; statusEl.style.color = '#ef4444'; }
+            if (typeof showToast === 'function') showToast('Failed: ' + (data.message || 'Unknown error'), 'error');
+        }
+        // Auto-hide status after 2s
+        setTimeout(function () { if (statusEl) statusEl.style.opacity = '0'; }, 2000);
+    })
+    .catch(function (err) {
+        console.error('[ALGO] setAlgoConfig error:', err);
+        if (statusEl) { statusEl.textContent = '✗ Error'; statusEl.style.color = '#ef4444'; }
+        setTimeout(function () { if (statusEl) statusEl.style.opacity = '0'; }, 2000);
+        if (typeof showToast === 'function') showToast('Network error setting algorithm', 'error');
+    });
+}
+
+/**
+ * Update algo card visual states (active border, badge visibility).
+ * @param {string} config - active config key e.g. 'ga_pso'
+ */
+function updateAlgoCardUI(config) {
+    var cards = document.querySelectorAll('.algo-card[data-config]');
+    cards.forEach(function (card) {
+        var isActive = card.getAttribute('data-config') === config;
+        var badge = card.querySelector('.algo-badge');
+        if (isActive) {
+            card.classList.add('active');
+            card.style.border = '2px solid #3b82f6';
+            card.style.background = 'rgba(59, 130, 246, 0.05)';
+            if (badge) { badge.style.display = 'block'; }
+        } else {
+            card.classList.remove('active');
+            card.style.border = '1px solid #e2e8f0';
+            card.style.background = '';
+            if (badge) { badge.style.display = 'none'; }
+        }
+    });
+}
+
+/**
+ * Update all text labels on the ML page to reflect active algorithm assignment.
+ * @param {string} acAlgo - 'ga' or 'pso'
+ * @param {string} lampAlgo - 'pso' or 'ga'
+ */
+function updateAlgoLabels(acAlgo, lampAlgo) {
+    var acUpper = (acAlgo || 'ga').toUpperCase();
+    var lampUpper = (lampAlgo || 'pso').toUpperCase();
+    var acColor = acAlgo === 'pso' ? '#0ea5e9' : '#3b82f6';
+    var lampColor = lampAlgo === 'ga' ? '#3b82f6' : '#0ea5e9';
+
+    // Summary card titles
+    var acTitleEl = document.getElementById('summary-ac-title');
+    if (acTitleEl) acTitleEl.textContent = acUpper + ' → AC';
+    var lampTitleEl = document.getElementById('summary-lamp-title');
+    if (lampTitleEl) lampTitleEl.textContent = lampUpper + ' → Lamp';
+
+    // Summary card icons
+    var acIconEl = document.getElementById('summary-ac-icon');
+    if (acIconEl) {
+        acIconEl.textContent = acUpper;
+        acIconEl.style.color = acColor;
+        acIconEl.style.background = acAlgo === 'pso' ? 'rgba(14, 165, 233, 0.2)' : 'rgba(59, 130, 246, 0.2)';
+    }
+    var lampIconEl = document.getElementById('summary-lamp-icon');
+    if (lampIconEl) {
+        lampIconEl.textContent = lampUpper;
+        lampIconEl.style.color = lampColor;
+        lampIconEl.style.background = lampAlgo === 'ga' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(14, 165, 233, 0.2)';
+    }
+
+    // Chart titles
+    var chartAcEl = document.getElementById('chart-ac-title');
+    if (chartAcEl) chartAcEl.textContent = acUpper + ' Fitness Convergence (AC Optimization)';
+    var chartLampEl = document.getElementById('chart-lamp-title');
+    if (chartLampEl) chartLampEl.textContent = lampUpper + ' — Detail Iteration (PWM1, PWM2, Lux Avg per Iteration)';
+
+    // History table headers
+    var histAcEl = document.getElementById('hist-ac-title');
+    if (histAcEl) histAcEl.textContent = acUpper;
+    var histLampEl = document.getElementById('hist-lamp-title');
+    if (histLampEl) histLampEl.textContent = lampUpper;
+}
+
+/**
+ * Load current algorithm config from server and sync UI.
+ * Called on ML page open.
+ */
+function loadAlgoConfig() {
+    fetch('/api/ml/algo')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.status === 'success') {
+                updateAlgoCardUI(data.config);
+                updateAlgoLabels(data.ac_algo, data.lamp_algo);
+            }
+        })
+        .catch(function (err) { console.warn('[ALGO] loadAlgoConfig error:', err); });
 }
 
 function updateMLChart(chartName, history, algo) {
@@ -3780,6 +3912,12 @@ function updateDashboard() {
                 // Energy data dihandle oleh mysql_energy_update event
                 // (ac-power, lamp-power, total-power, total-current, total-energy-kwh,
                 //  daily-cost diisi langsung dari MySQL via socket)
+
+                // Sync algorithm config UI from system data
+                if (system.algo_config) {
+                    updateAlgoCardUI(system.algo_config);
+                    updateAlgoLabels(system.ac_algo || 'ga', system.lamp_algo || 'pso');
+                }
 
                 updateModeBadges();
             } catch (e) { var p = document.getElementById('diag-panel'); if (p) { p.style.display = 'block'; var d = document.getElementById('diag-result'); if (d) d.textContent += '\\n[DASHBOARD ERROR] ' + e.message; } console.error(e); }
