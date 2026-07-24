@@ -5090,6 +5090,13 @@ def ml_algo_config_api():
                 'type': 'system',
                 'data': mqtt_data['system']
             })
+            # Trigger immediate background optimization run with newly selected algorithms
+            threading.Thread(
+                target=run_optimization_cycle,
+                args=('both',),
+                daemon=True,
+                name='algo-config-switch-run'
+            ).start()
             return jsonify({
                 'status': 'success',
                 'message': f'Algorithm configuration updated to {new_config}',
