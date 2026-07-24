@@ -5075,8 +5075,6 @@ def ml_algo_config_api():
             'options': list(OPT_ALGO_OPTIONS)
         })
     elif request.method == 'POST':
-        if session.get('role') != 'admin':
-            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
         data = request.json or {}
         new_config = data.get('config')
         if new_config in OPT_ALGO_OPTIONS:
