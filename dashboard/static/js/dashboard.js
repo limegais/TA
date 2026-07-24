@@ -2149,6 +2149,14 @@ function updateAlgoLabels(acAlgo, lampAlgo) {
     if (histAcEl) histAcEl.textContent = acUpper;
     var histLampEl = document.getElementById('hist-lamp-title');
     if (histLampEl) histLampEl.textContent = lampUpper;
+
+    // Dynamically update Chart 1 dataset label & line color according to AC algorithm
+    if (typeof charts !== 'undefined' && charts.gaFitness && charts.gaFitness.data && charts.gaFitness.data.datasets.length > 0) {
+        charts.gaFitness.data.datasets[0].label = acUpper + ' Best Fitness';
+        charts.gaFitness.data.datasets[0].borderColor = acColor;
+        charts.gaFitness.data.datasets[0].backgroundColor = acAlgo === 'pso' ? 'rgba(14, 165, 233, 0.15)' : 'rgba(59, 130, 246, 0.15)';
+        charts.gaFitness.update('none');
+    }
 }
 
 /**
