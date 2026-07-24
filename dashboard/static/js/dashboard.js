@@ -2048,6 +2048,8 @@ function updateMLDisplay(data) {
  * @param {string} config - one of 'ga_pso', 'pso_ga', 'ga_ga', 'pso_pso'
  */
 function setAlgoConfig(config) {
+    // Optimistic UI update
+    updateAlgoCardUI(config);
     var statusEl = document.getElementById('algo-status');
     if (statusEl) { statusEl.textContent = 'Saving...'; statusEl.style.opacity = '1'; statusEl.style.color = '#f59e0b'; }
 
@@ -5854,3 +5856,4 @@ window.onload = function () {
 
     console.log('[OK] Dashboard Ready!');
 };
+
