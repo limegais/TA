@@ -1917,15 +1917,18 @@ def save_pso_fitness_history_to_influx(fitness_history, iteration_log=None, run_
 
 # ==================== SENSOR FAULT DETECTION ====================
 # Thresholds: how many seconds without a message = sensor is "stale"
-SENSOR_STALE_WARN_S  = 10   # 2 min  → WARNING  (yellow)
-SENSOR_STALE_FAULT_S = 15   # 5 min  → FAULT    (red)
+SENSOR_STALE_WARN_S  = 120   # 2 min  → WARNING  (yellow)
+SENSOR_STALE_FAULT_S = 600   # 10 min → FAULT    (red)
+TELEGRAM_OFFLINE_THRESHOLD_S = 600  # 10 menit (600s) baru kirim notif Telegram
+
 # Track per-sensor last emit time so we don't spam the same fault
 _fault_last_emit = {}
+_telegram_alert_sent = {}
 
 def sensor_fault_loop():
-    """Background thread: check sensor staleness every 60 s and push alerts."""
+    """Background thread: check sensor staleness and push alerts (Telegram sent after 10 min offline)."""
     time.sleep(20)  # let devices connect first
-    print("[FAULT] Sensor fault detection started")
+    print("[FAULT] Sensor fault detection started (Telegram 10-min threshold enabled)")
     while True:
         try:
             now = datetime.now()
@@ -1942,9 +1945,9 @@ def sensor_fault_loop():
                 else:
                     age = (now - last).total_seconds()
 
-                if age == float('inf') or age > SENSOR_STALE_FAULT_S:
+                if age == float('inf') or age >= SENSOR_STALE_FAULT_S:
                     lvl = 'fault'
-                elif age > SENSOR_STALE_WARN_S:
+                elif age >= SENSOR_STALE_WARN_S:
                     lvl = 'warn'
                 else:
                     lvl = 'ok'
@@ -1952,7 +1955,7 @@ def sensor_fault_loop():
                 age_str = 'never' if age == float('inf') else f"{int(age)}s ago"
                 health[dev_id] = {'label': dev_label, 'status': lvl, 'age': age_str}
 
-                # Only emit alert once per transition to avoid spam
+                # Web UI socket alerts
                 prev = _fault_last_emit.get(dev_id, 'ok')
                 if lvl != 'ok' and prev == 'ok':
                     msg = f'[SENSOR FAULT] {dev_label} no data ({age_str})'
@@ -1961,24 +1964,43 @@ def sensor_fault_loop():
                     socketio.emit('alert', {'type': 'sensor_fault', 'level': level, 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': level})
                     print(msg)
-                    time_str = now.strftime('%H:%M:%S')
-                    send_telegram_alert(f"⚠️ <b>Sensor Terputus!</b>\n{dev_label} tidak mengirim data selama {age_str}.\nWaktu: {time_str}")
                 elif lvl == 'ok' and prev != 'ok':
-                    # Recovery
                     msg = f'[SENSOR OK] {dev_label} back online'
                     socketio.emit('sensor_fault', {'device': dev_id, 'label': dev_label, 'status': 'ok', 'age': age_str})
                     socketio.emit('alert', {'type': 'sensor_recovered', 'level': 'success', 'message': msg, 'time': now.strftime('%H:%M:%S')})
                     log_messages.append({'time': now.strftime('%H:%M:%S'), 'msg': msg, 'level': 'success'})
                     print(msg)
-                    time_str = now.strftime('%H:%M:%S')
-                    send_telegram_alert(f"✅ <b>Sensor Kembali Online!</b>\n{dev_label} sudah terhubung kembali.\nWaktu: {time_str}")
                 _fault_last_emit[dev_id] = lvl
+
+                # Telegram notification — ONLY send after 10 MINUTES (600s) offline
+                time_str = now.strftime('%H:%M:%S (%d %b %Y)')
+                if age >= TELEGRAM_OFFLINE_THRESHOLD_S and not _telegram_alert_sent.get(dev_id, False):
+                    mins = int(age // 60) if age != float('inf') else 10
+                    telegram_msg = (
+                        f"🚨 <b>PERINGATAN PERANGKAT OFFLINE!</b>\n\n"
+                        f"<b>Perangkat:</b> {dev_label}\n"
+                        f"<b>Status:</b> Terputus selama {mins} menit!\n"
+                        f"<b>Waktu:</b> {time_str}\n\n"
+                        f"<i>Mohon periksa daya atau jaringan Wi-Fi perangkat.</i>"
+                    )
+                    send_telegram_alert(telegram_msg)
+                    _telegram_alert_sent[dev_id] = True
+
+                elif lvl == 'ok' and _telegram_alert_sent.get(dev_id, False):
+                    telegram_recovery = (
+                        f"✅ <b>PERANGKAT KEMBALI ONLINE!</b>\n\n"
+                        f"<b>Perangkat:</b> {dev_label}\n"
+                        f"<b>Status:</b> Terhubung kembali secara normal.\n"
+                        f"<b>Waktu:</b> {time_str}"
+                    )
+                    send_telegram_alert(telegram_recovery)
+                    _telegram_alert_sent[dev_id] = False
 
             # Push health snapshot to frontend every cycle
             socketio.emit('sensor_health', health)
         except Exception as e:
             print(f"[FAULT] sensor_fault_loop error: {e}")
-        time.sleep(5)
+        time.sleep(10)
 
 def _pso_lamp_cycle():
     """One full lamp PSO cycle with sequence:
