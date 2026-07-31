@@ -2357,9 +2357,12 @@ function addMLHistoryRow(data) {
     const entry = {
         run: mlRunCount,
         time: new Date().toLocaleTimeString(),
+        mode: data.mode || 'ADAPTIVE',
         ga_fitness: data.ga_fitness || 0,
         ga_temp: data.ga_temp || '--',
         ga_fan: data.ga_fan || '--',
+        ga_mode: data.ga_mode || '--',
+        ga_rh: data.ga_rh !== undefined ? data.ga_rh : '--',
         pso_fitness: data.pso_fitness || 0,
         pso_brightness: data.pso_brightness || '--',
         // GA fitness sekarang sudah 0-100% dari server (normalized)
@@ -2418,12 +2421,25 @@ function exportMLHistory() {
         showToast('No optimization data to export', 'error');
         return;
     }
-    let csv = 'Run,Time,GA Fitness,AC Temp (C),Fan Speed,PSO Fitness,Brightness (%),Combined\\n';
-    mlHistory.forEach(e => {
-        csv += e.run + ',"' + e.time + '",' + e.ga_fitness.toFixed(2) + ',' + e.ga_temp + ',' + e.ga_fan + ',' + e.pso_fitness.toFixed(2) + ',' + e.pso_brightness + ',' + e.combined.toFixed(2) + '\\n';
+    // Header lengkap: tambah Mode Kontrol, Mode AC, Set RH
+    let csv = 'Run,Time,Mode Kontrol,GA Fitness (%),AC Temp (C),Fan Speed,Mode AC,Set RH (%),PSO Fitness (err),Brightness (%),Combined (%)\\n';
+    mlHistory.forEach(function(e) {
+        var mode    = e.mode    || 'ADAPTIVE';
+        var gaMode  = e.ga_mode || '--';
+        var gaRh    = (e.ga_rh !== undefined && e.ga_rh !== '--') ? e.ga_rh : '--';
+        csv += e.run + ',"' + e.time + '",' +
+               mode + ',' +
+               e.ga_fitness.toFixed(2) + ',' +
+               e.ga_temp + ',' +
+               e.ga_fan + ',' +
+               gaMode + ',' +
+               gaRh + ',' +
+               e.pso_fitness.toFixed(2) + ',' +
+               e.pso_brightness + ',' +
+               e.combined.toFixed(2) + '\\n';
     });
     downloadCSV('ml_optimization_history.csv', csv);
-    showToast('ML history exported', 'success');
+    showToast('ML history exported (' + mlHistory.length + ' runs)', 'success');
 }
 
 function exportLogs() {
@@ -5224,8 +5240,14 @@ socket.on('mqtt_update', function (data) {
         updateMLDisplay(data.data);
         if (gaFitness > 0 || psoFitness > 0) {
             addMLHistoryRow({
-                ga_fitness: gaFitness, ga_temp: gaTemp, ga_fan: gaFan,
-                pso_fitness: psoFitness, pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
+                ga_fitness:     gaFitness,
+                ga_temp:        gaTemp,
+                ga_fan:         gaFan,
+                ga_mode:        data.data.ga_mode   || '--',
+                ga_rh:          data.data.ga_set_rh !== undefined ? data.data.ga_set_rh : '--',
+                mode:           data.data.mode       || 'ADAPTIVE',
+                pso_fitness:    psoFitness,
+                pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
             });
         }
         // Update GA/PSO convergence charts from history arrays
