@@ -4182,22 +4182,29 @@ from(bucket: "{INFLUX_BUCKET}")
                 output = io.StringIO()
                 output.write("sep=,\n")
                 writer = _csv.writer(output)
-                writer.writerow(['Timestamp','Voltage (V)','Current (A)','Power Active (W)',
-                                 'Frequency (Hz)','Power Factor','Konsumsi Energy (kWh)'])
+                # Header diselaraskan dengan format MySQL (9 kolom)
+                # Catatan: reactive_power & apparent_power tidak tersimpan di InfluxDB → N/A
+                writer.writerow(['Timestamp', 'Voltage (V)', 'Current (A)', 'Power Active (W)',
+                                 'Reactive Power (VAR)', 'Apparent Power (VA)',
+                                 'Power Factor', 'Frequency (Hz)', 'Konsumsi Energy (kWh)',
+                                 '[Source: InfluxDB fallback — MySQL unavailable]'])
                 for ts in sorted_ts:
                     r = rows_by_ts[ts]
                     kwh_raw = r.get('energy_kwh')
                     kwh = round(float(kwh_raw) - (first_kwh or 0), 4) if kwh_raw is not None else ''
                     writer.writerow([ts,
-                        round(r.get('voltage',  0) or 0, 2),
-                        round(r.get('current',  0) or 0, 3),
-                        round(r.get('power',    0) or 0, 1),
-                        round(r.get('frequency',0) or 0, 2),
+                        round(r.get('voltage',      0) or 0, 2),
+                        round(r.get('current',      0) or 0, 3),
+                        round(r.get('power',        0) or 0, 1),
+                        'N/A',   # reactive_power — tidak tersedia di InfluxDB
+                        'N/A',   # apparent_power — tidak tersedia di InfluxDB
                         round(r.get('power_factor', 0) or 0, 3),
+                        round(r.get('frequency',    0) or 0, 2),
                         kwh,
+                        '',
                     ])
                 csv_bytes = output.getvalue().encode('utf-8-sig')
-                fname = f"{dtype}_{from_dt}_sd_{to_dt}.csv"
+                fname = f"{dtype}_{from_dt}_sd_{to_dt}_influx_fallback.csv"
                 return Response(csv_bytes, mimetype='text/csv',
                                 headers={'Content-Disposition': f'attachment; filename="{fname}"'})
             except Exception as e2:
@@ -4300,11 +4307,9 @@ from(bucket: "{INFLUX_BUCKET}")
                 round(row_d.get(f, ''), 4) if isinstance(row_d.get(f), float) else row_d.get(f, '')
                 for f in fields
             ]
-            
-            # Hanya sertakan baris yang datanya lengkap (tidak ada kolom kosong)
-            if '' in row:
-                continue
-                
+
+            # Tulis semua baris — kolom yang tidak tersedia dibiarkan kosong ('')
+            # (filter ketat sebelumnya menyebabkan data hilang saat sensor belum lengkap)
             writer.writerow(row)
 
         csv_bytes = output.getvalue().encode('utf-8-sig')
@@ -5083,6 +5088,105 @@ def pso_export_csv():
         mimetype='text/csv',
         headers={'Content-Disposition': f'attachment; filename=pso_iterations_{ts}.csv'}
     )
+
+
+@app.route('/api/outlet/export/csv')
+@admin_required
+def outlet_export_csv():
+    """Export outlet energy history as CSV from MySQL (via PHP proxy).
+    Optional params: from=YYYY-MM-DD  to=YYYY-MM-DD
+    If not provided, exports the latest snapshot from the PHP proxy.
+    """
+    import io, csv as csv_mod
+
+    from_dt = request.args.get('from', '')
+    to_dt   = request.args.get('to', '')
+
+    output = io.StringIO()
+    output.write("sep=,\n")
+    fields = ['timestamp', 'voltage', 'current', 'active_power',
+              'reactive_power', 'apparent_power', 'power_factor', 'frequency', 'energy_kwh']
+    header_labels = {
+        'timestamp':      'Timestamp',
+        'voltage':        'Voltage (V)',
+        'current':        'Current (A)',
+        'active_power':   'Active Power (W)',
+        'reactive_power': 'Reactive Power (VAR)',
+        'apparent_power': 'Apparent Power (VA)',
+        'power_factor':   'Power Factor',
+        'frequency':      'Frequency (Hz)',
+        'energy_kwh':     'Konsumsi Energy (kWh)',
+    }
+    writer = csv_mod.writer(output)
+    writer.writerow([header_labels[f] for f in fields])
+
+    if from_dt and to_dt:
+        # Export rentang tanggal dari MySQL via PHP proxy (id_kwh=2 → Outlet)
+        try:
+            datetime.strptime(from_dt, '%Y-%m-%d')
+            datetime.strptime(to_dt,   '%Y-%m-%d')
+        except ValueError:
+            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+        try:
+            rows = _fetch_energy_history_from_mysql(id_kwh=2, from_dt=from_dt, to_dt=to_dt)
+        except Exception as ex:
+            return jsonify({'error': f'Gagal fetch data outlet dari MySQL: {ex}'}), 502
+        if not rows:
+            return jsonify({'error': f'Tidak ada data outlet untuk rentang {from_dt} s/d {to_dt}'}), 404
+        for r in rows:
+            ap = float(r.get('apparent_power') or 0)
+            p  = float(r.get('active_power')   or 0)
+            pf = round(p / ap, 3) if ap > 0.001 else 0.0
+            writer.writerow([
+                r.get('timestamp', ''),
+                r.get('voltage',       ''),
+                r.get('current',           ''),
+                r.get('active_power',   ''),
+                r.get('reactive_power', ''),
+                r.get('apparent_power', ''),
+                pf,
+                r.get('frequency',      ''),
+                r.get('energy_kwh',     ''),
+            ])
+        fname = f"outlet_energy_{from_dt}_sd_{to_dt}.csv"
+    else:
+        # Snapshot terbaru dari PHP proxy (tanpa rentang tanggal)
+        import urllib.request as _ureq, json as _json
+        PHP_URL = f'{_PHP_ENERGY_HISTORY_URL}?key={_PHP_ENERGY_KEY}'
+        try:
+            req = _ureq.Request(PHP_URL, headers={'User-Agent': 'SmartRoom-Export/1.0'})
+            with _ureq.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+        except Exception as ex:
+            return jsonify({'error': f'Gagal fetch PHP proxy: {ex}'}), 502
+        if 'error' in data:
+            return jsonify({'error': data['error']}), 500
+        outlet = data.get('outlet') or data.get('outlet1')
+        if not outlet:
+            return jsonify({'error': 'Tidak ada data outlet dari PHP proxy'}), 404
+        ap = float(outlet.get('apparent_power') or 0)
+        p  = float(outlet.get('active_power')   or 0)
+        pf = round(p / ap, 3) if ap > 0.001 else 0.0
+        writer.writerow([
+            str(outlet.get('created_at', '')),
+            float(outlet.get('voltage',   0)),
+            float(outlet.get('current',       0)),
+            p,
+            float(outlet.get('reactive_power', 0)),
+            ap,
+            pf,
+            float(outlet.get('frequency',  0)),
+            round(float(outlet.get('total_energy', 0)) / 1000.0, 5),
+        ])
+        fname = f"outlet_energy_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    csv_bytes = output.getvalue().encode('utf-8-sig')
+    return Response(
+        csv_bytes,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{fname}"'}
+    )
+
 
 @app.route('/api/ml/algo', methods=['GET', 'POST'])
 def ml_algo_config_api():
