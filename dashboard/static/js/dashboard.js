@@ -2181,6 +2181,150 @@ window.updateAlgoCardUI = updateAlgoCardUI;
 window.updateAlgoLabels = updateAlgoLabels;
 window.loadAlgoConfig = loadAlgoConfig;
 
+// ==================== ML PARAMETER SETTINGS ====================
+
+/** Default values (mirrors GA_DEFAULTS and PSO_DEFAULTS in app.py) */
+var GA_PARAM_DEFAULTS = {
+    'population_size': 15, 'generations': 20, 'mutation_rate': 0.30,
+    'crossover_rate': 0.85, 'elitism_ratio': 0.20, 'tournament_size': 3,
+    'ac_temp_min': 16, 'ac_temp_max': 30, 'fan_min': 1, 'fan_max': 3
+};
+var PSO_PARAM_DEFAULTS = {
+    'swarm_size': 10, 'iterations': 20, 'w': 0.50, 'c1': 1.5, 'c2': 1.5,
+    'brightness_min': 0, 'brightness_max': 255,
+    'target_lux_work': 400, 'target_lux_sleep': 50
+};
+
+/** Map: param key → input element ID */
+var GA_FIELD_MAP = {
+    'population_size': 'ga-pop-size', 'generations': 'ga-generations',
+    'mutation_rate': 'ga-mutation', 'crossover_rate': 'ga-crossover',
+    'elitism_ratio': 'ga-elitism', 'tournament_size': 'ga-tournament',
+    'ac_temp_min': 'ga-temp-min', 'ac_temp_max': 'ga-temp-max',
+    'fan_min': 'ga-fan-min', 'fan_max': 'ga-fan-max'
+};
+var PSO_FIELD_MAP = {
+    'swarm_size': 'pso-n-particles', 'iterations': 'pso-iterations',
+    'w': 'pso-w', 'c1': 'pso-c1', 'c2': 'pso-c2',
+    'brightness_min': 'pso-bright-min', 'brightness_max': 'pso-bright-max',
+    'target_lux_work': 'pso-lux-work', 'target_lux_sleep': 'pso-lux-sleep'
+};
+
+/**
+ * Load current GA & PSO params from server and populate the form inputs.
+ * Called when the ML Optimization tab is opened.
+ */
+function loadMLParams() {
+    fetch('/api/ml/params')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.status !== 'success') return;
+            // Populate GA fields
+            var ga = data.ga || {};
+            Object.keys(GA_FIELD_MAP).forEach(function(key) {
+                var el = document.getElementById(GA_FIELD_MAP[key]);
+                if (el && ga[key] !== undefined) el.value = ga[key];
+            });
+            // Populate PSO fields
+            var pso = data.pso || {};
+            Object.keys(PSO_FIELD_MAP).forEach(function(key) {
+                var el = document.getElementById(PSO_FIELD_MAP[key]);
+                if (el && pso[key] !== undefined) el.value = pso[key];
+            });
+        })
+        .catch(function(err) { console.warn('[PARAMS] loadMLParams error:', err); });
+}
+
+/**
+ * Read all param form inputs, validate, and POST to /api/ml/params.
+ * Shows status indicator in the header of the parameter card.
+ */
+function saveMLParams() {
+    var statusEl = document.getElementById('param-save-status');
+    var btnEl    = document.getElementById('btn-save-params');
+    if (statusEl) { statusEl.textContent = '⏳ Menyimpan...'; statusEl.style.color = '#f59e0b'; statusEl.style.opacity = '1'; }
+    if (btnEl)    { btnEl.disabled = true; btnEl.style.opacity = '0.6'; }
+
+    // Collect GA values
+    var ga = {};
+    Object.keys(GA_FIELD_MAP).forEach(function(key) {
+        var el = document.getElementById(GA_FIELD_MAP[key]);
+        if (el) ga[key] = parseFloat(el.value);
+    });
+
+    // Collect PSO values
+    var pso = {};
+    Object.keys(PSO_FIELD_MAP).forEach(function(key) {
+        var el = document.getElementById(PSO_FIELD_MAP[key]);
+        if (el) pso[key] = parseFloat(el.value);
+    });
+
+    fetch('/api/ml/params', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ga: ga, pso: pso })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.status === 'success') {
+            if (statusEl) { statusEl.textContent = '✓ Parameter tersimpan!'; statusEl.style.color = '#10b981'; }
+            if (typeof showToast === 'function') showToast('Parameter GA & PSO berhasil disimpan', 'success');
+            // Refresh form with saved values from server
+            if (data.ga) Object.keys(GA_FIELD_MAP).forEach(function(key) {
+                var el = document.getElementById(GA_FIELD_MAP[key]);
+                if (el && data.ga[key] !== undefined) el.value = data.ga[key];
+            });
+            if (data.pso) Object.keys(PSO_FIELD_MAP).forEach(function(key) {
+                var el = document.getElementById(PSO_FIELD_MAP[key]);
+                if (el && data.pso[key] !== undefined) el.value = data.pso[key];
+            });
+        } else {
+            var errs = (data.errors || [data.message || 'Error tidak diketahui']).join(', ');
+            if (statusEl) { statusEl.textContent = '⚠ ' + errs; statusEl.style.color = '#ef4444'; }
+            if (typeof showToast === 'function') showToast('Error: ' + errs, 'error');
+        }
+    })
+    .catch(function(err) {
+        console.error('[PARAMS] saveMLParams error:', err);
+        if (statusEl) { statusEl.textContent = '⚠ Gagal terhubung ke server'; statusEl.style.color = '#ef4444'; }
+        if (typeof showToast === 'function') showToast('Gagal menyimpan parameter (network error)', 'error');
+    })
+    .finally(function() {
+        if (btnEl) { btnEl.disabled = false; btnEl.style.opacity = '1'; }
+        setTimeout(function() { if (statusEl) statusEl.style.opacity = '0'; }, 3500);
+    });
+}
+
+/** Reset GA form fields to default values */
+function resetGADefaults() {
+    Object.keys(GA_FIELD_MAP).forEach(function(key) {
+        var el = document.getElementById(GA_FIELD_MAP[key]);
+        if (el && GA_PARAM_DEFAULTS[key] !== undefined) el.value = GA_PARAM_DEFAULTS[key];
+    });
+    if (typeof showToast === 'function') showToast('Parameter GA direset ke default', 'info');
+}
+
+/** Reset PSO form fields to default values */
+function resetPSODefaults() {
+    Object.keys(PSO_FIELD_MAP).forEach(function(key) {
+        var el = document.getElementById(PSO_FIELD_MAP[key]);
+        if (el && PSO_PARAM_DEFAULTS[key] !== undefined) el.value = PSO_PARAM_DEFAULTS[key];
+    });
+    if (typeof showToast === 'function') showToast('Parameter PSO direset ke default', 'info');
+}
+
+// Expose to global scope (callable from inline onclick in HTML)
+window.saveMLParams      = saveMLParams;
+window.loadMLParams      = loadMLParams;
+window.resetGADefaults   = resetGADefaults;
+window.resetPSODefaults  = resetPSODefaults;
+
+// Auto-load params when ML Optimization tab becomes active
+document.addEventListener('click', function(e) {
+    var navLink = e.target.closest ? e.target.closest('[data-page="ml-optimization"], [onclick*="ml-optimization"]') : null;
+    if (navLink) { setTimeout(loadMLParams, 300); }
+});
+
 // Event delegation fallback for algorithm cards
 document.addEventListener('click', function (e) {
     var card = e.target.closest ? e.target.closest('.algo-card[data-config]') : null;
@@ -2191,6 +2335,8 @@ document.addEventListener('click', function (e) {
         }
     }
 });
+
+
 
 function updateMLChart(chartName, history, algo) {
     // Init chart if not yet created (e.g. ML tab never opened)
