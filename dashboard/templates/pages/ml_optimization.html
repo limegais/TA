@@ -682,114 +682,278 @@
     </div>
   </div>
 
-  <!-- Parameter Configuration -->
-  <div class="stats-grid ml-params-grid">
-    <div class="chart-container" style="margin-bottom: 0">
-      <div class="chart-header">
-        <div class="chart-title">GA Parameters</div>
-      </div>
-      <div class="ml-param-grid">
-        <div class="ml-param-item">
-          <label>Population Size</label>
-          <input
-            type="number"
-            id="ml-ga-pop"
-            value="15"
-            min="5"
-            max="100"
-            class="ml-input"
-          />
-        </div>
-        <div class="ml-param-item">
-          <label>Generations</label>
-          <input
-            type="number"
-            id="ml-ga-gen"
-            value="30"
-            min="10"
-            max="500"
-            class="ml-input"
-          />
-        </div>
-        <div class="ml-param-item">
-          <label>Mutation Rate</label>
-          <input
-            type="number"
-            id="ml-ga-mut"
-            value="0.25"
-            min="0.01"
-            max="0.5"
-            step="0.01"
-            class="ml-input"
-          />
-        </div>
-        <div class="ml-param-item">
-          <label>Crossover Rate</label>
-          <input
-            type="number"
-            id="ml-ga-cross"
-            value="0.8"
-            min="0.1"
-            max="1.0"
-            step="0.05"
-            class="ml-input"
-          />
-        </div>
+  <!-- ==================== ALGORITHM PARAMETER SETTINGS ==================== -->
+  <div class="chart-container" id="algo-param-settings" style="margin-top: 24px;">
+    <div class="chart-header">
+      <div class="chart-title">⚙️ Algorithm Parameter Settings</div>
+      <div class="chart-options" style="display:flex; align-items:center; gap:10px;">
+        <span id="param-save-status" style="font-size:13px; font-weight:600; opacity:0; transition:opacity 0.4s;"></span>
+        <button onclick="saveMLParams()"
+          id="btn-save-params"
+          style="padding:8px 22px; border-radius:8px;
+                 background:linear-gradient(135deg,#2563eb,#1d4ed8);
+                 border:none; color:#fff; font-size:13px; font-weight:700;
+                 cursor:pointer; transition:all 0.2s; letter-spacing:.3px;"
+          onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+          💾 Apply & Save
+        </button>
       </div>
     </div>
 
-    <div class="chart-container" style="margin-bottom: 0">
-      <div class="chart-header">
-        <div class="chart-title">PSO Parameters</div>
+    <div style="padding: 4px 20px 6px; font-size:12px; color:#64748b;">
+      Ubah parameter algoritma di bawah ini lalu klik <strong>Apply & Save</strong>. Perubahan berlaku langsung pada siklus optimasi berikutnya.
+      <span style="color:#f59e0b; font-weight:600;"> ⚠ Parameter kembali ke default jika server di-restart.</span>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; padding: 16px 20px 20px;">
+
+      <!-- ===== GA CARD ===== -->
+      <div style="background:rgba(59,130,246,0.05); border:1px solid rgba(59,130,246,0.25);
+                  border-radius:12px; padding:18px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div style="background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff;
+                        font-size:12px; font-weight:800; padding:4px 10px;
+                        border-radius:6px; letter-spacing:.5px;">GA</div>
+            <span style="font-size:15px; font-weight:700; color:#e2e8f0;">Genetic Algorithm</span>
+          </div>
+          <button onclick="resetGADefaults()"
+            style="padding:5px 12px; border-radius:6px; background:rgba(59,130,246,0.12);
+                   border:1px solid rgba(59,130,246,0.3); color:#93c5fd;
+                   font-size:11px; font-weight:600; cursor:pointer; transition:all 0.2s;"
+            onmouseover="this.style.background='rgba(59,130,246,0.25)'"
+            onmouseout="this.style.background='rgba(59,130,246,0.12)'">
+            ↺ Reset Default
+          </button>
+        </div>
+
+        <!-- GA params grid -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+
+          <div class="param-field">
+            <label class="param-label" title="Jumlah kromosom/individu per generasi. Populasi besar = eksplorasi luas, tapi lebih lambat.">
+              Populasi <span class="param-hint">5–200</span>
+            </label>
+            <input type="number" id="ga-pop-size" min="5" max="200" value="15" class="param-input param-input-blue">
+            <div class="param-desc">Jumlah kromosom per generasi</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Jumlah iterasi evolusi. Generasi banyak = lebih presisi, tapi lebih lama.">
+              Generasi <span class="param-hint">5–500</span>
+            </label>
+            <input type="number" id="ga-generations" min="5" max="500" value="20" class="param-input param-input-blue">
+            <div class="param-desc">Jumlah iterasi evolusi</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Probabilitas mutasi gen secara acak. Tinggi = lebih exploratory, risiko diverge.">
+              Mutation Rate <span class="param-hint">0.01–0.90</span>
+            </label>
+            <input type="number" id="ga-mutation" min="0.01" max="0.90" step="0.01" value="0.30" class="param-input param-input-blue">
+            <div class="param-desc">Prob. perubahan gen acak</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Probabilitas crossover (BLX-α). Tinggi = lebih banyak rekombinasi antar orang tua.">
+              Crossover Rate <span class="param-hint">0.10–1.00</span>
+            </label>
+            <input type="number" id="ga-crossover" min="0.10" max="1.00" step="0.05" value="0.85" class="param-input param-input-blue">
+            <div class="param-desc">Prob. rekombinasi kromosom</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Persentase individu terbaik yang otomatis lolos ke generasi berikutnya (elitisme).">
+              Elitisme (%) <span class="param-hint">0.00–0.50</span>
+            </label>
+            <input type="number" id="ga-elitism" min="0.00" max="0.50" step="0.05" value="0.20" class="param-input param-input-blue">
+            <div class="param-desc">Rasio survivor terbaik</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Jumlah kandidat yang bersaing di seleksi turnamen. Lebih besar = seleksi lebih ketat.">
+              Tournament Size <span class="param-hint">2–10</span>
+            </label>
+            <input type="number" id="ga-tournament" min="2" max="10" value="3" class="param-input param-input-blue">
+            <div class="param-desc">Ukuran seleksi turnamen</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Batas bawah suhu AC yang boleh dipilih oleh GA (°C).">
+              Suhu Min AC (°C) <span class="param-hint">16–28</span>
+            </label>
+            <input type="number" id="ga-temp-min" min="16" max="28" value="16" class="param-input param-input-blue">
+            <div class="param-desc">Batas bawah suhu AC</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Batas atas suhu AC yang boleh dipilih oleh GA (°C).">
+              Suhu Max AC (°C) <span class="param-hint">18–30</span>
+            </label>
+            <input type="number" id="ga-temp-max" min="18" max="30" value="30" class="param-input param-input-blue">
+            <div class="param-desc">Batas atas suhu AC</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Batas minimum kecepatan kipas AC (1=Low, 3=High).">
+              Fan Min <span class="param-hint">1–3</span>
+            </label>
+            <input type="number" id="ga-fan-min" min="1" max="3" value="1" class="param-input param-input-blue">
+            <div class="param-desc">Kecepatan kipas minimum</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Batas maksimum kecepatan kipas AC (1=Low, 3=High).">
+              Fan Max <span class="param-hint">1–3</span>
+            </label>
+            <input type="number" id="ga-fan-max" min="1" max="3" value="3" class="param-input param-input-blue">
+            <div class="param-desc">Kecepatan kipas maksimum</div>
+          </div>
+        </div>
       </div>
-      <div class="ml-param-grid">
-        <div class="ml-param-item">
-          <label>Swarm Size</label>
-          <input
-            type="number"
-            id="ml-pso-swarm"
-            value="30"
-            min="5"
-            max="100"
-            class="ml-input"
-          />
+
+      <!-- ===== PSO CARD ===== -->
+      <div style="background:rgba(14,165,233,0.05); border:1px solid rgba(14,165,233,0.25);
+                  border-radius:12px; padding:18px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div style="background:linear-gradient(135deg,#0ea5e9,#0891b2); color:#fff;
+                        font-size:12px; font-weight:800; padding:4px 10px;
+                        border-radius:6px; letter-spacing:.5px;">PSO</div>
+            <span style="font-size:15px; font-weight:700; color:#e2e8f0;">Particle Swarm Optimization</span>
+          </div>
+          <button onclick="resetPSODefaults()"
+            style="padding:5px 12px; border-radius:6px; background:rgba(14,165,233,0.12);
+                   border:1px solid rgba(14,165,233,0.3); color:#7dd3fc;
+                   font-size:11px; font-weight:600; cursor:pointer; transition:all 0.2s;"
+            onmouseover="this.style.background='rgba(14,165,233,0.25)'"
+            onmouseout="this.style.background='rgba(14,165,233,0.12)'">
+            ↺ Reset Default
+          </button>
         </div>
-        <div class="ml-param-item">
-          <label>Iterations</label>
-          <input
-            type="number"
-            id="ml-pso-iter"
-            value="100"
-            min="10"
-            max="500"
-            class="ml-input"
-          />
-        </div>
-        <div class="ml-param-item">
-          <label>Inertia (w)</label>
-          <input
-            type="number"
-            id="ml-pso-w"
-            value="0.7"
-            min="0.1"
-            max="1.5"
-            step="0.05"
-            class="ml-input"
-          />
-        </div>
-        <div class="ml-param-item">
-          <label>c1 / c2</label>
-          <input
-            type="number"
-            id="ml-pso-c"
-            value="1.5"
-            min="0.5"
-            max="3.0"
-            step="0.1"
-            class="ml-input"
-          />
+
+        <!-- PSO params grid -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+
+          <div class="param-field">
+            <label class="param-label" title="Jumlah partikel dalam kawanan PSO. Lebih banyak = eksplorasi lebih luas, tapi lebih lambat.">
+              Partikel <span class="param-hint">5–200</span>
+            </label>
+            <input type="number" id="pso-n-particles" min="5" max="200" value="10" class="param-input param-input-cyan">
+            <div class="param-desc">Jumlah partikel dalam kawanan</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Jumlah iterasi pergerakan partikel. Lebih banyak = konvergensi lebih akurat.">
+              Iterasi <span class="param-hint">5–500</span>
+            </label>
+            <input type="number" id="pso-iterations" min="5" max="500" value="20" class="param-input param-input-cyan">
+            <div class="param-desc">Jumlah iterasi pergerakan</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Inertia weight (w): mengontrol seberapa besar kecepatan sebelumnya memengaruhi gerakan. Tinggi = eksplorasi, rendah = eksploitasi.">
+              W — Inersia <span class="param-hint">0.1–1.5</span>
+            </label>
+            <input type="number" id="pso-w" min="0.1" max="1.5" step="0.05" value="0.50" class="param-input param-input-cyan">
+            <div class="param-desc">Bobot inersia kecepatan partikel</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Cognitive coefficient (C1): bobot kepercayaan partikel terhadap posisi terbaiknya sendiri (personal best).">
+              C1 — Kognitif <span class="param-hint">0.5–4.0</span>
+            </label>
+            <input type="number" id="pso-c1" min="0.5" max="4.0" step="0.1" value="1.5" class="param-input param-input-cyan">
+            <div class="param-desc">Kepercayaan terhadap personal best</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Social coefficient (C2): bobot kepercayaan partikel terhadap posisi terbaik kelompok (global best).">
+              C2 — Sosial <span class="param-hint">0.5–4.0</span>
+            </label>
+            <input type="number" id="pso-c2" min="0.5" max="4.0" step="0.1" value="1.5" class="param-input param-input-cyan">
+            <div class="param-desc">Kepercayaan terhadap global best</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Brightness minimum yang boleh dipilih PSO (0 = mati total).">
+              Brightness Min <span class="param-hint">0–100</span>
+            </label>
+            <input type="number" id="pso-bright-min" min="0" max="100" value="0" class="param-input param-input-cyan">
+            <div class="param-desc">Batas bawah brightness lampu</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Brightness maksimum yang boleh dipilih PSO (255 = terang penuh).">
+              Brightness Max <span class="param-hint">100–255</span>
+            </label>
+            <input type="number" id="pso-bright-max" min="100" max="255" value="255" class="param-input param-input-cyan">
+            <div class="param-desc">Batas atas brightness lampu</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Target cahaya (lux) saat ada orang di ruangan (mode kerja/belajar). Standar: 350–500 lux.">
+              Target Lux (Ada Orang) <span class="param-hint">100–1000</span>
+            </label>
+            <input type="number" id="pso-lux-work" min="100" max="1000" value="400" class="param-input param-input-cyan">
+            <div class="param-desc">Target lux saat ruangan terisi</div>
+          </div>
+
+          <div class="param-field">
+            <label class="param-label" title="Target cahaya (lux) saat ruangan kosong. Bisa 0 untuk matikan lampu sepenuhnya.">
+              Target Lux (Kosong) <span class="param-hint">0–300</span>
+            </label>
+            <input type="number" id="pso-lux-sleep" min="0" max="300" value="50" class="param-input param-input-cyan">
+            <div class="param-desc">Target lux saat ruangan kosong</div>
+          </div>
+
         </div>
       </div>
+    </div><!-- /grid -->
+
+    <!-- Bottom info bar -->
+    <div style="margin: 0 20px 18px; padding:10px 14px; border-radius:8px;
+                background:rgba(148,163,184,0.05); border:1px solid rgba(148,163,184,0.1);
+                font-size:11px; color:#64748b; display:flex; gap:20px; flex-wrap:wrap;">
+      <span>💡 <strong>Tip:</strong> Hover setiap label parameter untuk melihat penjelasan detailnya.</span>
+      <span>⚡ Klik <strong>Apply & Save</strong> untuk langsung menerapkan perubahan tanpa restart server.</span>
+      <span>🔄 Parameter reset ke default saat server Flask di-restart.</span>
     </div>
   </div>
+
+  <!-- ===== INLINE STYLES FOR PARAM FIELDS ===== -->
+  <style>
+    .param-field {
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .param-label {
+      font-size: 11px; font-weight: 600; color: #94a3b8;
+      text-transform: uppercase; letter-spacing: .5px; cursor: help;
+    }
+    .param-label:hover { color: #e2e8f0; }
+    .param-hint {
+      font-weight: 400; color: #475569; font-size: 10px; text-transform: none; letter-spacing: 0;
+    }
+    .param-input {
+      padding: 7px 10px; border-radius: 7px;
+      background: #0f172a; color: #e2e8f0; font-size: 14px; font-weight: 600;
+      border: 1px solid rgba(148,163,184,0.2); outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      width: 100%; box-sizing: border-box;
+    }
+    .param-input-blue:focus  { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
+    .param-input-cyan:focus  { border-color: #0ea5e9; box-shadow: 0 0 0 2px rgba(14,165,233,0.15); }
+    .param-desc {
+      font-size: 10px; color: #475569; margin-top: 1px;
+    }
+    @media (max-width: 768px) {
+      #algo-param-settings .chart-container > div[style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+      }
+    }
+  </style>
+
 </div>
+
+
+
