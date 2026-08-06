@@ -5233,6 +5233,139 @@ def ml_algo_config_api():
         else:
             return jsonify({'status': 'error', 'message': f'Invalid config. Must be one of {OPT_ALGO_OPTIONS}'}), 400
 
+@app.route('/api/ml/params', methods=['GET', 'POST'])
+def ml_params_api():
+    """Get or update GA and PSO algorithm parameters at runtime."""
+    global ga_params, pso_params
+
+    # ---- Default values (used for reset) ----
+    GA_DEFAULTS  = {'population_size': 15, 'generations': 20, 'mutation_rate': 0.3,
+                    'crossover_rate': 0.85, 'elitism_ratio': 0.2, 'tournament_size': 3,
+                    'ac_temp_min': 16, 'ac_temp_max': 30, 'fan_min': 1, 'fan_max': 3}
+    PSO_DEFAULTS = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5,
+                    'brightness_min': 0, 'brightness_max': 255,
+                    'target_lux_work': 400, 'target_lux_sleep': 50}
+
+    if request.method == 'GET':
+        return jsonify({
+            'status': 'success',
+            'ga': {**GA_DEFAULTS, **ga_params},
+            'pso': {**PSO_DEFAULTS, **pso_params},
+            'ga_defaults': GA_DEFAULTS,
+            'pso_defaults': PSO_DEFAULTS
+        })
+
+    # ---- POST: validate and update ----
+    data = request.json or {}
+    errors = []
+
+    # --- Validate GA ---
+    new_ga = data.get('ga', {})
+    if new_ga:
+        if 'population_size' in new_ga:
+            v = int(new_ga['population_size'])
+            if not (5 <= v <= 200): errors.append('GA population_size harus 5–200')
+            else: ga_params['population_size'] = v
+        if 'generations' in new_ga:
+            v = int(new_ga['generations'])
+            if not (5 <= v <= 500): errors.append('GA generations harus 5–500')
+            else: ga_params['generations'] = v
+        if 'mutation_rate' in new_ga:
+            v = float(new_ga['mutation_rate'])
+            if not (0.01 <= v <= 0.9): errors.append('GA mutation_rate harus 0.01–0.90')
+            else: ga_params['mutation_rate'] = round(v, 3)
+        if 'crossover_rate' in new_ga:
+            v = float(new_ga['crossover_rate'])
+            if not (0.1 <= v <= 1.0): errors.append('GA crossover_rate harus 0.10–1.00')
+            else: ga_params['crossover_rate'] = round(v, 3)
+        if 'elitism_ratio' in new_ga:
+            v = float(new_ga['elitism_ratio'])
+            if not (0.0 <= v <= 0.5): errors.append('GA elitism_ratio harus 0.00–0.50')
+            else: ga_params['elitism_ratio'] = round(v, 3)
+        if 'tournament_size' in new_ga:
+            v = int(new_ga['tournament_size'])
+            if not (2 <= v <= 10): errors.append('GA tournament_size harus 2–10')
+            else: ga_params['tournament_size'] = v
+        if 'ac_temp_min' in new_ga:
+            v = int(new_ga['ac_temp_min'])
+            if not (16 <= v <= 28): errors.append('GA ac_temp_min harus 16–28')
+            else: ga_params['ac_temp_min'] = v
+        if 'ac_temp_max' in new_ga:
+            v = int(new_ga['ac_temp_max'])
+            if not (18 <= v <= 30): errors.append('GA ac_temp_max harus 18–30')
+            else: ga_params['ac_temp_max'] = v
+        if 'fan_min' in new_ga:
+            v = int(new_ga['fan_min'])
+            if not (1 <= v <= 3): errors.append('GA fan_min harus 1–3')
+            else: ga_params['fan_min'] = v
+        if 'fan_max' in new_ga:
+            v = int(new_ga['fan_max'])
+            if not (1 <= v <= 3): errors.append('GA fan_max harus 1–3')
+            else: ga_params['fan_max'] = v
+
+    # --- Validate PSO ---
+    new_pso = data.get('pso', {})
+    if new_pso:
+        if 'swarm_size' in new_pso:
+            v = int(new_pso['swarm_size'])
+            if not (5 <= v <= 200): errors.append('PSO swarm_size harus 5–200')
+            else: pso_params['swarm_size'] = v
+        if 'iterations' in new_pso:
+            v = int(new_pso['iterations'])
+            if not (5 <= v <= 500): errors.append('PSO iterations harus 5–500')
+            else: pso_params['iterations'] = v
+        if 'w' in new_pso:
+            v = float(new_pso['w'])
+            if not (0.1 <= v <= 1.5): errors.append('PSO w (inertia) harus 0.1–1.5')
+            else: pso_params['w'] = round(v, 3)
+        if 'c1' in new_pso:
+            v = float(new_pso['c1'])
+            if not (0.5 <= v <= 4.0): errors.append('PSO c1 harus 0.5–4.0')
+            else: pso_params['c1'] = round(v, 3)
+        if 'c2' in new_pso:
+            v = float(new_pso['c2'])
+            if not (0.5 <= v <= 4.0): errors.append('PSO c2 harus 0.5–4.0')
+            else: pso_params['c2'] = round(v, 3)
+        if 'brightness_min' in new_pso:
+            v = int(new_pso['brightness_min'])
+            if not (0 <= v <= 100): errors.append('PSO brightness_min harus 0–100')
+            else: pso_params['brightness_min'] = v
+        if 'brightness_max' in new_pso:
+            v = int(new_pso['brightness_max'])
+            if not (100 <= v <= 255): errors.append('PSO brightness_max harus 100–255')
+            else: pso_params['brightness_max'] = v
+        if 'target_lux_work' in new_pso:
+            v = int(new_pso['target_lux_work'])
+            if not (100 <= v <= 1000): errors.append('PSO target_lux_work harus 100–1000')
+            else: pso_params['target_lux_work'] = v
+        if 'target_lux_sleep' in new_pso:
+            v = int(new_pso['target_lux_sleep'])
+            if not (0 <= v <= 300): errors.append('PSO target_lux_sleep harus 0–300')
+            else: pso_params['target_lux_sleep'] = v
+
+    # Handle reset flag
+    if data.get('reset_ga'):
+        ga_params.update(GA_DEFAULTS)
+    if data.get('reset_pso'):
+        pso_params.update(PSO_DEFAULTS)
+
+    if errors:
+        return jsonify({'status': 'error', 'errors': errors}), 400
+
+    log_messages.append({
+        'time': datetime.now().strftime('%H:%M:%S'),
+        'msg': f'ML Params updated: GA={ga_params} | PSO={pso_params}',
+        'level': 'info'
+    })
+    return jsonify({
+        'status': 'success',
+        'message': 'Parameter berhasil disimpan',
+        'ga': {**GA_DEFAULTS, **ga_params},
+        'pso': {**PSO_DEFAULTS, **pso_params}
+    })
+
+
+
 @app.route('/api/ml/run', methods=['POST'])
 @admin_required
 def ml_run():
