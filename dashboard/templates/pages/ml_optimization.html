@@ -955,5 +955,110 @@
 
 </div>
 
+<!-- ===== INLINE SCRIPT: Parameter functions — always available regardless of dashboard.js version ===== -->
+<script>
+(function() {
+    var GA_DEFAULTS = {
+        population_size: 15, generations: 20, mutation_rate: 0.30,
+        crossover_rate: 0.85, elitism_ratio: 0.20, tournament_size: 3,
+        ac_temp_min: 16, ac_temp_max: 30, fan_min: 1, fan_max: 3
+    };
+    var PSO_DEFAULTS = {
+        swarm_size: 10, iterations: 20, w: 0.50, c1: 1.5, c2: 1.5,
+        brightness_min: 0, brightness_max: 255,
+        target_lux_work: 400, target_lux_sleep: 50
+    };
+    var GA_MAP = {
+        population_size: 'ga-pop-size', generations: 'ga-generations',
+        mutation_rate: 'ga-mutation', crossover_rate: 'ga-crossover',
+        elitism_ratio: 'ga-elitism', tournament_size: 'ga-tournament',
+        ac_temp_min: 'ga-temp-min', ac_temp_max: 'ga-temp-max',
+        fan_min: 'ga-fan-min', fan_max: 'ga-fan-max'
+    };
+    var PSO_MAP = {
+        swarm_size: 'pso-n-particles', iterations: 'pso-iterations',
+        w: 'pso-w', c1: 'pso-c1', c2: 'pso-c2',
+        brightness_min: 'pso-bright-min', brightness_max: 'pso-bright-max',
+        target_lux_work: 'pso-lux-work', target_lux_sleep: 'pso-lux-sleep'
+    };
 
+    function _setField(map, key, val) {
+        var el = document.getElementById(map[key]);
+        if (el && val !== undefined) el.value = val;
+    }
+    function _getField(map, key) {
+        var el = document.getElementById(map[key]);
+        return el ? parseFloat(el.value) : undefined;
+    }
+    function _toast(msg, type) {
+        if (typeof showToast === 'function') showToast(msg, type || 'info');
+    }
 
+    window.loadMLParams = function() {
+        fetch('/api/ml/params')
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                if (d.status !== 'success') return;
+                var ga = d.ga || {}, pso = d.pso || {};
+                Object.keys(GA_MAP).forEach(function(k){ _setField(GA_MAP, k, ga[k]); });
+                Object.keys(PSO_MAP).forEach(function(k){ _setField(PSO_MAP, k, pso[k]); });
+            })
+            .catch(function(e){ console.warn('[PARAMS] loadMLParams:', e); });
+    };
+
+    window.saveMLParams = function() {
+        var statusEl = document.getElementById('param-save-status');
+        var btnEl    = document.getElementById('btn-save-params');
+        if (statusEl){ statusEl.textContent = '⏳ Menyimpan...'; statusEl.style.color = '#f59e0b'; statusEl.style.opacity = '1'; }
+        if (btnEl)   { btnEl.disabled = true; btnEl.style.opacity = '0.6'; }
+
+        var ga = {}, pso = {};
+        Object.keys(GA_MAP).forEach(function(k){ ga[k] = _getField(GA_MAP, k); });
+        Object.keys(PSO_MAP).forEach(function(k){ pso[k] = _getField(PSO_MAP, k); });
+
+        fetch('/api/ml/params', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ga: ga, pso: pso })
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (d.status === 'success') {
+                if (statusEl){ statusEl.textContent = '✓ Parameter tersimpan!'; statusEl.style.color = '#10b981'; }
+                _toast('Parameter GA & PSO berhasil disimpan', 'success');
+                if (d.ga)  Object.keys(GA_MAP).forEach(function(k){ _setField(GA_MAP, k, d.ga[k]); });
+                if (d.pso) Object.keys(PSO_MAP).forEach(function(k){ _setField(PSO_MAP, k, d.pso[k]); });
+            } else {
+                var errs = (d.errors || [d.message || 'Error']).join(', ');
+                if (statusEl){ statusEl.textContent = '⚠ ' + errs; statusEl.style.color = '#ef4444'; }
+                _toast('Error: ' + errs, 'error');
+            }
+        })
+        .catch(function(e){
+            if (statusEl){ statusEl.textContent = '⚠ Gagal terhubung ke server'; statusEl.style.color = '#ef4444'; }
+            _toast('Gagal menyimpan (network error)', 'error');
+        })
+        .finally(function(){
+            if (btnEl){ btnEl.disabled = false; btnEl.style.opacity = '1'; }
+            setTimeout(function(){ if (statusEl) statusEl.style.opacity = '0'; }, 3500);
+        });
+    };
+
+    window.resetGADefaults = function() {
+        Object.keys(GA_MAP).forEach(function(k){ _setField(GA_MAP, k, GA_DEFAULTS[k]); });
+        _toast('Parameter GA direset ke default', 'info');
+    };
+
+    window.resetPSODefaults = function() {
+        Object.keys(PSO_MAP).forEach(function(k){ _setField(PSO_MAP, k, PSO_DEFAULTS[k]); });
+        _toast('Parameter PSO direset ke default', 'info');
+    };
+
+    // Auto-load params when this page is rendered
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', window.loadMLParams);
+    } else {
+        setTimeout(window.loadMLParams, 200);
+    }
+})();
+</script>
