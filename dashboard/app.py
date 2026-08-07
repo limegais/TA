@@ -326,6 +326,77 @@ def _get_weather_ac_adjustment():
 
     return temp_offset, solar_load, out_temp, out_humid, True
 
+def _estimate_room_conditions(temp_set, fan_speed, mode_idx, set_rh):
+    """
+    Surrogate model: prediksi kondisi ruangan jika kromosom [temp_set, fan_speed, mode_idx, set_rh]
+    diterapkan ke AC. Digunakan sebagai input intermediate sebelum fitness dihitung.
+
+    Alur evaluasi kromosom:
+        [T_set, Fan, Mode, RH_set]
+              ↓
+        _estimate_room_conditions()   ← surrogate / empirical model
+              ↓
+        Prediksi: T̂_room, R̂H_room, Ê_ratio
+              ↓
+        calculate_ac_fitness()        ← gunakan estimasi, bukan sensor aktual mentah
+
+    Catatan penting:
+    - Sensor daya aktual (MySQL energy meter / PZEM) TIDAK digunakan untuk menghitung
+      fitness per-kromosom. Data daya nyata hanya tersedia setelah command dikirim ke AC.
+      Peran sensor daya:
+        1. Monitoring konsumsi aktual
+        2. Kalibrasi / validasi model COP
+        3. Logging ke InfluxDB
+        4. Evaluasi apakah hasil optimasi benar-benar hemat energi
+
+    Returns:
+        T_est   : float  — estimasi suhu ruangan yang akan dicapai
+        RH_est  : float  — estimasi kelembapan ruangan
+        E_ratio : float  — rasio efisiensi energi (0.0 = boros, 1.0 = hemat)
+    """
+    temp_room = opt_sensor_data['temperature']
+    humidity  = opt_sensor_data['humidity']
+
+    # ── Estimasi suhu ruangan setelah AC bekerja ──────────────────────────
+    # Fan lebih kencang → ruangan mendekati setpoint lebih cepat
+    # Model sederhana: T̂ = T_room - gap × fan_factor × koefisien_pendinginan
+    temp_gap    = temp_room - temp_set
+    fan_factor  = fan_speed / OPT_FAN_MAX          # 0.25 (fan1) → 1.0 (fan4)
+    # Mode FAN tidak mendinginkan udara — hanya sirkulasi
+    cooling_coef = 0.0 if mode_idx == 2 else 0.55  # FAN mode: no cooling
+    T_est = temp_room - temp_gap * fan_factor * cooling_coef
+    T_est = max(OPT_TEMP_MIN - 2.0, min(temp_room + 2.0, T_est))  # clip masuk akal
+
+    # ── Estimasi kelembapan ruangan ───────────────────────────────────────
+    # DRY mode lebih efektif mendehumidifikasi
+    if mode_idx == 1:  # DRY
+        dehumid_strength = min(1.0, max(0.0, (humidity - 40.0) / 40.0))
+        RH_est = humidity - dehumid_strength * 12.0
+    elif mode_idx == 0:  # COOL — dehumidifikasi ringan dari kondensasi
+        RH_est = humidity - max(0.0, temp_gap) * 0.4
+    else:  # FAN / AUTO — kelembapan tidak berubah signifikan
+        RH_est = humidity
+    RH_est = max(25.0, min(95.0, RH_est))
+
+    # ── Estimasi rasio efisiensi energi (surrogate/COP model) ────────────
+    # Catatan: actual_watt dari MySQL hanya tersedia SETELAH command dikirim.
+    # Di sini digunakan sebagai kalibrasi referensi siklus sebelumnya, bukan
+    # sebagai input real-time per-kromosom.
+    actual_watt = opt_sensor_data.get('actual_watt', 0.0)
+    if actual_watt > 50.0:
+        # Kalibrasi: gunakan data daya terakhir sebagai referensi beban
+        MAX_WATT_REF = 1500.0
+        E_ratio = max(0.0, 1.0 - actual_watt / MAX_WATT_REF)
+    else:
+        # Fallback: model COP empiris berdasarkan delta suhu dan kecepatan kipas
+        delta = max(0.0, temp_room - temp_set)
+        cop_eff = math.exp(-delta * 0.22)              # makin besar delta → makin boros
+        fan_eff = 1.0 - (fan_speed - 1) / 6.0         # fan1→1.0, fan4→0.5
+        E_ratio = cop_eff * 0.65 + fan_eff * 0.35
+
+    return T_est, RH_est, E_ratio
+
+
 def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
     Genes: [temp, fan_speed, mode_idx, set_rh]
@@ -337,6 +408,12 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     Outdoor weather scoring (max ±12 pts):
       Solar heat gain, outdoor temp pressure, outdoor humidity → DRY mode, mild weather saving.
     """
+    # ── Langkah 1: Estimasi kondisi ruangan untuk kromosom ini ───────────────
+    # Setiap kromosom dievaluasi menggunakan model estimasi (surrogate),
+    # bukan langsung dari bacaan sensor mentah. Sensor aktual digunakan sebagai
+    # kondisi awal / konteks, bukan output yang dievaluasi.
+    T_est, RH_est, E_ratio = _estimate_room_conditions(temp_set, fan_speed, mode_idx, set_rh)
+
     temp_room = opt_sensor_data['temperature']
     humidity = opt_sensor_data['humidity']
     # Use 5-min window so brief camera misses don't cause GA to optimize for "no person" temps
@@ -395,19 +472,14 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     else:
         ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    # ── Energy efficiency ─────────────────────────────────────────────────────────
-    # Use real PZEM watt data when available; fall back to COP-based model.
-    # COP model: efficiency drops exponentially as setpoint moves further below room temp.
-    # Fan also consumes power — penalise high fan speed when gap is small.
-    actual_watt = opt_sensor_data.get('actual_watt', 0.0)
-    if actual_watt > 50.0:   # MySQL energy meter has live data and AC is drawing power
-        MAX_WATT_REF = 1500.0
-        energy_ratio = max(0.0, 1.0 - actual_watt / MAX_WATT_REF)
-    else:
-        temp_delta = max(0.0, temp_room - temp_set)   # how hard AC must work
-        cop_efficiency = math.exp(-temp_delta * 0.22)  # exp(-0.44)≈0.64 at 2°C, exp(-1.1)≈0.33 at 5°C
-        fan_efficiency = 1.0 - (fan_speed - 1) / 6.0  # fan1→1.0, fan4→0.5
-        energy_ratio = cop_efficiency * 0.65 + fan_efficiency * 0.35
+    # ── Langkah 2: Efisiensi Energi (menggunakan estimasi surrogate, bukan sensor real-time) ──
+    # E_ratio berasal dari _estimate_room_conditions() — model COP empiris per-kromosom.
+    # Sensor daya aktual (MySQL energy meter) HANYA digunakan untuk:
+    #   - Monitoring konsumsi aktual setelah command diterapkan
+    #   - Kalibrasi referensi model COP pada siklus berikutnya
+    #   - Logging dan validasi hasil optimasi
+    # Bukan sebagai input fitness individual kromosom.
+    energy_ratio = E_ratio  # dari surrogate model per-kromosom
     # >5 people: comfort & cooling takes priority over energy efficiency
     if person_count > 5:
         energy_weight = 4.0
@@ -529,74 +601,151 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
 
     return max(0.0, round(fitness, 2))
 
-def calculate_lamp_fitness_2d(pwm1, pwm2):
-    """PSO fitness function — MINIMIZE (smaller = better).
-
-    Goal:
-    1. Lux_avg near 350 lux (main target)
-    2. Balanced distribution between sensors — no sensor should be much
-       brighter or darker than the others
-    3. Each sensor at least 200 lux (no completely dark corners)
-
-    Fitness formula:
-        error_avg     = (Lux_avg - 350)^2              → pursue average target
-        error_balance = variance(L1, L2, L3)            → penalize uneven distribution
-        error_min     = penalty if any sensor < 200     → penalize dark corners
-        Fitness = error_avg + w_bal * error_balance + w_min * error_min
-
-    Estimasi lux per sensor menggunakan model proporsional berbasis gain aktual.
+def _estimate_lamp_conditions(pwm1, pwm2):
     """
+    Surrogate model: estimasi kondisi pencahayaan untuk partikel PSO kandidat.
+
+    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0–100%).
+    Nilai ini menjadi command utama yang kemudian diterjemahkan oleh controller
+    menjadi sinyal PWM untuk KEEMPAT lampu dalam ruangan.
+
+    Alur evaluasi per-partikel:
+        Partikel [PWM1, PWM2]
+              ↓
+        Brightness = rata-rata(PWM1, PWM2) / 255 × 100%   ← perintah sistem
+              ↓
+        Estimasi Daya: Power_est = Brightness × 280 W      ← 4 lampu × 70W/lampu (maks)
+              ↓
+        Estimasi Lux per sensor (model proporsional berbasis gain aktual)
+              ↓
+        Fitness = error_avg + W_bal × error_balance + W_min × error_min
+
+    Catatan penting tentang sensor daya:
+    - Sistem hanya memiliki SATU sensor daya (energy meter).
+    - Sensor ini mengukur TOTAL konsumsi daya seluruh lampu, bukan per-lampu.
+    - Sensor daya TIDAK digunakan untuk menghitung fitness per-partikel.
+    - Peran sensor daya lampu:
+        1. Monitoring konsumsi total aktual
+        2. Validasi apakah hasil optimasi benar-benar hemat energi
+        3. Logging ke InfluxDB
+
+    Args:
+        pwm1 (int): nilai PWM kandidat channel 1 (0–255)
+        pwm2 (int): nilai PWM kandidat channel 2 (0–255)
+
+    Returns:
+        brightness_pct : float  — kecerahan keseluruhan sistem (0.0–100.0 %)
+        power_est      : float  — estimasi daya total keempat lampu (Watt)
+        est_lux1       : float  — estimasi lux sensor 1
+        est_lux2       : float  — estimasi lux sensor 2
+        est_lux3       : float  — estimasi lux sensor 3
+    """
+    # ── Brightness: rata-rata dua channel PWM sebagai representasi sistem ──
+    # Meskipun PSO mengoptimalkan 2 channel, brightness sistem = rata-ratanya
+    # karena keempat lampu dikendalikan secara proporsional oleh kedua channel.
+    pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
+    brightness_pct = pwm_cand / 255.0 * 100.0   # konversi ke % (0–100)
+
+    # ── Estimasi daya: Power = Brightness × P_max ────────────────────────
+    # 4 lampu × 70W per lampu = 280W total saat brightness 100%
+    # Model linier: P_est = (brightness_pct / 100) × 280 W
+    # Ini adalah surrogate model — bukan pembacaan sensor langsung per-partikel.
+    LAMP_MAX_WATT = 280.0   # 4 lampu × 70W
+    power_est = (brightness_pct / 100.0) * LAMP_MAX_WATT
+
+    # ── Estimasi lux per sensor (model proporsional berbasis gain aktual) ────
+    # Setiap partikel menghasilkan prediksi lux yang BERBEDA sesuai dengan
+    # brightness-nya masing-masing.
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
     lux2 = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
     lux3 = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
-    person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
-    TARGET_LUX  = 350.0 if person_detected else 0.0
-    MIN_LUX     = 200.0  # minimum accepted lux per sensor
-    W_BALANCE   = 0.5    # bobot penalty distribusi
-    W_MIN       = 1.5    # bobot penalty sensor di bawah minimum (lebih ketat)
 
-    # Current average PWM (0-255)
     b1_pct  = float(opt_sensor_data.get('curr_brightness1', 0))
     b2_pct  = float(opt_sensor_data.get('curr_brightness2', 0))
-    pwm_now = ((b1_pct + b2_pct) / 2.0) * 255.0 / 100.0
+    pwm_now = ((b1_pct + b2_pct) / 2.0) * 255.0 / 100.0  # PWM aktual saat ini
 
-    # Candidate average PWM
-    pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
-
-    # Estimated lux per sensor for candidate PWM
-    lux_now = (lux1 + lux2 + lux3) / 3.0
     if pwm_now > 5:
+        # Kondisi lampu menyala: gunakan skala proporsional
+        # est_lux_i = lux_sensor_i_sekarang × (PWM_kandidat / PWM_sekarang)
         ratio    = pwm_cand / pwm_now
         est_lux1 = max(0.0, lux1 * ratio)
         est_lux2 = max(0.0, lux2 * ratio)
         est_lux3 = max(0.0, lux3 * ratio)
     else:
-        GAIN_DEFAULT = 1.57
+        # Kondisi lampu mati: gunakan gain default empiris
+        # est_lux_i = PWM_kandidat × 1.57 lux/PWM  (dikalibrasi dari pengukuran)
+        GAIN_DEFAULT = 1.57   # lux per PWM unit (empirical, dikalibrasi dari sistem)
         est_lux1 = pwm_cand * GAIN_DEFAULT
         est_lux2 = pwm_cand * GAIN_DEFAULT
         est_lux3 = pwm_cand * GAIN_DEFAULT
 
+    return brightness_pct, power_est, est_lux1, est_lux2, est_lux3
+
+
+def calculate_lamp_fitness_2d(pwm1, pwm2):
+    """PSO fitness function — MINIMIZE (smaller = better, target = 0).
+
+    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0–100%).
+    Nilai ini menjadi command yang diterjemahkan controller menjadi sinyal PWM
+    untuk KEEMPAT lampu. PSO mengoptimalkan dua channel (PWM1, PWM2), di mana
+    rata-ratanya merepresentasikan brightness sistem.
+
+    Alur evaluasi per-partikel (setiap partikel menghasilkan prediksi berbeda):
+        Partikel [PWM1, PWM2]
+              ↓
+        Brightness (%) = rata-rata(PWM1, PWM2) / 255 × 100
+              ↓
+        Estimasi Daya: Power_est = Brightness × 280 W  (4 lampu × 70W)
+              ↓
+        Estimasi Lux per sensor:
+            Jika lampu menyala: est_lux_i = lux_sensor_i × (PWM_cand / PWM_now)
+            Jika lampu mati:    est_lux_i = PWM_cand × 1.57  (gain default empiris)
+              ↓
+        Fitness = error_avg + W_bal × error_balance + W_min × error_min
+
+    Catatan sensor daya:
+    - Satu sensor daya mengukur TOTAL konsumsi seluruh lampu (bukan per-PWM).
+    - Sensor daya TIDAK digunakan untuk menghitung fitness partikel.
+    - Kegunaan sensor daya: monitoring, validasi hasil, dan logging.
+    """
+    # ── Langkah 1: Estimasi kondisi pencahayaan untuk partikel kandidat ini ──
+    # Setiap partikel PSO memiliki PWM1/PWM2 berbeda → brightness berbeda
+    # → prediksi lux yang berbeda → fitness yang berbeda
+    brightness_pct, power_est, est_lux1, est_lux2, est_lux3 = \
+        _estimate_lamp_conditions(pwm1, pwm2)
+
+    # ── Langkah 2: Tentukan target dan bobot ─────────────────────────────────
+    person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
+    TARGET_LUX = 350.0 if person_detected else 0.0
+    MIN_LUX    = 200.0   # lux minimum per sensor (tidak ada sudut gelap)
+    W_BALANCE  = 0.5     # bobot penalti distribusi
+    W_MIN      = 1.5     # bobot penalti sensor gelap (lebih ketat)
+
+    # ── Langkah 3: Hitung komponen error ─────────────────────────────────────
     lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
 
-    # 1. Average error relative to target
+    # Komponen 1: error rata-rata terhadap target 350 lux
     error_avg = (lux_est_avg - TARGET_LUX) ** 2
 
-    # 2. Distribution penalty: variance between sensors (balanced = small variance)
-    mean_e = lux_est_avg
-    variance = ((est_lux1 - mean_e)**2 + (est_lux2 - mean_e)**2 + (est_lux3 - mean_e)**2) / 3.0
+    # Komponen 2: penalti distribusi tidak merata (variance antar sensor)
+    variance = ((est_lux1 - lux_est_avg)**2 +
+                (est_lux2 - lux_est_avg)**2 +
+                (est_lux3 - lux_est_avg)**2) / 3.0
     error_balance = variance
 
-    # 3. Penalty for sensor below minimum 200 lux
+    # Komponen 3: penalti sensor di bawah 200 lux (sudut gelap)
     error_min = 0.0
     for est in [est_lux1, est_lux2, est_lux3]:
         if est < MIN_LUX:
             error_min += (MIN_LUX - est) ** 2
 
-    # Tolerance: fitness = 0 if avg 315-385 AND all sensors >= 200
+    # ── Langkah 4: Tolerance check — kondisi sempurna (fitness = 0) ──────────
+    # Lux rata-rata 315–385 DAN semua sensor ≥ 200 lux → tujuan tercapai
     if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
             and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
         return 0.0
 
+    # ── Langkah 5: Gabungkan komponen fitness ────────────────────────────────
     fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min
     return round(fitness, 4)
 
@@ -834,10 +983,12 @@ def run_ga_optimization(verbose=False):
                 c1m = p1[2] if random.random() < 0.5 else p2[2]
                 c2m = p2[2] if random.random() < 0.5 else p1[2]
                 # BLX-alpha crossover for set_rh
+                # Gunakan round() bukan int() agar distribusi tidak bias ke bawah
+                # (int(50.9) = 50, round(50.9) = 51 — lebih presisi)
                 rh_lo, rh_hi = min(p1[3], p2[3]), max(p1[3], p2[3])
                 rh_span = rh_hi - rh_lo
-                c1r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
-                c2r = int(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span))))
+                c1r = int(round(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span)))))
+                c2r = int(round(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span)))))
                 child1, child2 = [c1t, c1f, c1m, c1r], [c2t, c2f, c2m, c2r]
             else:
                 child1, child2 = p1[:], p2[:]
@@ -850,9 +1001,15 @@ def run_ga_optimization(verbose=False):
                     step = (2.0 * (1 - progress) + 0.5) * (2.0 if boost else 1.0)
                     child[0] = round(max(OPT_TEMP_MIN, min(OPT_TEMP_MAX, child[0] + random.gauss(0, step))), 1)
                 if random.random() < adaptive_rate:
-                    child[1] = random.randint(OPT_FAN_MIN, OPT_FAN_MAX)
+                    # Mutasi fan: selalu pilih nilai BERBEDA dari nilai saat ini
+                    fan_choices = [v for v in range(OPT_FAN_MIN, OPT_FAN_MAX + 1) if v != child[1]]
+                    if fan_choices:
+                        child[1] = random.choice(fan_choices)
                 if random.random() < adaptive_rate * 0.5:  # mode mutates less often
-                    child[2] = random.randint(OPT_MODE_MIN, OPT_MODE_MAX)
+                    # Mutasi mode: selalu pilih nilai BERBEDA dari nilai saat ini
+                    mode_choices = [v for v in range(OPT_MODE_MIN, OPT_MODE_MAX + 1) if v != child[2]]
+                    if mode_choices:
+                        child[2] = random.choice(mode_choices)
                 if random.random() < adaptive_rate:
                     rh_step = int((10.0 * (1 - progress) + 2.0) * (2.0 if boost else 1.0))
                     child[3] = max(OPT_RH_MIN, min(OPT_RH_MAX, child[3] + random.randint(-rh_step, rh_step)))
@@ -861,21 +1018,24 @@ def run_ga_optimization(verbose=False):
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # brute-force validation (temp × fan × mode × rh_samples search)
-    bf_best_fit, bf_best_sol = -1, None
+    # Coarse Grid Search Validation (temp × fan × mode × rh_samples)
+    # Catatan: ini bukan exhaustive search — RH hanya diuji pada 8 titik sampel
+    # (bukan semua integer 30-80), sehingga disebut Coarse Grid Search, bukan Brute-Force.
+    # Total kombinasi: 15 × 4 × 4 × 8 = 1.920 kombinasi
+    gs_best_fit, gs_best_sol = -1, None
     rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
         for f in range(OPT_FAN_MIN, OPT_FAN_MAX + 1):
             for m in range(OPT_MODE_MIN, OPT_MODE_MAX + 1):
                 for rh in rh_samples:
                     fit = calculate_ac_fitness(t, f, m, rh)
-                    if fit > bf_best_fit:
-                        bf_best_fit, bf_best_sol = fit, [t, f, m, rh]
-    if bf_best_fit > best_fitness:
-        best_solution = [float(bf_best_sol[0]), bf_best_sol[1], bf_best_sol[2], bf_best_sol[3]]
-        best_fitness = bf_best_fit
+                    if fit > gs_best_fit:
+                        gs_best_fit, gs_best_sol = fit, [t, f, m, rh]
+    if gs_best_fit > best_fitness:
+        best_solution = [float(gs_best_sol[0]), gs_best_sol[1], gs_best_sol[2], gs_best_sol[3]]
+        best_fitness = gs_best_fit
     final = [int(round(best_solution[0])), best_solution[1], best_solution[2], best_solution[3]]
-    return final, best_fitness, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
+    return final, best_fitness, fitness_history, {'solution': gs_best_sol, 'fitness': gs_best_fit}
 
 def run_pso_for_ac(verbose=False):
     """PSO optimizer for AC settings — same search space as GA.
