@@ -73,7 +73,7 @@ def check_timezone():
             if tz:
                 print(f"  [TZ] Timezone OK: {tz}")
     except FileNotFoundError:
-        pass   # Not on Linux/RPi — skip silently
+        pass   # Not on Linux/RPi -- skip silently
     except Exception as e:
         print(f"[WARN] Timezone check failed: {e}")
 GOOGLE_FORM_URL = "https://docs.google.com/forms/"
@@ -93,8 +93,8 @@ lamp_recording = {
     'after': {'active': False, 'start': None, 'end': None}
 }
 
-# Lamp power estimation constants (ESP32 Lamp has no PZEM — we estimate from brightness)
-LAMP_RATED_WATT = 30.0   # Total watts of both lamps at 100% brightness (2 × 15W LED)
+# Lamp power estimation constants (ESP32 Lamp has no PZEM -- we estimate from brightness)
+LAMP_RATED_WATT = 30.0   # Total watts of both lamps at 100% brightness (2 x 15W LED)
 LAMP_VOLTAGE = 220.0     # Voltage nominal Indonesia
 _lamp_energy_kwh = 0.0   # kWh accumulator for lamp estimation
 _lamp_energy_last_ts = 0.0
@@ -107,7 +107,7 @@ ENERGY_RECORDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ENERGY_RECORDING_BAK  = ENERGY_RECORDING_FILE + '.bak'
 
 def _validate_recording_entry(entry):
-    """Return a clean recording entry dict — reject bad types from corrupted JSON."""
+    """Return a clean recording entry dict -- reject bad types from corrupted JSON."""
     if not isinstance(entry, dict):
         return {'active': False, 'start': None, 'end': None}
     return {
@@ -120,7 +120,7 @@ def save_energy_recording():
     """
     Atomically persist recording state to disk.
     Strategy: write to a temp file in the same directory, fsync, then rename
-    (rename is atomic on POSIX/ext4 — what the RPi runs).
+    (rename is atomic on POSIX/ext4 -- what the RPi runs).
     A .bak copy of the previous good file is kept for disaster recovery.
     """
     with _recording_lock:
@@ -140,11 +140,11 @@ def save_energy_recording():
                 with os.fdopen(fd, 'w') as fh:
                     json.dump(payload, fh, indent=2)
                     fh.flush()
-                    os.fsync(fh.fileno())   # force kernel buffer → disk
+                    os.fsync(fh.fileno())   # force kernel buffer -> disk
             except Exception:
                 os.unlink(tmp_path)
                 raise
-            # Rotate: current → .bak, then new → current  (two renames, both atomic)
+            # Rotate: current -> .bak, then new -> current  (two renames, both atomic)
             if os.path.exists(ENERGY_RECORDING_FILE):
                 os.replace(ENERGY_RECORDING_FILE, ENERGY_RECORDING_BAK)
             os.replace(tmp_path, ENERGY_RECORDING_FILE)
@@ -199,20 +199,20 @@ def load_energy_recording():
             # Warn if any recording was still active when the server stopped
             for ph in ('before', 'after'):
                 if energy_recording[ph]['active']:
-                    print(f"[WARN] AC recording '{ph}' was active at last shutdown — resuming. "
+                    print(f"[WARN] AC recording '{ph}' was active at last shutdown -- resuming. "
                           f"Gap since {energy_recording[ph]['start']} will appear in data.")
                 if lamp_recording[ph]['active']:
-                    print(f"[WARN] Lamp recording '{ph}' was active at last shutdown — resuming.")
+                    print(f"[WARN] Lamp recording '{ph}' was active at last shutdown -- resuming.")
 
             src = "main" if candidate == ENERGY_RECORDING_FILE else "BACKUP"
             print(f"[OK] Loaded energy recording ({src}): "
                   f"ac_phase={energy_phase}, lamp_phase={lamp_phase}, "
                   f"lamp_kwh={_lamp_energy_kwh:.4f}")
-            return  # success — stop trying candidates
+            return  # success -- stop trying candidates
         except Exception as e:
             print(f"[WARN] load_energy_recording failed for {candidate}: {e}")
 
-    print("[INFO] No valid energy_recording.json found — starting fresh.")
+    print("[INFO] No valid energy_recording.json found -- starting fresh.")
 
 load_energy_recording()
 
@@ -238,9 +238,9 @@ opt_sensor_data = {
     'person_count': 0,                                  # number of people detected (0 = empty)
 }
 
-# Auto optimization config — separate intervals for AC (slow) and Lamp (fast)
-AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC — aligned with AC_ADAPTIVE_DEBOUNCE so every GA run can apply
-AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp — aligned with LAMP_ADAPTIVE_DEBOUNCE so every run can apply
+# Auto optimization config -- separate intervals for AC (slow) and Lamp (fast)
+AUTO_OPT_INTERVAL_AC = 600   # 10 min for AC -- aligned with AC_ADAPTIVE_DEBOUNCE so every GA run can apply
+AUTO_OPT_INTERVAL_LAMP = 300 # 5 min for Lamp -- aligned with LAMP_ADAPTIVE_DEBOUNCE so every run can apply
 optimization_lock = threading.Lock()
 optimization_run_count = 0
 last_opt_results = {
@@ -258,13 +258,13 @@ opt_algo_config = 'ga_pso'
 OPT_ALGO_OPTIONS = {'ga_pso', 'pso_ga', 'ga_ga', 'pso_pso'}
 
 # GA fitness normalization
-# Raw GA fitness is a composite score (max ~149 pts). Normalize to 0–100% for display.
+# Raw GA fitness is a composite score (max ~149 pts). Normalize to 0-100% for display.
 # Components: temp(40) + humidity(15) + fan(15) + energy(20) + uniformity(8)
 #             + trend(7) + mode(10) + crowd_bonus(12) + set_rh(10) + weather(12) = 149
 GA_FITNESS_MAX = 149.0
 
 def _ga_fitness_pct(raw_fitness):
-    """Convert raw GA fitness score (0–~149) to a 0–100 percentage for display."""
+    """Convert raw GA fitness score (0-~149) to a 0-100 percentage for display."""
     return round(min(100.0, max(0.0, float(raw_fitness) / GA_FITNESS_MAX * 100.0)), 2)
 
 def _get_ac_algo():
@@ -294,23 +294,23 @@ def _get_weather_ac_adjustment():
     """Derive weather-based inputs for AC fitness scoring from outdoor_weather_data.
 
     Returns (temp_offset, solar_load, out_temp, out_humid, weather_ok):
-      temp_offset  — extra °C heat load from outdoor conditions (0.0 = no extra load)
-      solar_load   — solar radiation intensity 0.0–1.0 (clear sky + high UV = 1.0)
-      out_temp     — outdoor temperature °C (0.0 if unavailable)
-      out_humid    — outdoor relative humidity % (0.0 if unavailable)
-      weather_ok   — True if outdoor_weather_data has valid data
+      temp_offset  -- extra  degC heat load from outdoor conditions (0.0 = no extra load)
+      solar_load   -- solar radiation intensity 0.0-1.0 (clear sky + high UV = 1.0)
+      out_temp     -- outdoor temperature  degC (0.0 if unavailable)
+      out_humid    -- outdoor relative humidity % (0.0 if unavailable)
+      weather_ok   -- True if outdoor_weather_data has valid data
     """
     if not outdoor_weather_data.get('fetch_ok'):
         return 0.0, 0.0, 0.0, 0.0, False
 
     out_temp  = float(outdoor_weather_data.get('temperature')   or 0.0)
-    cloud     = float(outdoor_weather_data.get('cloud_cover')   or 0.0)  # 0–100 %
+    cloud     = float(outdoor_weather_data.get('cloud_cover')   or 0.0)  # 0-100 %
     uv        = float(outdoor_weather_data.get('uv_index')      or 0.0)
     is_day    = bool(outdoor_weather_data.get('is_day',  True))
     out_humid = float(outdoor_weather_data.get('humidity')      or 0.0)
     precip    = float(outdoor_weather_data.get('precipitation') or 0.0)
 
-    # Solar load 0.0–1.0: active only during daytime, low cloud, high UV
+    # Solar load 0.0-1.0: active only during daytime, low cloud, high UV
     solar_load = 0.0
     if is_day:
         solar_load = max(0.0, min(1.0, (1.0 - cloud / 100.0) * min(1.0, uv / 8.0)))
@@ -319,9 +319,9 @@ def _get_weather_ac_adjustment():
     temp_offset = 0.0
     if out_temp > 35.0:                          # conduction through walls/roof at extreme outdoor temp
         temp_offset += min(1.5, (out_temp - 35.0) * 0.3)
-    temp_offset += solar_load * 0.8             # radiant solar heat gain through windows (max +0.8°C)
+    temp_offset += solar_load * 0.8             # radiant solar heat gain through windows (max +0.8 degC)
     temp_offset  = min(2.5, temp_offset)        # cap total offset
-    if precip > 0.5:                             # rain cools outdoor → relax offset
+    if precip > 0.5:                             # rain cools outdoor -> relax offset
         temp_offset = max(0.0, temp_offset - 1.0)
 
     return temp_offset, solar_load, out_temp, out_humid, True
@@ -333,12 +333,12 @@ def _estimate_room_conditions(temp_set, fan_speed, mode_idx, set_rh):
 
     Alur evaluasi kromosom:
         [T_set, Fan, Mode, RH_set]
-              ↓
-        _estimate_room_conditions()   ← surrogate / empirical model
-              ↓
-        Prediksi: T̂_room, R̂H_room, Ê_ratio
-              ↓
-        calculate_ac_fitness()        ← gunakan estimasi, bukan sensor aktual mentah
+              v
+        _estimate_room_conditions()   <- surrogate / empirical model
+              v
+        Prediksi: T_room, RH_room, E_ratio
+              v
+        calculate_ac_fitness()        <- gunakan estimasi, bukan sensor aktual mentah
 
     Catatan penting:
     - Sensor daya aktual (MySQL energy meter / PZEM) TIDAK digunakan untuk menghitung
@@ -350,35 +350,35 @@ def _estimate_room_conditions(temp_set, fan_speed, mode_idx, set_rh):
         4. Evaluasi apakah hasil optimasi benar-benar hemat energi
 
     Returns:
-        T_est   : float  — estimasi suhu ruangan yang akan dicapai
-        RH_est  : float  — estimasi kelembapan ruangan
-        E_ratio : float  — rasio efisiensi energi (0.0 = boros, 1.0 = hemat)
+        T_est   : float  -- estimasi suhu ruangan yang akan dicapai
+        RH_est  : float  -- estimasi kelembapan ruangan
+        E_ratio : float  -- rasio efisiensi energi (0.0 = boros, 1.0 = hemat)
     """
     temp_room = opt_sensor_data['temperature']
     humidity  = opt_sensor_data['humidity']
 
-    # ── Estimasi suhu ruangan setelah AC bekerja ──────────────────────────
-    # Fan lebih kencang → ruangan mendekati setpoint lebih cepat
-    # Model sederhana: T̂ = T_room - gap × fan_factor × koefisien_pendinginan
+    # -- Estimasi suhu ruangan setelah AC bekerja --------------------------
+    # Fan lebih kencang -> ruangan mendekati setpoint lebih cepat
+    # Model sederhana: T = T_room - gap x fan_factor x koefisien_pendinginan
     temp_gap    = temp_room - temp_set
-    fan_factor  = fan_speed / OPT_FAN_MAX          # 0.25 (fan1) → 1.0 (fan4)
-    # Mode FAN tidak mendinginkan udara — hanya sirkulasi
+    fan_factor  = fan_speed / OPT_FAN_MAX          # 0.25 (fan1) -> 1.0 (fan4)
+    # Mode FAN tidak mendinginkan udara -- hanya sirkulasi
     cooling_coef = 0.0 if mode_idx == 2 else 0.55  # FAN mode: no cooling
     T_est = temp_room - temp_gap * fan_factor * cooling_coef
     T_est = max(OPT_TEMP_MIN - 2.0, min(temp_room + 2.0, T_est))  # clip masuk akal
 
-    # ── Estimasi kelembapan ruangan ───────────────────────────────────────
+    # -- Estimasi kelembapan ruangan ---------------------------------------
     # DRY mode lebih efektif mendehumidifikasi
     if mode_idx == 1:  # DRY
         dehumid_strength = min(1.0, max(0.0, (humidity - 40.0) / 40.0))
         RH_est = humidity - dehumid_strength * 12.0
-    elif mode_idx == 0:  # COOL — dehumidifikasi ringan dari kondensasi
+    elif mode_idx == 0:  # COOL -- dehumidifikasi ringan dari kondensasi
         RH_est = humidity - max(0.0, temp_gap) * 0.4
-    else:  # FAN / AUTO — kelembapan tidak berubah signifikan
+    else:  # FAN / AUTO -- kelembapan tidak berubah signifikan
         RH_est = humidity
     RH_est = max(25.0, min(95.0, RH_est))
 
-    # ── Estimasi rasio efisiensi energi (surrogate/COP model) ────────────
+    # -- Estimasi rasio efisiensi energi (surrogate/COP model) ------------
     # Catatan: actual_watt dari MySQL hanya tersedia SETELAH command dikirim.
     # Di sini digunakan sebagai kalibrasi referensi siklus sebelumnya, bukan
     # sebagai input real-time per-kromosom.
@@ -390,8 +390,8 @@ def _estimate_room_conditions(temp_set, fan_speed, mode_idx, set_rh):
     else:
         # Fallback: model COP empiris berdasarkan delta suhu dan kecepatan kipas
         delta = max(0.0, temp_room - temp_set)
-        cop_eff = math.exp(-delta * 0.22)              # makin besar delta → makin boros
-        fan_eff = 1.0 - (fan_speed - 1) / 6.0         # fan1→1.0, fan4→0.5
+        cop_eff = math.exp(-delta * 0.22)              # makin besar delta -> makin boros
+        fan_eff = 1.0 - (fan_speed - 1) / 6.0         # fan1->1.0, fan4->0.5
         E_ratio = cop_eff * 0.65 + fan_eff * 0.35
 
     return T_est, RH_est, E_ratio
@@ -401,14 +401,14 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     """Fitness for GA. mode_idx: 0=COOL, 1=DRY, 2=FAN, 3=AUTO
     Genes: [temp, fan_speed, mode_idx, set_rh]
     Crowd-based tier:
-      Tier 0 — 0 persons  : energy saving (27-29°C, fan 1)
-      Tier 1 — 1-2 persons: standard temp by time (24-26°C, fan adaptive)
-      Tier 2 — 3-5 persons: medium cooling (22°C, fan 3)
-      Tier 3 — >5 persons : AC as cold as possible (16°C, fan 4 max)
-    Outdoor weather scoring (max ±12 pts):
-      Solar heat gain, outdoor temp pressure, outdoor humidity → DRY mode, mild weather saving.
+      Tier 0 -- 0 persons  : energy saving (27-29 degC, fan 1)
+      Tier 1 -- 1-2 persons: standard temp by time (24-26 degC, fan adaptive)
+      Tier 2 -- 3-5 persons: medium cooling (22 degC, fan 3)
+      Tier 3 -- >5 persons : AC as cold as possible (16 degC, fan 4 max)
+    Outdoor weather scoring (max +/-12 pts):
+      Solar heat gain, outdoor temp pressure, outdoor humidity -> DRY mode, mild weather saving.
     """
-    # ── Langkah 1: Estimasi kondisi ruangan untuk kromosom ini ───────────────
+    # -- Langkah 1: Estimasi kondisi ruangan untuk kromosom ini ---------------
     # Setiap kromosom dievaluasi menggunakan model estimasi (surrogate),
     # bukan langsung dari bacaan sensor mentah. Sensor aktual digunakan sebagai
     # kondisi awal / konteks, bukan output yang dievaluasi.
@@ -422,34 +422,34 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     temp_trend = opt_sensor_data.get('temp_trend', 0.0)
     time_period = _get_time_period()
     fitness = 0.0
-    # ── Crowd-based temperature & fan tier ───────────────────────────────────────
+    # -- Crowd-based temperature & fan tier ---------------------------------------
     ideal_fan_crowd = None  # None = calculated from temp_gap (only for tier 1)
     if not person_detected:
-        # Tier 0: no persons — energy saving mode
+        # Tier 0: no persons -- energy saving mode
         target_map = {'morning': 28.0, 'afternoon': 27.0, 'evening': 28.0, 'night': 29.0}
         sigma_map   = {'morning': 3.0,  'afternoon': 2.5,  'evening': 3.0,  'night': 3.5}
         target_temp = target_map.get(time_period, 28.0)
         sigma = sigma_map.get(time_period, 3.0)
         ideal_fan_crowd = 1.0
     elif person_count > 5:
-        # Tier 3: >5 persons — AC as cold as possible, max fan
-        target_temp = OPT_TEMP_MIN   # 16°C (batas bawah GA)
-        sigma = 0.8                  # very tight band — GA must choose minimum temperature
+        # Tier 3: >5 persons -- AC as cold as possible, max fan
+        target_temp = OPT_TEMP_MIN   # 16 degC (batas bawah GA)
+        sigma = 0.8                  # very tight band -- GA must choose minimum temperature
         ideal_fan_crowd = float(OPT_FAN_MAX)  # fan 4
     elif person_count >= 3:
-        # Tier 2: 3-5 persons — medium cooling
+        # Tier 2: 3-5 persons -- medium cooling
         target_temp = 22.0
         sigma = 1.5
         ideal_fan_crowd = 3.0
     else:
-        # Tier 1: 1-2 persons — standard temp by time
+        # Tier 1: 1-2 persons -- standard temp by time
         std_target = {'morning': 25.0, 'afternoon': 24.0, 'evening': 25.0, 'night': 26.0}
         std_sigma  = {'morning': 2.0,  'afternoon': 1.5,  'evening': 2.0,  'night': 2.5}
         target_temp = std_target.get(time_period, 25.0)
         if person_count == 2:
             target_temp = max(target_temp - 0.5, 22.0)  # slightly cooler for 2 persons
         sigma = std_sigma.get(time_period, 2.0)
-        # ideal_fan_crowd = None → will be calculated from temp_gap below
+        # ideal_fan_crowd = None -> will be calculated from temp_gap below
     # Trend offset: if room temp rises fast, lower target; if falls, raise target
     # For tier >5, trend offset still applied but target is already at minimum
     trend_offset = max(-2.0, min(2.0, -temp_trend * 2.0))
@@ -472,8 +472,8 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     else:
         ideal_fan = min(3.0, max(1.0, 1.0 + (temp_gap - 1.0) / 2.0))
     fitness += _gaussian_score(abs(fan_speed - ideal_fan), 0.0, 1.0, 15.0)
-    # ── Langkah 2: Efisiensi Energi (menggunakan estimasi surrogate, bukan sensor real-time) ──
-    # E_ratio berasal dari _estimate_room_conditions() — model COP empiris per-kromosom.
+    # -- Langkah 2: Efisiensi Energi (menggunakan estimasi surrogate, bukan sensor real-time) --
+    # E_ratio berasal dari _estimate_room_conditions() -- model COP empiris per-kromosom.
     # Sensor daya aktual (MySQL energy meter) HANYA digunakan untuk:
     #   - Monitoring konsumsi aktual setelah command diterapkan
     #   - Kalibrasi referensi model COP pada siklus berikutnya
@@ -514,11 +514,11 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
     if person_count > 5 and fan_speed == OPT_FAN_MAX:
         fitness += 12.0
 
-    # ── Mode bonus / penalty (max ±10 pts) ────────────────────────────────────
-    # COOL (0): best for cooling — reward when room is warm and cooling needed
-    # DRY  (1): dehumidification — reward when humidity > 65%
-    # FAN  (2): no cooling, just air circulation — penalise when hot, reward when mild
-    # AUTO (3): neutral — small bonus for flexibility
+    # -- Mode bonus / penalty (max +/-10 pts) ------------------------------------
+    # COOL (0): best for cooling -- reward when room is warm and cooling needed
+    # DRY  (1): dehumidification -- reward when humidity > 65%
+    # FAN  (2): no cooling, just air circulation -- penalise when hot, reward when mild
+    # AUTO (3): neutral -- small bonus for flexibility
     if mode_idx == 0:   # COOL
         if temp_room > target_temp:
             fitness += min(10.0, (temp_room - target_temp) * 2.0)
@@ -526,22 +526,22 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
         if humidity > 65:
             fitness += min(10.0, (humidity - 65) / 3.5)
         elif humidity < 50:
-            fitness -= 8.0   # DRY when already dry — bad
+            fitness -= 8.0   # DRY when already dry -- bad
     elif mode_idx == 2:  # FAN
         if temp_room <= target_temp + 1:
-            fitness += 5.0   # mild room — fan sufficient
+            fitness += 5.0   # mild room -- fan sufficient
         else:
-            fitness -= (temp_room - (target_temp + 1)) * 3.0  # hot room — penalise FAN
+            fitness -= (temp_room - (target_temp + 1)) * 3.0  # hot room -- penalise FAN
     elif mode_idx == 3:  # AUTO
         fitness += 3.0  # small neutral bonus
 
-    # ── Set RH fitness (max ±15 pts) ───────────────────────────────────────
+    # -- Set RH fitness (max +/-15 pts) ---------------------------------------
     # Target RH for comfort: 45-55% (ideal 50%)
-    # High humidity (>65%): reward low set_rh + DRY mode → dehumidify
-    # Low humidity (<45%):  reward high set_rh → don't over-dry
+    # High humidity (>65%): reward low set_rh + DRY mode -> dehumidify
+    # Low humidity (<45%):  reward high set_rh -> don't over-dry
     # Normal (45-55%):      reward set_rh near 50% (comfort zone)
     if humidity > 65:
-        # High humidity — prefer low RH setpoint to dehumidify
+        # High humidity -- prefer low RH setpoint to dehumidify
         ideal_rh = max(OPT_RH_MIN, 30 + int((humidity - 65) / 5) * -2)  # lower as humidity rises
         ideal_rh = max(OPT_RH_MIN, min(45, 50 - int((humidity - 65) * 0.5)))
         fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
@@ -549,52 +549,52 @@ def calculate_ac_fitness(temp_set, fan_speed, mode_idx=0, set_rh=50):
         if mode_idx == 1:  # DRY
             fitness += min(8.0, (humidity - 65) * 0.5)
     elif humidity < 45:
-        # Low humidity — prefer higher RH setpoint
+        # Low humidity -- prefer higher RH setpoint
         ideal_rh = min(OPT_RH_MAX, max(55, 50 + int((45 - humidity) * 0.8)))
         fitness += _gaussian_score(set_rh, ideal_rh, 10.0, 10.0)
         # Penalize DRY mode when humidity is already low
         if mode_idx == 1:
             fitness -= 5.0
     else:
-        # Normal humidity — reward set_rh near 50%
+        # Normal humidity -- reward set_rh near 50%
         fitness += _gaussian_score(set_rh, 50, 8.0, 10.0)
 
-    # ── Outdoor weather scoring (max ±12 pts) ─────────────────────────────────
+    # -- Outdoor weather scoring (max +/-12 pts) ---------------------------------
     # Uses live Open-Meteo data (fetched every 10 min). Skipped if data unavailable.
     w_offset, solar_load, out_temp_w, out_humid_w, weather_ok = _get_weather_ac_adjustment()
     if weather_ok:
         # (a) Solar heat-load: reward lower setpoints when sun is strong (max +5 pts)
-        # Clear sky + high UV during daytime → solar radiation heats room through windows
-        # → GA should prefer colder AC setpoints to counter the heat gain
+        # Clear sky + high UV during daytime -> solar radiation heats room through windows
+        # -> GA should prefer colder AC setpoints to counter the heat gain
         if solar_load > 0.15 and person_detected:
             solar_target = adjusted_target - solar_load * 1.5   # shift comfort target down
             fitness += _gaussian_score(temp_set, solar_target, max(1.0, sigma * 0.9),
                                        solar_load * 5.0)
 
-        # (b) Outdoor temperature pressure on mode selection (max ±5 pts)
+        # (b) Outdoor temperature pressure on mode selection (max +/-5 pts)
         if out_temp_w > 33.0:
-            # Very hot outdoor → conduction/infiltration heats room → COOL mode is most effective
-            heat_excess = min(1.0, (out_temp_w - 33.0) / 7.0)   # 0.0 at 33°C, 1.0 at 40°C
+            # Very hot outdoor -> conduction/infiltration heats room -> COOL mode is most effective
+            heat_excess = min(1.0, (out_temp_w - 33.0) / 7.0)   # 0.0 at 33 degC, 1.0 at 40 degC
             if mode_idx == 0:    # COOL: best choice when outdoor is very hot
                 fitness += heat_excess * 5.0
-            elif mode_idx == 2:  # FAN: circulates hot outdoor air → counter-productive
+            elif mode_idx == 2:  # FAN: circulates hot outdoor air -> counter-productive
                 fitness -= heat_excess * 4.0
         elif out_temp_w < 26.0 and not person_detected:
-            # Mild outdoor + empty room → natural ventilation / high setpoint saves energy
-            mild_factor = min(1.0, (26.0 - out_temp_w) / 6.0)   # 0.0 at 26°C, 1.0 at 20°C
+            # Mild outdoor + empty room -> natural ventilation / high setpoint saves energy
+            mild_factor = min(1.0, (26.0 - out_temp_w) / 6.0)   # 0.0 at 26 degC, 1.0 at 20 degC
             if mode_idx == 2:    # FAN: good when outdoor is cool and room is empty
                 fitness += mild_factor * 3.0
             if temp_set >= 27.0:                                  # don't over-cool when not needed
                 fitness += mild_factor * 4.0
 
         # (c) Outdoor humidity reinforces DRY mode (max +3 pts)
-        # When outdoor RH > 80%, infiltration keeps bringing humid air in →
+        # When outdoor RH > 80%, infiltration keeps bringing humid air in ->
         # AC DRY mode is more impactful than when outdoor is dry
         if out_humid_w > 80.0 and mode_idx == 1:  # DRY mode
             fitness += min(3.0, (out_humid_w - 80.0) * 0.15)
 
-        # (d) Penalty: wasteful over-cooling when outdoor is already cool (max −5 pts)
-        # If outdoor temp < 24°C there is little heat pressure — blasting AC to ≤22°C
+        # (d) Penalty: wasteful over-cooling when outdoor is already cool (max -5 pts)
+        # If outdoor temp < 24 degC there is little heat pressure -- blasting AC to <=22 degC
         # wastes energy for a small crowd
         if out_temp_w < 24.0 and temp_set < 22.0 and person_count <= 2:
             fitness -= min(5.0, (22.0 - temp_set) * 1.5)
@@ -605,20 +605,20 @@ def _estimate_lamp_conditions(pwm1, pwm2):
     """
     Surrogate model: estimasi kondisi pencahayaan untuk partikel PSO kandidat.
 
-    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0–100%).
+    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0-100%).
     Nilai ini menjadi command utama yang kemudian diterjemahkan oleh controller
     menjadi sinyal PWM untuk KEEMPAT lampu dalam ruangan.
 
     Alur evaluasi per-partikel:
         Partikel [PWM1, PWM2]
-              ↓
-        Brightness = rata-rata(PWM1, PWM2) / 255 × 100%   ← perintah sistem
-              ↓
-        Estimasi Daya: Power_est = Brightness × 280 W      ← 4 lampu × 70W/lampu (maks)
-              ↓
+              v
+        Brightness = rata-rata(PWM1, PWM2) / 255 x 100%   <- perintah sistem
+              v
+        Estimasi Daya: Power_est = Brightness x 280 W      <- 4 lampu x 70W/lampu (maks)
+              v
         Estimasi Lux per sensor (model proporsional berbasis gain aktual)
-              ↓
-        Fitness = error_avg + W_bal × error_balance + W_min × error_min
+              v
+        Fitness = error_avg + W_bal x error_balance + W_min x error_min
 
     Catatan penting tentang sensor daya:
     - Sistem hanya memiliki SATU sensor daya (energy meter).
@@ -630,30 +630,30 @@ def _estimate_lamp_conditions(pwm1, pwm2):
         3. Logging ke InfluxDB
 
     Args:
-        pwm1 (int): nilai PWM kandidat channel 1 (0–255)
-        pwm2 (int): nilai PWM kandidat channel 2 (0–255)
+        pwm1 (int): nilai PWM kandidat channel 1 (0-255)
+        pwm2 (int): nilai PWM kandidat channel 2 (0-255)
 
     Returns:
-        brightness_pct : float  — kecerahan keseluruhan sistem (0.0–100.0 %)
-        power_est      : float  — estimasi daya total keempat lampu (Watt)
-        est_lux1       : float  — estimasi lux sensor 1
-        est_lux2       : float  — estimasi lux sensor 2
-        est_lux3       : float  — estimasi lux sensor 3
+        brightness_pct : float  -- kecerahan keseluruhan sistem (0.0-100.0 %)
+        power_est      : float  -- estimasi daya total keempat lampu (Watt)
+        est_lux1       : float  -- estimasi lux sensor 1
+        est_lux2       : float  -- estimasi lux sensor 2
+        est_lux3       : float  -- estimasi lux sensor 3
     """
-    # ── Brightness: rata-rata dua channel PWM sebagai representasi sistem ──
+    # -- Brightness: rata-rata dua channel PWM sebagai representasi sistem --
     # Meskipun PSO mengoptimalkan 2 channel, brightness sistem = rata-ratanya
     # karena keempat lampu dikendalikan secara proporsional oleh kedua channel.
     pwm_cand = (float(pwm1) + float(pwm2)) / 2.0
-    brightness_pct = pwm_cand / 255.0 * 100.0   # konversi ke % (0–100)
+    brightness_pct = pwm_cand / 255.0 * 100.0   # konversi ke % (0-100)
 
-    # ── Estimasi daya: Power = Brightness × P_max ────────────────────────
-    # 4 lampu × 70W per lampu = 280W total saat brightness 100%
-    # Model linier: P_est = (brightness_pct / 100) × 280 W
-    # Ini adalah surrogate model — bukan pembacaan sensor langsung per-partikel.
-    LAMP_MAX_WATT = 280.0   # 4 lampu × 70W
+    # -- Estimasi daya: Power = Brightness x P_max ------------------------
+    # 4 lampu x 70W per lampu = 280W total saat brightness 100%
+    # Model linier: P_est = (brightness_pct / 100) x 280 W
+    # Ini adalah surrogate model -- bukan pembacaan sensor langsung per-partikel.
+    LAMP_MAX_WATT = 280.0   # 4 lampu x 70W
     power_est = (brightness_pct / 100.0) * LAMP_MAX_WATT
 
-    # ── Estimasi lux per sensor (model proporsional berbasis gain aktual) ────
+    # -- Estimasi lux per sensor (model proporsional berbasis gain aktual) ----
     # Setiap partikel menghasilkan prediksi lux yang BERBEDA sesuai dengan
     # brightness-nya masing-masing.
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
@@ -666,14 +666,14 @@ def _estimate_lamp_conditions(pwm1, pwm2):
 
     if pwm_now > 5:
         # Kondisi lampu menyala: gunakan skala proporsional
-        # est_lux_i = lux_sensor_i_sekarang × (PWM_kandidat / PWM_sekarang)
+        # est_lux_i = lux_sensor_i_sekarang x (PWM_kandidat / PWM_sekarang)
         ratio    = pwm_cand / pwm_now
         est_lux1 = max(0.0, lux1 * ratio)
         est_lux2 = max(0.0, lux2 * ratio)
         est_lux3 = max(0.0, lux3 * ratio)
     else:
         # Kondisi lampu mati: gunakan gain default empiris
-        # est_lux_i = PWM_kandidat × 1.57 lux/PWM  (dikalibrasi dari pengukuran)
+        # est_lux_i = PWM_kandidat x 1.57 lux/PWM  (dikalibrasi dari pengukuran)
         GAIN_DEFAULT = 1.57   # lux per PWM unit (empirical, dikalibrasi dari sistem)
         est_lux1 = pwm_cand * GAIN_DEFAULT
         est_lux2 = pwm_cand * GAIN_DEFAULT
@@ -683,45 +683,45 @@ def _estimate_lamp_conditions(pwm1, pwm2):
 
 
 def calculate_lamp_fitness_2d(pwm1, pwm2):
-    """PSO fitness function — MINIMIZE (smaller = better, target = 0).
+    """PSO fitness function -- MINIMIZE (smaller = better, target = 0).
 
-    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0–100%).
+    Brightness adalah tingkat kecerahan keseluruhan sistem pencahayaan (0-100%).
     Nilai ini menjadi command yang diterjemahkan controller menjadi sinyal PWM
     untuk KEEMPAT lampu. PSO mengoptimalkan dua channel (PWM1, PWM2), di mana
     rata-ratanya merepresentasikan brightness sistem.
 
     Alur evaluasi per-partikel (setiap partikel menghasilkan prediksi berbeda):
         Partikel [PWM1, PWM2]
-              ↓
-        Brightness (%) = rata-rata(PWM1, PWM2) / 255 × 100
-              ↓
-        Estimasi Daya: Power_est = Brightness × 280 W  (4 lampu × 70W)
-              ↓
+              v
+        Brightness (%) = rata-rata(PWM1, PWM2) / 255 x 100
+              v
+        Estimasi Daya: Power_est = Brightness x 280 W  (4 lampu x 70W)
+              v
         Estimasi Lux per sensor:
-            Jika lampu menyala: est_lux_i = lux_sensor_i × (PWM_cand / PWM_now)
-            Jika lampu mati:    est_lux_i = PWM_cand × 1.57  (gain default empiris)
-              ↓
-        Fitness = error_avg + W_bal × error_balance + W_min × error_min
+            Jika lampu menyala: est_lux_i = lux_sensor_i x (PWM_cand / PWM_now)
+            Jika lampu mati:    est_lux_i = PWM_cand x 1.57  (gain default empiris)
+              v
+        Fitness = error_avg + W_bal x error_balance + W_min x error_min
 
     Catatan sensor daya:
     - Satu sensor daya mengukur TOTAL konsumsi seluruh lampu (bukan per-PWM).
     - Sensor daya TIDAK digunakan untuk menghitung fitness partikel.
     - Kegunaan sensor daya: monitoring, validasi hasil, dan logging.
     """
-    # ── Langkah 1: Estimasi kondisi pencahayaan untuk partikel kandidat ini ──
-    # Setiap partikel PSO memiliki PWM1/PWM2 berbeda → brightness berbeda
-    # → prediksi lux yang berbeda → fitness yang berbeda
+    # -- Langkah 1: Estimasi kondisi pencahayaan untuk partikel kandidat ini --
+    # Setiap partikel PSO memiliki PWM1/PWM2 berbeda -> brightness berbeda
+    # -> prediksi lux yang berbeda -> fitness yang berbeda
     brightness_pct, power_est, est_lux1, est_lux2, est_lux3 = \
         _estimate_lamp_conditions(pwm1, pwm2)
 
-    # ── Langkah 2: Tentukan target dan bobot ─────────────────────────────────
+    # -- Langkah 2: Tentukan target dan bobot ---------------------------------
     person_detected = opt_sensor_data['person_detected'] or _person_present_recently_lamp()
     TARGET_LUX = 350.0 if person_detected else 0.0
     MIN_LUX    = 200.0   # lux minimum per sensor (tidak ada sudut gelap)
     W_BALANCE  = 0.5     # bobot penalti distribusi
     W_MIN      = 1.5     # bobot penalti sensor gelap (lebih ketat)
 
-    # ── Langkah 3: Hitung komponen error ─────────────────────────────────────
+    # -- Langkah 3: Hitung komponen error -------------------------------------
     lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
 
     # Komponen 1: error rata-rata terhadap target 350 lux
@@ -739,13 +739,13 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
         if est < MIN_LUX:
             error_min += (MIN_LUX - est) ** 2
 
-    # ── Langkah 4: Tolerance check — kondisi sempurna (fitness = 0) ──────────
-    # Lux rata-rata 315–385 DAN semua sensor ≥ 200 lux → tujuan tercapai
+    # -- Langkah 4: Tolerance check -- kondisi sempurna (fitness = 0) ----------
+    # Lux rata-rata 315-385 DAN semua sensor >= 200 lux -> tujuan tercapai
     if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
             and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
         return 0.0
 
-    # ── Langkah 5: Gabungkan komponen fitness ────────────────────────────────
+    # -- Langkah 5: Gabungkan komponen fitness --------------------------------
     fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min
     return round(fitness, 4)
 
@@ -797,13 +797,13 @@ def _fetch_mysql_power():
         opt_sensor_data['actual_watt']   = active_power
         opt_sensor_data['power_factor']  = pf
         print(f"[OPT] MySQL power: {active_power:.1f}W {voltage:.0f}V {current:.2f}A PF={pf:.2f}")
-        # Write all fields to InfluxDB — for complete energy CSV export
+        # Write all fields to InfluxDB -- for complete energy CSV export
         try:
             write_to_influxdb('energy_monitor', {
                 'voltage':      voltage,
                 'current':      current,
                 'power':        active_power,
-                'energy_kwh':   round(energy_wh / 1000.0, 4),  # Wh → kWh
+                'energy_kwh':   round(energy_wh / 1000.0, 4),  # Wh -> kWh
                 'frequency':    frequency,
                 'power_factor': pf,
             }, tags={'device': 'esp32_ac', 'source': 'mysql'})
@@ -821,7 +821,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
     # Only falls back to InfluxDB if ESP32 not connected (MQTT timeout > 2 minutes).
     mqtt_has_lux = (time.time() - _last_lamp_mqtt_ts) < 120  # fresh if < 2 minutes
     if mqtt_has_lux:
-        # MQTT data is fresh — nilai lux langsung dari sensor tanpa pemrosesan.
+        # MQTT data is fresh -- nilai lux langsung dari sensor tanpa pemrosesan.
         # opt_sensor_data lux is already updated in MQTT callback via update_opt_sensor_data,
         # but we sync again here to ensure consistency when PSO reads it.
         l1 = float(mqtt_data['lamp'].get('lux1', 0))
@@ -838,7 +838,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
 
     try:
         _, _, query_api = _get_influx_client()
-        # AC: use mean() — temperature changes slowly, average is still relevant for GA
+        # AC: use mean() -- temperature changes slowly, average is still relevant for GA
         ac_query = (f'from(bucket: "{INFLUX_BUCKET}")'
                     f' |> range(start: -{time_range_minutes}m)'
                     f' |> filter(fn: (r) => r._measurement == "ac_sensor")'
@@ -851,7 +851,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                 elif rec.get_field() == 'humidity' and rec.get_value() is not None:
                     opt_sensor_data['humidity'] = round(float(rec.get_value()), 1)
 
-        # Lux: use last() instead of mean() — light changes fast, latest value is relevant
+        # Lux: use last() instead of mean() -- light changes fast, latest value is relevant
         # Only query InfluxDB if MQTT has no data yet (ESP32 not connected)
         # Stale limit: if InfluxDB record older than 10 minutes, ignore to avoid
         # overwriting opt_sensor_data with old values (e.g., 350 from previous session).
@@ -871,7 +871,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                     val = rec.get_value()
                     if val is None:
                         continue
-                    # Check record age — reject if too old (stale data)
+                    # Check record age -- reject if too old (stale data)
                     rec_time = rec.get_time()
                     if rec_time is not None:
                         try:
@@ -879,7 +879,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
                             now_utc = datetime.now(timezone.utc)
                             age_s = (now_utc - rec_time).total_seconds()
                             if age_s > INFLUX_LAX_STALE_LIMIT_S:
-                                print(f"[OPT] InfluxDB {field} diabaikan — usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
+                                print(f"[OPT] InfluxDB {field} diabaikan -- usia {age_s:.0f}s > {INFLUX_LAX_STALE_LIMIT_S}s (stale)")
                                 continue
                         except Exception:
                             pass  # if time parse fails, still use data
@@ -897,7 +897,7 @@ def fetch_sensor_data_from_db(time_range_minutes=30):
             if influx_lux_used:
                 print(f"[OPT] Lux from InfluxDB (fresh): L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
             else:
-                print(f"[OPT] InfluxDB lux stale/empty — using current opt_sensor_data: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
+                print(f"[OPT] InfluxDB lux stale/empty -- using current opt_sensor_data: L1={opt_sensor_data.get('lux1')} L2={opt_sensor_data.get('lux2')} L3={opt_sensor_data.get('lux3')}")
 
         opt_sensor_data['data_source'] = 'mqtt' if mqtt_has_lux else 'influxdb_last'
     except Exception as e:
@@ -984,7 +984,7 @@ def run_ga_optimization(verbose=False):
                 c2m = p2[2] if random.random() < 0.5 else p1[2]
                 # BLX-alpha crossover for set_rh
                 # Gunakan round() bukan int() agar distribusi tidak bias ke bawah
-                # (int(50.9) = 50, round(50.9) = 51 — lebih presisi)
+                # (int(50.9) = 50, round(50.9) = 51 -- lebih presisi)
                 rh_lo, rh_hi = min(p1[3], p2[3]), max(p1[3], p2[3])
                 rh_span = rh_hi - rh_lo
                 c1r = int(round(max(OPT_RH_MIN, min(OPT_RH_MAX, random.uniform(rh_lo - alpha * rh_span, rh_hi + alpha * rh_span)))))
@@ -1018,10 +1018,10 @@ def run_ga_optimization(verbose=False):
                 next_pop.append(child2)
         population = next_pop[:pop_size]
 
-    # Coarse Grid Search Validation (temp × fan × mode × rh_samples)
-    # Catatan: ini bukan exhaustive search — RH hanya diuji pada 8 titik sampel
+    # Coarse Grid Search Validation (temp x fan x mode x rh_samples)
+    # Catatan: ini bukan exhaustive search -- RH hanya diuji pada 8 titik sampel
     # (bukan semua integer 30-80), sehingga disebut Coarse Grid Search, bukan Brute-Force.
-    # Total kombinasi: 15 × 4 × 4 × 8 = 1.920 kombinasi
+    # Total kombinasi: 15 x 4 x 4 x 8 = 1.920 kombinasi
     gs_best_fit, gs_best_sol = -1, None
     rh_samples = [30, 40, 45, 50, 55, 60, 70, 80]
     for t in range(int(OPT_TEMP_MIN), int(OPT_TEMP_MAX) + 1):
@@ -1038,7 +1038,7 @@ def run_ga_optimization(verbose=False):
     return final, best_fitness, fitness_history, {'solution': gs_best_sol, 'fitness': gs_best_fit}
 
 def run_pso_for_ac(verbose=False):
-    """PSO optimizer for AC settings — same search space as GA.
+    """PSO optimizer for AC settings -- same search space as GA.
     Particles: [temp (float), fan_speed (int), mode_idx (int), set_rh (int)]
     Fitness: maximize calculate_ac_fitness() (same as GA).
     Returns same format as run_ga_optimization() for drop-in replacement.
@@ -1141,7 +1141,7 @@ def run_pso_for_ac(verbose=False):
         g_fit = bf_best_fit
 
     final = [int(round(g_pos[0])), int(round(g_pos[1])), int(round(g_pos[2])), int(round(g_pos[3]))]
-    print(f"[PSO-AC] Done: {final[0]}°C Fan={final[1]} Mode={AC_MODE_NAMES.get(final[2],'COOL')} "
+    print(f"[PSO-AC] Done: {final[0]} degC Fan={final[1]} Mode={AC_MODE_NAMES.get(final[2],'COOL')} "
           f"RH={final[3]}% fitness={g_fit:.2f}")
     return final, g_fit, fitness_history, {'solution': bf_best_sol, 'fitness': bf_best_fit}
 
@@ -1155,12 +1155,12 @@ def run_pso_optimization(verbose=False):
         4. Wait for BH1750 sensor to stabilize (~2.5 seconds)
         5. Baca lux nyata dari sensor
         6. Hitung fitness berdasarkan lux nyata
-        7. Cek stop early: jika lux 315-385 → berhenti
-        8. Check timeout: if total > 60 seconds → use last Gbest
+        7. Cek stop early: jika lux 315-385 -> berhenti
+        8. Check timeout: if total > 60 seconds -> use last Gbest
 
     Lamp hanya berubah SEKALI per iterasi (bukan per partikel).
 
-    Return tambahan: iteration_log — list of dict per iterasi berisi
+    Return tambahan: iteration_log -- list of dict per iterasi berisi
         {iter, pwm1, pwm2, b1, b2, lux_avg, fitness}
         to display on the dashboard chart.
     """
@@ -1171,10 +1171,10 @@ def run_pso_optimization(verbose=False):
     c2 = pso_params['c2']
     DIM = 2
     max_vel = 60
-    SENSOR_SETTLE_S = 5.0   # 5 seconds per iteration: PWM changes → lamp stabilizes → sensor reads
+    SENSOR_SETTLE_S = 5.0   # 5 seconds per iteration: PWM changes -> lamp stabilizes -> sensor reads
     TIMEOUT_S = 60.0
 
-    # ── Phase 3: Inisialisasi swarm ─────────────────────────────────────────
+    # -- Phase 3: Inisialisasi swarm -----------------------------------------
     positions  = [
         [int(OPT_BRIGHTNESS_MIN + random.random() * (OPT_BRIGHTNESS_MAX - OPT_BRIGHTNESS_MIN))
          for _ in range(DIM)]
@@ -1183,7 +1183,7 @@ def run_pso_optimization(verbose=False):
     velocities = [[random.uniform(-max_vel, max_vel) for _ in range(DIM)]
                   for _ in range(swarm_size)]
 
-    # ── Phase 4: Fitness awal ───────────────────────────────────────────────
+    # -- Phase 4: Fitness awal -----------------------------------------------
     pb_pos = [p[:] for p in positions]
     pb_fit = [calculate_lamp_fitness_2d(p[0], p[1]) for p in positions]
     g_idx  = pb_fit.index(min(pb_fit))
@@ -1195,12 +1195,12 @@ def run_pso_optimization(verbose=False):
 
     start_time = time.time()
 
-    # ── Phase 5-7: Iteration loop with real lux reading ───────────────────────
+    # -- Phase 5-7: Iteration loop with real lux reading -----------------------
     for it in range(iterations):
         # Timeout check
         elapsed = time.time() - start_time
         if elapsed >= TIMEOUT_S:
-            print(f"[PSO] Timeout {TIMEOUT_S:.0f}s di iterasi {it} — pakai Gbest terakhir")
+            print(f"[PSO] Timeout {TIMEOUT_S:.0f}s di iterasi {it} -- pakai Gbest terakhir")
             break
 
         # Update kecepatan dan posisi semua partikel (di memori)
@@ -1220,7 +1220,7 @@ def run_pso_optimization(verbose=False):
         best_cand_idx  = cand_fits.index(min(cand_fits))
         best_cand_pos  = positions[best_cand_idx][:]
 
-        # Send only Gbest candidate to lamp — once per iteration
+        # Send only Gbest candidate to lamp -- once per iteration
         b1_send = round(best_cand_pos[0] * 100.0 / 255.0, 1)
         b2_send = round(best_cand_pos[1] * 100.0 / 255.0, 1)
         b1_send, b2_send = _safe_lamp_brightness(b1_send, b2_send)
@@ -1237,7 +1237,7 @@ def run_pso_optimization(verbose=False):
             'status': 'waiting'
         })
 
-        print(f"[PSO] Iteration {it+1}/{iterations} — B1={b1_send}% B2={b2_send}% "
+        print(f"[PSO] Iteration {it+1}/{iterations} -- B1={b1_send}% B2={b2_send}% "
               f"(PWM1={best_cand_pos[0]} PWM2={best_cand_pos[1]}), tunggu sensor...")
 
         # Tunggu sensor stabil
@@ -1305,12 +1305,12 @@ def run_pso_optimization(verbose=False):
         # Stop early: lux avg dalam toleransi DAN semua sensor >= 200 lux
         if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0:
             if lux1_r >= 200.0 and lux2_r >= 200.0 and lux3_r >= 200.0:
-                print(f"[PSO] Stop early iterasi {it+1} — lux {lux_real} dalam 315-385, "
-                      f"L1={lux1_r} L2={lux2_r} L3={lux3_r} semua ≥200")
+                print(f"[PSO] Stop early iterasi {it+1} -- lux {lux_real} dalam 315-385, "
+                      f"L1={lux1_r} L2={lux2_r} L3={lux3_r} semua >=200")
                 break
             else:
                 print(f"[PSO] Lux avg={lux_real} in target but some sensor < 200 "
-                      f"(L1={lux1_r} L2={lux2_r} L3={lux3_r}) — lanjut iterasi")
+                      f"(L1={lux1_r} L2={lux2_r} L3={lux3_r}) -- lanjut iterasi")
 
     elapsed_total = time.time() - start_time
     print(f"[PSO] Selesai {len(fitness_history)} iterasi dalam {elapsed_total:.1f}s | "
@@ -1320,10 +1320,10 @@ def run_pso_optimization(verbose=False):
     return list(g_pos), g_fit, fitness_history, initial_error, iteration_log
 
 def run_ga_for_lamp(verbose=False):
-    """GA optimizer for Lamp brightness — same search space as PSO.
+    """GA optimizer for Lamp brightness -- same search space as PSO.
     Chromosome: [PWM1 (0-255), PWM2 (0-255)]
     Fitness: minimize calculate_lamp_fitness_2d() (same as PSO, lower = better).
-    Real sensor feedback per generation: send best → wait → read lux.
+    Real sensor feedback per generation: send best -> wait -> read lux.
     Returns same format as run_pso_optimization() for drop-in replacement.
     """
     pop_size = ga_params.get('population_size', 15)
@@ -1365,7 +1365,7 @@ def run_ga_for_lamp(verbose=False):
         # Evaluate fitness using estimation for all individuals
         scores = [calculate_lamp_fitness_2d(ind[0], ind[1]) for ind in population]
 
-        # Sort by fitness (ascending — minimize)
+        # Sort by fitness (ascending -- minimize)
         paired = sorted(zip(population, scores), key=lambda x: x[1])
         population = [p[0] for p in paired]
         scores = [p[1] for p in paired]
@@ -1388,7 +1388,7 @@ def run_ga_for_lamp(verbose=False):
             'b1': b1_send, 'b2': b2_send, 'status': 'waiting'
         })
 
-        print(f"[GA-LAMP] Gen {gen+1}/{generations} — B1={b1_send}% B2={b2_send}% "
+        print(f"[GA-LAMP] Gen {gen+1}/{generations} -- B1={b1_send}% B2={b2_send}% "
               f"(PWM1={gen_best[0]} PWM2={gen_best[1]}), waiting sensor...")
 
         # Wait for sensor to stabilize
@@ -1436,7 +1436,7 @@ def run_ga_for_lamp(verbose=False):
         # Stop early if converged
         if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0:
             if lux1_r >= 200.0 and lux2_r >= 200.0 and lux3_r >= 200.0:
-                print(f"[GA-LAMP] Stop early gen {gen+1} — lux {lux_real} in 315-385")
+                print(f"[GA-LAMP] Stop early gen {gen+1} -- lux {lux_real} in 315-385")
                 break
 
         # --- GA operators for next generation ---
@@ -1542,7 +1542,7 @@ def run_optimization_cycle(algo='both'):
                     'actual_watt': round(opt_sensor_data.get('actual_watt', 0), 1),
                 },
             }
-            print(f"[{ac_algo.upper()}-AC] Done: {sol[0]}°C Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
+            print(f"[{ac_algo.upper()}-AC] Done: {sol[0]} degC Fan={sol[1]} Mode={AC_MODE_NAMES.get(mode_idx,'COOL')} RH={opt_set_rh}% fitness={fit:.2f}")
             persist_opt_results('ga')
         if algo in ('pso', 'both'):
             # Dynamic dispatch: PSO or GA for Lamp
@@ -1595,13 +1595,13 @@ def run_optimization_cycle(algo='both'):
             print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
         optimization_run_count += 1
-        # Normalize GA fitness from raw score (0–~149) to percentage (0–100) for display
+        # Normalize GA fitness from raw score (0-~149) to percentage (0-100) for display
         ga_fitness_pct = _ga_fitness_pct(last_opt_results['ga']['fitness'])
         # Update mqtt_data system
         mqtt_data['system'].update({
             'algo_config': opt_algo_config,
             'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
-            'ga_fitness': ga_fitness_pct,             # normalized 0–100%
+            'ga_fitness': ga_fitness_pct,             # normalized 0-100%
             'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score for export/debug
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_runs': optimization_run_count,
@@ -1621,7 +1621,7 @@ def run_optimization_cycle(algo='both'):
         # Write to InfluxDB (ga_fitness stored as normalized % 0-100)
         pso_fitness_pct = min(100.0, max(0.0, 100.0 - float(last_opt_results['pso']['fitness']) / 122500.0 * 100.0))
         write_to_influxdb('optimization_result', {
-            'ga_fitness': ga_fitness_pct,               # normalized 0–100%
+            'ga_fitness': ga_fitness_pct,               # normalized 0-100%
             'ga_fitness_raw': float(last_opt_results['ga']['fitness']),  # raw score for reference
             'pso_fitness': float(last_opt_results['pso']['fitness']),
             'ga_temp': float(last_opt_results['ga']['temp']),
@@ -1659,7 +1659,7 @@ def run_optimization_cycle(algo='both'):
                 )
                 t_hist2.start()
 
-        # Auto-apply AC — only when GA produced fresh results this cycle
+        # Auto-apply AC -- only when GA produced fresh results this cycle
         global _last_adaptive_ac_apply, _last_sent_ac_temp, _last_sent_ac_fan
         if algo in ('ga', 'both') and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = last_opt_results['ga']['temp']
@@ -1680,16 +1680,16 @@ def run_optimization_cycle(algo='both'):
                     # Update local state
                     mqtt_data['ac']['set_rh'] = int(opt_rh)
                     mqtt_data['ac']['ac_fan_mode'] = opt_mode
-                    print(f"  [GA→AC] Applied: {int(opt_temp)}°C Fan={int(opt_fan)} Mode={opt_mode} RH={int(opt_rh)}%")
+                    print(f"  [GA->AC] Applied: {int(opt_temp)} degC Fan={int(opt_fan)} Mode={opt_mode} RH={int(opt_rh)}%")
         # Note: Auto-apply lamp PSO is NOT done here.
         # Apply lamp PWM controlled fully by _pso_lamp_cycle()
-        # agar urutan Baca→Hitung→Send→Tunggu→Baca tetap terjaga.
-        # Emit status — only include solution fields for the algorithm that actually ran
+        # agar urutan Baca->Hitung->Send->Tunggu->Baca tetap terjaga.
+        # Emit status -- only include solution fields for the algorithm that actually ran
         status_payload = {
             'status': 'completed', 'algorithm': algo,
             'algo_config': opt_algo_config,
             'ac_algo': ac_algo, 'lamp_algo': lamp_algo,
-            'ga_fitness': ga_fitness_pct,              # normalized 0–100% for display
+            'ga_fitness': ga_fitness_pct,              # normalized 0-100% for display
             'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
@@ -1794,7 +1794,7 @@ def load_opt_results_file():
             mqtt_data['system']['ga_mode']     = ga_data.get('mode', 'COOL')
             mqtt_data['system']['ga_set_rh']   = ga_data.get('set_rh', 50)
             mqtt_data['system']['ga_history']  = ga_data.get('stats', [])
-            print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')}°C Fan={ga_data.get('fan')} "
+            print(f"  [RESTORE-FILE] GA: {ga_data.get('temp')} degC Fan={ga_data.get('fan')} "
                   f"fitness_raw={ga_data.get('fitness',0):.2f} -> {_ga_fitness_pct(ga_data.get('fitness',0)):.1f}% "
                   f"stats={len(ga_data.get('stats',[]))} pts")
         if pso_data and (pso_data.get('brightness1', 0) > 0 or pso_data.get('fitness', 0) > 0):
@@ -1912,7 +1912,7 @@ def restore_opt_results():
                 mqtt_data['system']['ga_mode']     = last_opt_results['ga']['mode']
                 mqtt_data['system']['ga_set_rh']   = last_opt_results['ga'].get('set_rh', 50)
                 mqtt_data['system']['ga_history']  = last_opt_results['ga'].get('stats', [])
-                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']}°C Fan={last_opt_results['ga']['fan']} Mode={last_opt_results['ga']['mode']} RH={last_opt_results['ga'].get('set_rh',50)}% fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
+                print(f"  [RESTORE] GA: {last_opt_results['ga']['temp']} degC Fan={last_opt_results['ga']['fan']} Mode={last_opt_results['ga']['mode']} RH={last_opt_results['ga'].get('set_rh',50)}% fitness={last_opt_results['ga']['fitness']:.2f} stats={len(last_opt_results['ga']['stats'])} pts")
             elif algo == 'pso' and (rec_map.get('brightness1', 0) > 0 or rec_map.get('brightness', 0) > 0):
                 b1_restored = int(rec_map.get('brightness1', 0))
                 b2_restored = int(rec_map.get('brightness2', 0))
@@ -1988,7 +1988,7 @@ def save_ga_fitness_history_to_influx(fitness_history, run_meta=None):
         mode_str  = str((run_meta or {}).get('mode', last_opt_results['ga'].get('mode', 'COOL')))
         set_rh    = float((run_meta or {}).get('set_rh', last_opt_results['ga'].get('set_rh', 50)))
         for i, fit_val in enumerate(fitness_history):
-            # timestamp: (sekarang - (n-1-i) detik)  → titik i=n-1 = sekarang
+            # timestamp: (sekarang - (n-1-i) detik)  -> titik i=n-1 = sekarang
             ts_ns = now_ns - (n - 1 - i) * int(1e9)
             pt = (Point('ga_fitness_history')
                   .tag('run_count', str(run_count))
@@ -2077,8 +2077,8 @@ def save_pso_fitness_history_to_influx(fitness_history, iteration_log=None, run_
 
 # ==================== SENSOR FAULT DETECTION ====================
 # Thresholds: how many seconds without a message = sensor is "stale"
-SENSOR_STALE_WARN_S  = 120   # 2 min  → WARNING  (yellow)
-SENSOR_STALE_FAULT_S = 600   # 10 min → FAULT    (red)
+SENSOR_STALE_WARN_S  = 120   # 2 min  -> WARNING  (yellow)
+SENSOR_STALE_FAULT_S = 600   # 10 min -> FAULT    (red)
 TELEGRAM_OFFLINE_THRESHOLD_S = 600  # 10 menit (600s) baru kirim notif Telegram
 
 # Track per-sensor last emit time so we don't spam the same fault
@@ -2132,12 +2132,12 @@ def sensor_fault_loop():
                     print(msg)
                 _fault_last_emit[dev_id] = lvl
 
-                # Telegram notification — ONLY send after 10 MINUTES (600s) offline
+                # Telegram notification -- ONLY send after 10 MINUTES (600s) offline
                 time_str = now.strftime('%H:%M:%S (%d %b %Y)')
                 if age >= TELEGRAM_OFFLINE_THRESHOLD_S and not _telegram_alert_sent.get(dev_id, False):
                     mins = int(age // 60) if age != float('inf') else 10
                     telegram_msg = (
-                        f"🚨 <b>PERINGATAN PERANGKAT OFFLINE!</b>\n\n"
+                        f"   <b>PERINGATAN PERANGKAT OFFLINE!</b>\n\n"
                         f"<b>Perangkat:</b> {dev_label}\n"
                         f"<b>Status:</b> Terputus selama {mins} menit!\n"
                         f"<b>Waktu:</b> {time_str}\n\n"
@@ -2148,7 +2148,7 @@ def sensor_fault_loop():
 
                 elif lvl == 'ok' and _telegram_alert_sent.get(dev_id, False):
                     telegram_recovery = (
-                        f"✅ <b>PERANGKAT KEMBALI ONLINE!</b>\n\n"
+                        f"  <b>PERANGKAT KEMBALI ONLINE!</b>\n\n"
                         f"<b>Perangkat:</b> {dev_label}\n"
                         f"<b>Status:</b> Terhubung kembali secara normal.\n"
                         f"<b>Waktu:</b> {time_str}"
@@ -2168,13 +2168,13 @@ def _pso_lamp_cycle():
         2. PSO hitung PWM baru
         3. Send PWM ke lampu
         4. Wait 5 minutes (timer managed by optimization_auto_loop)
-        5. Baca lux baru  → evaluasi → ulang dari langkah 2
+        5. Baca lux baru  -> evaluasi -> ulang dari langkah 2
 
     Return: True jika siklus berjalan normal, False jika dilewati.
     """
     global _pso_locked, _pso_lock_pwm
 
-    # ── Step 1: Baca lux sekarang ─────────────────────────────────────────
+    # -- Step 1: Baca lux sekarang -----------------------------------------
     # Force refresh opt_sensor_data from MQTT/InfluxDB before reading lux value
     fetch_sensor_data_from_db()
     lux1 = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
@@ -2184,11 +2184,11 @@ def _pso_lamp_cycle():
     person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
     mode_now = mqtt_data['lamp'].get('mode', 'MANUAL')
 
-    print(f"[PSO] New cycle — Lux avg={lux_avg:.1f} | Person={'yes' if person_now else 'no'} | Mode={mode_now}")
+    print(f"[PSO] New cycle -- Lux avg={lux_avg:.1f} | Person={'yes' if person_now else 'no'} | Mode={mode_now}")
 
     # Hanya jalan di mode ADAPTIVE
     if mode_now != 'ADAPTIVE':
-        print(f"[PSO] Mode {mode_now} — siklus dilewati")
+        print(f"[PSO] Mode {mode_now} -- siklus dilewati")
         return False
 
     # PSO only runs if there are persons in the room
@@ -2204,12 +2204,12 @@ def _pso_lamp_cycle():
             mqtt_data['lamp']['brightness_avg'] = 0
             socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
             _record_lamp_apply(0, 0)
-            print(f"[PSO] No persons — lamps turned off, PSO stopped")
+            print(f"[PSO] No persons -- lamps turned off, PSO stopped")
         else:
-            print(f"[PSO] No persons — lamps already off, PSO stopped")
+            print(f"[PSO] No persons -- lamps already off, PSO stopped")
         return False
 
-    # ── Evaluate current lux against target ─────────────────────────────────
+    # -- Evaluate current lux against target ---------------------------------
     # Here person_now is definitely True (already checked above)
     # Converged if: lux avg 315-385 AND all sensors >= 200 lux
     lux_in_range = (315.0 <= lux_avg <= 385.0
@@ -2220,17 +2220,17 @@ def _pso_lamp_cycle():
             _pso_lock_pwm[0] = mqtt_data['lamp'].get('brightness1', 0)
             _pso_lock_pwm[1] = mqtt_data['lamp'].get('brightness2', 0)
             _pso_locked = True
-        print(f"[PSO] Lux {lux_avg:.1f} dalam toleransi — brightness dikunci "
+        print(f"[PSO] Lux {lux_avg:.1f} dalam toleransi -- brightness dikunci "
               f"(B1={_pso_lock_pwm[0]}% B2={_pso_lock_pwm[1]}%), no PWM change")
         return False  # no need to proceed to steps 2-3
 
-    # Lux di luar target — buka kunci
+    # Lux di luar target -- buka kunci
     _pso_locked = False
     _pso_lock_pwm[0] = None
     _pso_lock_pwm[1] = None
-    print(f"[PSO] Lux {lux_avg:.1f} outside 315-385 — proceeding to calculate PWM")
+    print(f"[PSO] Lux {lux_avg:.1f} outside 315-385 -- proceeding to calculate PWM")
 
-    # ── Step 2: PSO — calculate PWM, send per iteration, stop if converged ──
+    # -- Step 2: PSO -- calculate PWM, send per iteration, stop if converged --
     g_pos, g_fit, fitness_history, initial_err, iteration_log = run_pso_optimization()
     pwm1_val = int(g_pos[0])
     pwm2_val = int(g_pos[1])
@@ -2257,7 +2257,7 @@ def _pso_lamp_cycle():
         },
     })
 
-    # ── Step 3: Send final Gbest to lamp ────────────────────────────────
+    # -- Step 3: Send final Gbest to lamp --------------------------------
     # PSO already sends Gbest in each iteration. This step ensures
     # lamp is at the best Gbest position after all iterations complete.
     opt_b1, opt_b2 = _safe_lamp_brightness(b1, b2)
@@ -2265,7 +2265,7 @@ def _pso_lamp_cycle():
         'smartroom/lamp/control',
         json.dumps({'brightness1': opt_b1, 'brightness2': opt_b2, 'source': 'adaptive_final'})
     )
-    # Sync mqtt_data['lamp'] directly — don't wait for MQTT back from ESP32
+    # Sync mqtt_data['lamp'] directly -- don't wait for MQTT back from ESP32
     # agar Lamp Dashboard brightness terupdate segera
     mqtt_data['lamp']['brightness1']    = opt_b1
     mqtt_data['lamp']['brightness2']    = opt_b2
@@ -2273,10 +2273,10 @@ def _pso_lamp_cycle():
     _record_lamp_apply(opt_b1, opt_b2)
     # Emit to all clients so Lamp Dashboard and ML Optimization sync instantly
     socketio.emit('mqtt_update', {'type': 'lamp', 'data': mqtt_data['lamp']})
-    print(f"[PSO] Gbest final dikirim — B1={opt_b1}% B2={opt_b2}% | fitness={g_fit:.2f}")
+    print(f"[PSO] Gbest final dikirim -- B1={opt_b1}% B2={opt_b2}% | fitness={g_fit:.2f}")
 
     # Fitness dalam persen: 100% = lux tepat 350, turun seiring error membesar
-    # Skala: error=0 → 100%, error=350^2=122500 → 0%
+    # Skala: error=0 -> 100%, error=350^2=122500 -> 0%
     fitness_pct = round(max(0.0, 100.0 - (g_fit / 122500.0) * 100.0), 1)
 
     # Update dashboard & InfluxDB
@@ -2306,10 +2306,10 @@ def _pso_lamp_cycle():
         'pso_error': float(g_fit),
     })
 
-    # ── Step 4 & 5: Wait 5 minutes then read new lux ────────────────────
+    # -- Step 4 & 5: Wait 5 minutes then read new lux --------------------
     # The 5 minute wait is controlled by optimization_auto_loop via last_pso_time.
     # New lux reading automatically occurs when next cycle is called (Step 1).
-    print(f"[PSO] Done — waiting 5 minutes, new lux will be read in next cycle")
+    print(f"[PSO] Done -- waiting 5 minutes, new lux will be read in next cycle")
 
     # Cek apakah PSO berhasil konvergen (lux akhir dalam toleransi)
     lux1_f = float(opt_sensor_data.get('lux1', 0))
@@ -2320,7 +2320,7 @@ def _pso_lamp_cycle():
     converged = (315.0 <= lux_final <= 385.0
                  and lux1_f >= 200.0 and lux2_f >= 200.0 and lux3_f >= 200.0)
     print(f"[PSO] Lux akhir={lux_final:.1f} (L1={lux1_f} L2={lux2_f} L3={lux3_f}) "
-          f"— {'CONVERGED' if converged else 'NOT converged, will retry'}")
+          f"-- {'CONVERGED' if converged else 'NOT converged, will retry'}")
     return converged
 
 
@@ -2349,21 +2349,21 @@ def optimization_auto_loop():
                 converged = _pso_lamp_cycle()
                 now_after = time.time()
                 if converged:
-                    # Lux within target — wait normal 5 minutes
+                    # Lux within target -- wait normal 5 minutes
                     last_pso_time = now_after
-                    print(f"[PSO] Konvergen — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                    print(f"[PSO] Konvergen -- tunggu {AUTO_OPT_INTERVAL_LAMP}s")
                 else:
-                    # Lux not at target (or mode is not ADAPTIVE) —
+                    # Lux not at target (or mode is not ADAPTIVE) --
                     # check if it's because already at target (_pso_locked)
                     # or because not converged
                     if _pso_locked:
-                        # Already at target, lock active — wait normal
+                        # Already at target, lock active -- wait normal
                         last_pso_time = now_after
-                        print(f"[PSO] Lux dikunci dalam target — tunggu {AUTO_OPT_INTERVAL_LAMP}s")
+                        print(f"[PSO] Lux dikunci dalam target -- tunggu {AUTO_OPT_INTERVAL_LAMP}s")
                     else:
-                        # Not converged — immediately retry PSO without waiting 5 minutes
+                        # Not converged -- immediately retry PSO without waiting 5 minutes
                         # Give a short 10 second delay for sensor to stabilize
-                        print(f"[PSO] Not converged — retrying PSO in 10 seconds")
+                        print(f"[PSO] Not converged -- retrying PSO in 10 seconds")
                         last_pso_time = now_after - AUTO_OPT_INTERVAL_LAMP + 10
 
         except Exception as e:
@@ -2376,7 +2376,7 @@ INFLUX_TOKEN = "rfi_HvWdjwaG8jB3Rqx6g0y5kMWRfSfq_HmLLUvkom1yaHKvwonU9Qfj6nlZjTqb
 INFLUX_ORG = "IOTLAB"
 INFLUX_BUCKET = "SENSORDATA"
 
-# MQTT Configuration — Lab IoT Server
+# MQTT Configuration -- Lab IoT Server
 MQTT_BROKER   = "128.199.206.166"
 MQTT_PORT     = 1883
 MQTT_USER     = "labiot"
@@ -2395,7 +2395,7 @@ def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"🚨 <b>Smart Room Alert</b>\n\n{message}",
+        "text": f"   <b>Smart Room Alert</b>\n\n{message}",
         "parse_mode": "HTML"
     }
     try:
@@ -2440,7 +2440,7 @@ _detection_thread_running = False
 # Lamp apply: no EMA gain calibration (according to specification doc)
 _pending_calibration = None  # not used, kept for reference compatibility
 
-# ── Filter BH1750: validasi + EMA smoothing ───────────────────────────────────
+# -- Filter BH1750: validasi + EMA smoothing -----------------------------------
 # BH1750 sometimes produces high spikes (hundreds/thousands lux) in dark conditions
 # due to I2C noise or reading before conversion completes. This filter prevents
 # anomaly values from entering PSO and InfluxDB.
@@ -2449,7 +2449,7 @@ LUX_EMA_ALPHA      = 0.3      # bobot data baru dalam smoothing (0=ignore, 1=raw
 # EMA state per sensor (None = not initialized, use raw for first time)
 _lux_ema = [None, None, None]  # [L1_ema, L2_ema, L3_ema]
 
-# ── PWM lock: don't change brightness if lux already at target ────────────────
+# -- PWM lock: don't change brightness if lux already at target ----------------
 _pso_locked = False   # True = lux in range, PWM locked, PSO does not apply
 _pso_lock_pwm = [None, None]  # [b1%, b2%] locked
 
@@ -2497,7 +2497,7 @@ _last_sent_lamp_b2 = -1
 AC_ADAPTIVE_DEBOUNCE = 600      # 10 minutes between adaptive AC SET commands
 AC_CHANGE_THRESHOLD_TEMP = 1    # skip AC SET if temp recommendation unchanged by < 1 deg vs last sent
 AC_CHANGE_THRESHOLD_FAN = 1     # skip AC SET if fan speed unchanged vs last sent
-LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes — sesuai interval PSO dokumen
+LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes -- sesuai interval PSO dokumen
 
 # Global data storage
 mqtt_data = {
@@ -2530,10 +2530,10 @@ mqtt_status = {
 energy_runtime_history = deque(maxlen=5000)
 # Runtime outlet energy history fallback (MySQL id_kwh=2)
 outlet_runtime_history = deque(maxlen=5000)
-# Runtime lamp energy history fallback (similar to AC — starts filling immediately on MQTT data)
+# Runtime lamp energy history fallback (similar to AC -- starts filling immediately on MQTT data)
 lamp_runtime_history = deque(maxlen=5000)
 
-# InfluxDB write throttle — save every 6 minutes so database does not fill up
+# InfluxDB write throttle -- save every 6 minutes so database does not fill up
 INFLUX_WRITE_INTERVAL = 360  # seconds (6 minutes)
 _last_sensor_influx_ts   = 0.0   # when last ac_sensor written to InfluxDB
 _last_lamp_influx_ts     = 0.0   # when last lamp_sensor written to InfluxDB
@@ -2549,7 +2549,7 @@ _influx_client  = None
 _influx_write_api = None
 
 def _get_influx_client():
-    """Return (client, write_api, query_api) — creates or recreates if closed/None."""
+    """Return (client, write_api, query_api) -- creates or recreates if closed/None."""
     global _influx_client, _influx_write_api
     with _influx_lock:
         if _influx_client is None:
@@ -2574,12 +2574,12 @@ def _reset_influx_client():
         _influx_client    = None
         _influx_write_api = None
 
-# Eager initialisation — fail fast at startup if InfluxDB is unreachable
+# Eager initialisation -- fail fast at startup if InfluxDB is unreachable
 try:
     _get_influx_client()
     print("[OK] InfluxDB singleton initialised")
 except Exception as _e:
-    print(f"[WARN] InfluxDB not reachable at startup: {_e} — will retry on first use")
+    print(f"[WARN] InfluxDB not reachable at startup: {_e} -- will retry on first use")
 
 # ==================== INFLUXDB WRITE / QUERY HELPERS ====================
 def write_to_influxdb(measurement, fields, tags=None):
@@ -2733,7 +2733,7 @@ def load_yolo_model():
         return False
 
 def detect_persons(frame):
-    """Detect persons using YOLOv8 — returns frame, count, confidence, and bounding boxes list"""
+    """Detect persons using YOLOv8 -- returns frame, count, confidence, and bounding boxes list"""
     global yolo_model
     
     if yolo_model is None:
@@ -2741,7 +2741,7 @@ def detect_persons(frame):
     
     try:
         with yolo_lock:
-            # YOLOv8 inference — classes=[0] filters for 'person' only
+            # YOLOv8 inference -- classes=[0] filters for 'person' only
             results = yolo_model.predict(frame, conf=0.35, classes=[0], verbose=False, imgsz=640)
             
             person_count = 0
@@ -2771,12 +2771,12 @@ def detect_persons(frame):
         return frame, 0, 0.0, []
 
 def _person_present_recently():
-    """True if person confirmed within 5 min (NO_PERSON_TIMEOUT_SECONDS) — used for AC."""
+    """True if person confirmed within 5 min (NO_PERSON_TIMEOUT_SECONDS) -- used for AC."""
     return _last_person_confirmed_time > 0 and \
            (time.time() - _last_person_confirmed_time) < NO_PERSON_TIMEOUT_SECONDS
 
 def _person_present_recently_lamp():
-    """True if person confirmed within 20 min (NO_PERSON_LAMP_TIMEOUT) — used for Lamp.
+    """True if person confirmed within 20 min (NO_PERSON_LAMP_TIMEOUT) -- used for Lamp.
     Checks ALL sources: local YOLO thread, MQTT camera/detection, and opt_sensor_data."""
     # 1. Time-based confirmation from local YOLO camera thread
     time_confirmed = (_last_person_confirmed_time > 0 and
@@ -2867,7 +2867,7 @@ def handle_person_based_control(person_count):
                                        'msg': 'Auto ON: Person detected', 'level': 'success'})
                     socketio.emit('alert', {
                         'type': 'auto_on', 'level': 'success',
-                        'message': 'Person detected — AC turned ON automatically',
+                        'message': 'Person detected -- AC turned ON automatically',
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
@@ -2877,7 +2877,7 @@ def handle_person_based_control(person_count):
             # does NOT fire again on the next YOLO frame while waiting for ESP32 confirmation
             if lamp_adaptive and (mqtt_data['lamp'].get('brightness1', 0) == 0 and mqtt_data['lamp'].get('brightness2', 0) == 0):
                 # Use PSO result if available; fall back to 60% if PSO hasn't run yet
-                # (PSO first runs ~3 min after startup — 60% is a safe default)
+                # (PSO first runs ~3 min after startup -- 60% is a safe default)
                 b1 = mqtt_data['system'].get('pso_brightness1', 0) or mqtt_data['system'].get('pso_brightness', 0) or 60
                 b2 = mqtt_data['system'].get('pso_brightness2', 0) or b1
                 if b1 > 0 or b2 > 0:
@@ -2886,7 +2886,7 @@ def handle_person_based_control(person_count):
                             "brightness1": int(b1), "brightness2": int(b2),
                             "source": "camera_auto"
                         }))
-                        # Update locally immediately — prevents re-firing on next YOLO frame
+                        # Update locally immediately -- prevents re-firing on next YOLO frame
                         mqtt_data['lamp']['brightness1'] = int(b1)
                         mqtt_data['lamp']['brightness2'] = int(b2)
                         mqtt_data['lamp']['brightness_avg'] = round((b1 + b2) / 2.0, 1)
@@ -2895,7 +2895,7 @@ def handle_person_based_control(person_count):
                                            'msg': f'Auto ON Lamp: L1={b1}% L2={b2}%', 'level': 'success'})
                         socketio.emit('alert', {
                             'type': 'lamp_auto_on', 'level': 'success',
-                            'message': 'Person detected — Lamps turned ON automatically',
+                            'message': 'Person detected -- Lamps turned ON automatically',
                             'time': datetime.now().strftime('%H:%M:%S')
                         })
                     except Exception as e:
@@ -2928,7 +2928,7 @@ def handle_person_based_control(person_count):
                                        'msg': f'Auto OFF AC: No person for {int(elapsed/60)} min', 'level': 'warning'})
                     socketio.emit('alert', {
                         'type': 'auto_off', 'level': 'warning',
-                        'message': f'No person for {int(elapsed/60)} min — AC turned OFF automatically',
+                        'message': f'No person for {int(elapsed/60)} min -- AC turned OFF automatically',
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
@@ -2952,7 +2952,7 @@ def handle_person_based_control(person_count):
                                        'msg': f'Auto OFF Lamp: No person for {int(elapsed_lamp/60)} min', 'level': 'warning'})
                     socketio.emit('alert', {
                         'type': 'lamp_auto_off', 'level': 'warning',
-                        'message': f'No person for {int(elapsed_lamp/60)} min — Lamps turned OFF automatically',
+                        'message': f'No person for {int(elapsed_lamp/60)} min -- Lamps turned OFF automatically',
                         'time': datetime.now().strftime('%H:%M:%S')
                     })
                 except Exception as e:
@@ -2996,13 +2996,13 @@ def get_camera():
                     cam.release()
         
         if camera is not None and camera.isOpened():
-            # 720p for best FPS — YOLO only uses 640px input anyway
+            # 720p for best FPS -- YOLO only uses 640px input anyway
             camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             camera.set(cv2.CAP_PROP_FPS, 30)
-            # Force MJPEG codec for USB cameras — much faster than default YUY2
+            # Force MJPEG codec for USB cameras -- much faster than default YUY2
             camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-            # Minimal buffer — always get latest frame, not stale buffered ones
+            # Minimal buffer -- always get latest frame, not stale buffered ones
             camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             # Get actual values
@@ -3039,7 +3039,7 @@ def camera_detection_loop():
     camera_fail_count = 0
     MAX_CAMERA_RETRIES = 10
     frame_count = 0
-    YOLO_EVERY_N = 4  # Run YOLO every 4th frame — other frames just capture+encode
+    YOLO_EVERY_N = 4  # Run YOLO every 4th frame -- other frames just capture+encode
     last_person_count = 0
     last_confidence = 0.0
     last_boxes = []  # Cache bounding boxes to draw on non-YOLO frames
@@ -3063,7 +3063,7 @@ def camera_detection_loop():
                 else:
                     success, frame = cam.read()
                     if not success:
-                        # Camera read failed — release and retry
+                        # Camera read failed -- release and retry
                         if camera is not None:
                             camera.release()
                             camera = None
@@ -3088,7 +3088,7 @@ def camera_detection_loop():
             device_last_seen['camera']['status'] = 'online'
             frame_count += 1
             
-            # Run YOLO only every Nth frame — other frames reuse last detection
+            # Run YOLO only every Nth frame -- other frames reuse last detection
             if frame_count % YOLO_EVERY_N == 0:
                 frame, person_count, confidence, last_boxes = detect_persons(frame)
                 last_person_count = person_count
@@ -3188,7 +3188,7 @@ def camera_detection_loop():
             time.sleep(retry_delay)
 
 def generate_frames():
-    """Stream latest frames to /video_feed — reads from background thread"""
+    """Stream latest frames to /video_feed -- reads from background thread"""
     # Send a blank frame first so the MJPEG stream starts immediately
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
     cv2.putText(blank, 'Waiting for camera...', (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
@@ -3403,11 +3403,11 @@ def on_message(client, userdata, msg):
                 'ga_temp': float(mqtt_data['system']['ga_temp']),
                 'ga_fan': float(mqtt_data['system']['ga_fan']),
                 'pso_brightness': float(mqtt_data['system']['pso_brightness']),
-                # PSO is minimize (error), GA is maximize — normalize before combining
+                # PSO is minimize (error), GA is maximize -- normalize before combining
                 'combined_fitness': float(mqtt_data['system']['ga_fitness']) * 0.5
                                     + max(0.0, 100.0 - float(mqtt_data['system']['pso_fitness'])) * 0.5
             })
-            # AUTO-APPLY AC — only if ga_solution was present in this payload
+            # AUTO-APPLY AC -- only if ga_solution was present in this payload
             if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
                 opt_temp = ga_sol.get('temperature', payload.get('ga_temp', 0))
                 opt_fan  = ga_sol.get('fan_speed', payload.get('ga_fan', 0))
@@ -3422,7 +3422,7 @@ def on_message(client, userdata, msg):
                                   'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                         client.publish('smartroom/ac/control', json.dumps(ac_cmd))
                         mqtt_data['ac']['set_rh'] = int(opt_rh)
-            # AUTO-APPLY Lamp — only if pso_solution was present in this payload
+            # AUTO-APPLY Lamp -- only if pso_solution was present in this payload
             if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
                 opt_b1, opt_b2 = _safe_lamp_brightness(
                     pso_sol.get('brightness1', payload.get('pso_brightness1', pso_sol.get('brightness', 0))),
@@ -3541,7 +3541,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     mqtt_status['connected'] = False
     print(f"[WARN] MQTT Disconnected (RC: {reason_code})")
     log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'MQTT Disconnected! RC: {reason_code}', 'level': 'warning'})
-    send_telegram_alert(f"❌ <b>MQTT Terputus!</b>\nKoneksi ke broker {MQTT_BROKER} terputus (RC: {reason_code}).")
+    send_telegram_alert(f"  <b>MQTT Terputus!</b>\nKoneksi ke broker {MQTT_BROKER} terputus (RC: {reason_code}).")
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
@@ -3727,10 +3727,10 @@ def get_data():
 def get_tz_status():
     return jsonify({'warning': _system_tz_warn, 'ok': _system_tz_warn == ''})
 
-# ==================== OUTDOOR WEATHER (Open-Meteo — UNS Surakarta) ====================
+# ==================== OUTDOOR WEATHER (Open-Meteo -- UNS Surakarta) ====================
 # Lokasi: Universitas Sebelas Maret, Surakarta, Jawa Tengah
 # Koordinat: -7.5561, 110.8316
-# API: Open-Meteo (https://open-meteo.com) — 100% gratis, tidak butuh API key
+# API: Open-Meteo (https://open-meteo.com) -- 100% gratis, tidak butuh API key
 
 WEATHER_LAT  = -7.5561
 WEATHER_LON  = 110.8316
@@ -3747,7 +3747,7 @@ outdoor_weather_data = {
     'uv_index':          None,
     'weather_code':      None,
     'weather_desc':      'Memuat data...',
-    'weather_icon':      '🌤️',
+    'weather_icon':      '   ',
     'is_day':            True,
     'last_updated':      None,
     'fetch_ok':          False,
@@ -3757,29 +3757,29 @@ outdoor_weather_data = {
 def _wmo_to_desc_icon(code, is_day=True):
     """Convert WMO weather interpretation code to Indonesian description + emoji icon."""
     if code == 0:
-        return ('Cerah', '☀️') if is_day else ('Langit Cerah', '🌙')
+        return ('Cerah', '  ') if is_day else ('Langit Cerah', '  ')
     elif code in (1, 2, 3):
         labels = {1: 'Sebagian Cerah', 2: 'Berawan Sebagian', 3: 'Mendung'}
-        icons  = {1: '🌤️', 2: '⛅', 3: '☁️'}
+        icons  = {1: '   ', 2: ' ', 3: '  '}
         return (labels[code], icons[code])
     elif code in (45, 48):
-        return ('Berkabut', '🌫️')
+        return ('Berkabut', '   ')
     elif code in (51, 53, 55):
-        return ('Gerimis', '🌦️')
+        return ('Gerimis', '   ')
     elif code in (61, 63, 65):
-        return ('Hujan', '🌧️')
+        return ('Hujan', '   ')
     elif code in (71, 73, 75, 77):
-        return ('Salju/Es', '🌨️')
+        return ('Salju/Es', '   ')
     elif code in (80, 81, 82):
-        return ('Hujan Lebat', '🌧️')
+        return ('Hujan Lebat', '   ')
     elif code in (85, 86):
-        return ('Hujan Salju', '🌨️')
+        return ('Hujan Salju', '   ')
     elif code in (95,):
-        return ('Hujan + Petir', '⛈️')
+        return ('Hujan + Petir', '  ')
     elif code in (96, 99):
-        return ('Badai Petir', '⛈️')
+        return ('Badai Petir', '  ')
     else:
-        return ('Tidak Diketahui', '❓')
+        return ('Tidak Diketahui', ' ')
 
 def fetch_outdoor_weather():
     """Fetch current weather from Open-Meteo API for UNS Surakarta.
@@ -3826,7 +3826,7 @@ def fetch_outdoor_weather():
             'fetch_ok':      True,
             'error':         None,
         })
-        print(f"[WEATHER] {desc} {icon} | Luar: {outdoor_weather_data['temperature']}°C "
+        print(f"[WEATHER] {desc} {icon} | Luar: {outdoor_weather_data['temperature']} degC "
               f"RH={outdoor_weather_data['humidity']}% Angin={outdoor_weather_data['wind_speed']}km/h "
               f"UV={outdoor_weather_data['uv_index']}")
     except Exception as e:
@@ -3997,7 +3997,7 @@ def occupancy_feedback_submit():
 def occupancy_feedback_list():
     return jsonify({'feedback': list(occupancy_feedback)[:20]})
 
-# ── Server-side recording state (shared across all devices) ──
+# -- Server-side recording state (shared across all devices) --
 _rec_state = {'energy': False, 'temp': False, 'lux': False}
 
 @app.route('/api/rec/state', methods=['GET', 'POST'])
@@ -4011,7 +4011,7 @@ def rec_state_api():
         return jsonify({'ok': True, 'state': _rec_state})
     return jsonify(_rec_state)
 
-# ── Server-side recorded data (shared across all devices, in-memory) ──
+# -- Server-side recorded data (shared across all devices, in-memory) --
 _rec_data = {'energy': [], 'temp': [], 'lux': []}
 
 @app.route('/api/rec/data', methods=['GET', 'POST', 'DELETE'])
@@ -4089,7 +4089,7 @@ def export_csv_from_db():
 
     wib_tz = timezone(timedelta(hours=7))
 
-    # ── GA Fitness History: query dari InfluxDB measurement ga_fitness_history ─
+    # -- GA Fitness History: query dari InfluxDB measurement ga_fitness_history -
     if dtype == 'ga_fitness':
         try:
             start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib_tz).astimezone(timezone.utc)
@@ -4128,7 +4128,7 @@ from(bucket: "{INFLUX_BUCKET}")
             writer = _csv.writer(output)
             writer.writerow(['Timestamp (WIB)', 'Run #', 'Generasi',
                              'Fitness (raw)', 'Fitness (%)',
-                             'Set Temp AC (°C)', 'Fan Speed', 'Mode AC', 'Set RH (%)'])
+                             'Set Temp AC ( degC)', 'Fan Speed', 'Mode AC', 'Set RH (%)'])
             for ts in sorted_ts:
                 r = rows_by_ts[ts]
                 writer.writerow([
@@ -4149,7 +4149,7 @@ from(bucket: "{INFLUX_BUCKET}")
         except Exception as e:
             return jsonify({'error': f'Gagal export GA fitness history: {e}'}), 500
 
-    # ── PSO Fitness History: query dari InfluxDB measurement pso_fitness_history ─
+    # -- PSO Fitness History: query dari InfluxDB measurement pso_fitness_history -
     if dtype == 'pso_fitness':
         try:
             start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib_tz).astimezone(timezone.utc)
@@ -4215,7 +4215,7 @@ from(bucket: "{INFLUX_BUCKET}")
         except Exception as e:
             return jsonify({'error': f'Gagal export PSO fitness history: {e}'}), 500
 
-    # ── Energy Total: fetch AC + Outlet + Lamp, merge into one CSV ────────────
+    # -- Energy Total: fetch AC + Outlet + Lamp, merge into one CSV ------------
     if dtype == 'energy_total':
         all_rows = []
         for id_kwh, dev_label in [(1, 'AC'), (2, 'Outlet'), (3, 'Lamp')]:
@@ -4260,7 +4260,7 @@ from(bucket: "{INFLUX_BUCKET}")
             headers={'Content-Disposition': f'attachment; filename="{fname}"'}
         )
 
-    # ── Energy: fetch from MySQL via PHP (complete data source) ──────────────
+    # -- Energy: fetch from MySQL via PHP (complete data source) --------------
     if dtype in ('energy_ac', 'energy_lamp', 'energy_outlet'):
         id_kwh_map = {'energy_ac': 1, 'energy_outlet': 2, 'energy_lamp': 3}
         dev_name_map = {'energy_ac': 'AC', 'energy_outlet': 'Outlet', 'energy_lamp': 'Lamp'}
@@ -4303,7 +4303,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 headers={'Content-Disposition': f'attachment; filename="{fname}"'}
             )
         else:
-            # Fallback InfluxDB — pakai kedua device tag (esp32_ac/mysql_ac)
+            # Fallback InfluxDB -- pakai kedua device tag (esp32_ac/mysql_ac)
             print(f'[EXPORT] MySQL failed ({influx_err}), falling back to InfluxDB')
             tag_vals = ('esp32_ac', 'mysql_ac') if dtype == 'energy_ac' else ('esp32_lamp', 'mysql_lamp')
             influx_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
@@ -4343,11 +4343,11 @@ from(bucket: "{INFLUX_BUCKET}")
                 output.write("sep=,\n")
                 writer = _csv.writer(output)
                 # Header diselaraskan dengan format MySQL (9 kolom)
-                # Catatan: reactive_power & apparent_power tidak tersimpan di InfluxDB → N/A
+                # Catatan: reactive_power & apparent_power tidak tersimpan di InfluxDB -> N/A
                 writer.writerow(['Timestamp', 'Voltage (V)', 'Current (A)', 'Power Active (W)',
                                  'Reactive Power (VAR)', 'Apparent Power (VA)',
                                  'Power Factor', 'Frequency (Hz)', 'Konsumsi Energy (kWh)',
-                                 '[Source: InfluxDB fallback — MySQL unavailable]'])
+                                 '[Source: InfluxDB fallback -- MySQL unavailable]'])
                 for ts in sorted_ts:
                     r = rows_by_ts[ts]
                     kwh_raw = r.get('energy_kwh')
@@ -4356,8 +4356,8 @@ from(bucket: "{INFLUX_BUCKET}")
                         round(r.get('voltage',      0) or 0, 2),
                         round(r.get('current',      0) or 0, 3),
                         round(r.get('power',        0) or 0, 1),
-                        'N/A',   # reactive_power — tidak tersedia di InfluxDB
-                        'N/A',   # apparent_power — tidak tersedia di InfluxDB
+                        'N/A',   # reactive_power -- tidak tersedia di InfluxDB
+                        'N/A',   # apparent_power -- tidak tersedia di InfluxDB
                         round(r.get('power_factor', 0) or 0, 3),
                         round(r.get('frequency',    0) or 0, 2),
                         kwh,
@@ -4370,7 +4370,7 @@ from(bucket: "{INFLUX_BUCKET}")
             except Exception as e2:
                 return jsonify({'error': f'MySQL: {influx_err} | InfluxDB: {e2}'}), 500
 
-    # ── Temp / Lux / Occupancy: remain from InfluxDB ──────────────────────────
+    # -- Temp / Lux / Occupancy: remain from InfluxDB --------------------------
     wib = timezone(_td(hours=7))
     try:
         start_utc = datetime.strptime(from_dt, '%Y-%m-%d').replace(tzinfo=wib).astimezone(timezone.utc)
@@ -4383,15 +4383,15 @@ from(bucket: "{INFLUX_BUCKET}")
     # Human-readable column header labels per field
     _FIELD_LABELS = {
         # Sensor readings
-        'temperature':  'Temp Ruangan (°C)',
+        'temperature':  'Temp Ruangan ( degC)',
         'humidity':     'Kelembapan Ruangan (%)',
-        'heat_index':   'Heat Index (°C)',
+        'heat_index':   'Heat Index ( degC)',
         # Multi-sensor
-        'temp1': 'Sensor 1 – Suhu (°C)',  'hum1': 'Sensor 1 – RH (%)',
-        'temp2': 'Sensor 2 – Suhu (°C)',  'hum2': 'Sensor 2 – RH (%)',
-        'temp3': 'Sensor 3 – Suhu (°C)',  'hum3': 'Sensor 3 – RH (%)',
+        'temp1': 'Sensor 1 - Suhu ( degC)',  'hum1': 'Sensor 1 - RH (%)',
+        'temp2': 'Sensor 2 - Suhu ( degC)',  'hum2': 'Sensor 2 - RH (%)',
+        'temp3': 'Sensor 3 - Suhu ( degC)',  'hum3': 'Sensor 3 - RH (%)',
         # AC status
-        'ac_temp':     'Set Temperature AC (°C)',
+        'ac_temp':     'Set Temperature AC ( degC)',
         'fan_speed':   'Fan Speed (1=Low 2=Med 3=High 4=Turbo)',
         'ac_fan_mode': 'Mode AC (COOL/DRY/FAN/AUTO)',
         'set_rh':      'Set RH (%)',
@@ -4468,7 +4468,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 for f in fields
             ]
 
-            # Tulis semua baris — kolom yang tidak tersedia dibiarkan kosong ('')
+            # Tulis semua baris -- kolom yang tidak tersedia dibiarkan kosong ('')
             # (filter ketat sebelumnya menyebabkan data hilang saat sensor belum lengkap)
             writer.writerow(row)
 
@@ -4719,9 +4719,9 @@ def energy_compare():
 @app.route('/api/energy/export-csv')
 @admin_required
 def energy_export_csv():
-    """Export energy data as CSV — from realtime ring buffer or PHP proxy.
+    """Export energy data as CSV -- from realtime ring buffer or PHP proxy.
     ?device=ac|lamp|all   (default: all)
-    ?source=realtime|php  (default: php — fetch from PHP proxy)
+    ?source=realtime|php  (default: php -- fetch from PHP proxy)
     """
     import io, csv as csv_mod
 
@@ -4731,7 +4731,7 @@ def energy_export_csv():
     rows = []
 
     if source == 'realtime':
-        # Fetch from _mysqlBuf ring buffer in JS — cannot directly.
+        # Fetch from _mysqlBuf ring buffer in JS -- cannot directly.
         # Use energy_runtime_history in Python.
         with _recording_lock:
             hist = list(energy_runtime_history)
@@ -4784,7 +4784,7 @@ def energy_export_csv():
         if device in ('lamp', 'all') and data.get('lamp'):
             rows.append(_row(data['lamp'], 'Lamp'))
 
-    # Buat CSV — human-readable headers, 1 data = 1 kolom, BOM for Excel
+    # Buat CSV -- human-readable headers, 1 data = 1 kolom, BOM for Excel
     output = io.StringIO()
     output.write("sep=,\n")
     fields = ['timestamp','device','voltage','current','active_power','reactive_power','semu','pf','frequency','energy_kwh']
@@ -4816,7 +4816,7 @@ def energy_export_csv():
 
 @app.route('/api/energy/history')
 def energy_history():
-    """Get energy history from InfluxDB — supports 1h to 30 days.
+    """Get energy history from InfluxDB -- supports 1h to 30 days.
     device=ac  -> MySQL AC data (tag device='mysql_ac')
     device=lamp -> MySQL Lamp data (tag device='mysql_lamp')
     device omitted -> AC data (backward compat)
@@ -4959,7 +4959,7 @@ def energy_history():
             ]
 
         def query_field_points(field_name):
-            # energy_kwh is cumulative — use last() per window so final value
+            # energy_kwh is cumulative -- use last() per window so final value
             # of each interval is taken (not average), so JS can diff between points
             agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
             fixed_spec = _fixed_bucket_spec(extra_baseline=(field_name == 'energy_kwh'))
@@ -5117,7 +5117,7 @@ def ga_export_csv():
     buf.write("sep=,\n")
     wr  = csv_mod.writer(buf)
 
-    # ── Header ──────────────────────────────────────────────────────────────
+    # -- Header --------------------------------------------------------------
     ac_algo_name = 'Genetic Algorithm' if mqtt_data['system'].get('ac_algo', 'ga') == 'ga' else 'Particle Swarm Optimization'
     wr.writerow([f'=== AC OPTIMIZATION RESULT ({ac_algo_name.upper()}) - SMART ROOM ==='])
     wr.writerow([])
@@ -5125,7 +5125,7 @@ def ga_export_csv():
     wr.writerow(['Algorithm Used', ac_algo_name])
     wr.writerow([])
 
-    # ── Parameter ────────────────────────────────────────────────────────
+    # -- Parameter --------------------------------------------------------
     wr.writerow([f'--- PARAMETER {ac_algo_name.upper()} ---'])
     if mqtt_data['system'].get('ac_algo', 'ga') == 'ga':
         wr.writerow(['Ukuran Populasi',   params.get('population_size', '-')])
@@ -5141,36 +5141,36 @@ def ga_export_csv():
         wr.writerow(['Social (c2)',       params.get('c2', '-')])
     wr.writerow([])
 
-    # ── Room Condition on Run ─────────────────────────────────────────────
+    # -- Room Condition on Run ---------------------------------------------
     wr.writerow(['--- ROOM CONDITIONS DURING OPTIMIZATION ---'])
-    wr.writerow(['Temperature Room',   f"{snap.get('temp_room', '-')} °C"])
+    wr.writerow(['Temperature Room',   f"{snap.get('temp_room', '-')}  degC"])
     wr.writerow(['Kelembapan',     f"{snap.get('humidity', '-')} %"])
     wr.writerow(['Person Detected', 'Yes' if snap.get('person_detected') else 'No'])
     wr.writerow(['Person Count',  snap.get('person_count', 0)])
     wr.writerow(['Power AC (real)', f"{snap.get('actual_watt', '-')} W"])
     wr.writerow([])
 
-    # ── Hasil Optimal ────────────────────────────────────────────────────────
+    # -- Hasil Optimal --------------------------------------------------------
     wr.writerow(['--- HASIL OPTIMASI AC ---'])
-    wr.writerow(['Temperature AC Optimal',        f"{temp_opt} °C"])
+    wr.writerow(['Temperature AC Optimal',        f"{temp_opt}  degC"])
     wr.writerow(['Speed Fan Optimal',   f"{fan_opt} ({fan_label})"])
     wr.writerow(['Mode AC Optimal',         mode_opt])
     wr.writerow([])
 
-    # ── Performa GA ─────────────────────────────────────────────────────────
+    # -- Performa GA ---------------------------------------------------------
     wr.writerow(['--- PERFORMA ALGORITMA ---'])
     wr.writerow(['Fitness Awal (Gen 1)',     init_fit])
     wr.writerow(['Final Fitness (Best)',  final_fit])
     wr.writerow(['Peningkatan Fitness',      f"{improvement}%" if improvement != '-' else '-'])
     if bf:
         wr.writerow(['Brute-Force Validation',
-                     f"Temp={bf.get('solution', ['-','-','-'])[0]}°C "
+                     f"Temp={bf.get('solution', ['-','-','-'])[0]} degC "
                      f"Fan={bf.get('solution', ['-','-','-'])[1]} "
                      f"Mode={AC_MODE_NAMES.get(bf.get('solution', [None,None,0])[2], 'COOL')} "
                      f"Fitness={round(bf.get('fitness', 0), 2)}"])
     wr.writerow([])
 
-    # ── History Konvergensi ──────────────────────────────────────────────────
+    # -- History Konvergensi --------------------------------------------------
     if history:
         wr.writerow(['=== FITNESS CONVERGENCE HISTORY ==='])
         wr.writerow(['Generation', 'Fitness Best', 'Delta'])
@@ -5281,7 +5281,7 @@ def outlet_export_csv():
     writer.writerow([header_labels[f] for f in fields])
 
     if from_dt and to_dt:
-        # Export rentang tanggal dari MySQL via PHP proxy (id_kwh=2 → Outlet)
+        # Export rentang tanggal dari MySQL via PHP proxy (id_kwh=2 -> Outlet)
         try:
             datetime.strptime(from_dt, '%Y-%m-%d')
             datetime.strptime(to_dt,   '%Y-%m-%d')
@@ -5424,43 +5424,43 @@ def ml_params_api():
     if new_ga:
         if 'population_size' in new_ga:
             v = int(new_ga['population_size'])
-            if not (5 <= v <= 200): errors.append('GA population_size harus 5–200')
+            if not (5 <= v <= 200): errors.append('GA population_size harus 5-200')
             else: ga_params['population_size'] = v
         if 'generations' in new_ga:
             v = int(new_ga['generations'])
-            if not (5 <= v <= 500): errors.append('GA generations harus 5–500')
+            if not (5 <= v <= 500): errors.append('GA generations harus 5-500')
             else: ga_params['generations'] = v
         if 'mutation_rate' in new_ga:
             v = float(new_ga['mutation_rate'])
-            if not (0.01 <= v <= 0.9): errors.append('GA mutation_rate harus 0.01–0.90')
+            if not (0.01 <= v <= 0.9): errors.append('GA mutation_rate harus 0.01-0.90')
             else: ga_params['mutation_rate'] = round(v, 3)
         if 'crossover_rate' in new_ga:
             v = float(new_ga['crossover_rate'])
-            if not (0.1 <= v <= 1.0): errors.append('GA crossover_rate harus 0.10–1.00')
+            if not (0.1 <= v <= 1.0): errors.append('GA crossover_rate harus 0.10-1.00')
             else: ga_params['crossover_rate'] = round(v, 3)
         if 'elitism_ratio' in new_ga:
             v = float(new_ga['elitism_ratio'])
-            if not (0.0 <= v <= 0.5): errors.append('GA elitism_ratio harus 0.00–0.50')
+            if not (0.0 <= v <= 0.5): errors.append('GA elitism_ratio harus 0.00-0.50')
             else: ga_params['elitism_ratio'] = round(v, 3)
         if 'tournament_size' in new_ga:
             v = int(new_ga['tournament_size'])
-            if not (2 <= v <= 10): errors.append('GA tournament_size harus 2–10')
+            if not (2 <= v <= 10): errors.append('GA tournament_size harus 2-10')
             else: ga_params['tournament_size'] = v
         if 'ac_temp_min' in new_ga:
             v = int(new_ga['ac_temp_min'])
-            if not (16 <= v <= 28): errors.append('GA ac_temp_min harus 16–28')
+            if not (16 <= v <= 28): errors.append('GA ac_temp_min harus 16-28')
             else: ga_params['ac_temp_min'] = v
         if 'ac_temp_max' in new_ga:
             v = int(new_ga['ac_temp_max'])
-            if not (18 <= v <= 30): errors.append('GA ac_temp_max harus 18–30')
+            if not (18 <= v <= 30): errors.append('GA ac_temp_max harus 18-30')
             else: ga_params['ac_temp_max'] = v
         if 'fan_min' in new_ga:
             v = int(new_ga['fan_min'])
-            if not (1 <= v <= 3): errors.append('GA fan_min harus 1–3')
+            if not (1 <= v <= 3): errors.append('GA fan_min harus 1-3')
             else: ga_params['fan_min'] = v
         if 'fan_max' in new_ga:
             v = int(new_ga['fan_max'])
-            if not (1 <= v <= 3): errors.append('GA fan_max harus 1–3')
+            if not (1 <= v <= 3): errors.append('GA fan_max harus 1-3')
             else: ga_params['fan_max'] = v
 
     # --- Validate PSO ---
@@ -5468,39 +5468,39 @@ def ml_params_api():
     if new_pso:
         if 'swarm_size' in new_pso:
             v = int(new_pso['swarm_size'])
-            if not (5 <= v <= 200): errors.append('PSO swarm_size harus 5–200')
+            if not (5 <= v <= 200): errors.append('PSO swarm_size harus 5-200')
             else: pso_params['swarm_size'] = v
         if 'iterations' in new_pso:
             v = int(new_pso['iterations'])
-            if not (5 <= v <= 500): errors.append('PSO iterations harus 5–500')
+            if not (5 <= v <= 500): errors.append('PSO iterations harus 5-500')
             else: pso_params['iterations'] = v
         if 'w' in new_pso:
             v = float(new_pso['w'])
-            if not (0.1 <= v <= 1.5): errors.append('PSO w (inertia) harus 0.1–1.5')
+            if not (0.1 <= v <= 1.5): errors.append('PSO w (inertia) harus 0.1-1.5')
             else: pso_params['w'] = round(v, 3)
         if 'c1' in new_pso:
             v = float(new_pso['c1'])
-            if not (0.5 <= v <= 4.0): errors.append('PSO c1 harus 0.5–4.0')
+            if not (0.5 <= v <= 4.0): errors.append('PSO c1 harus 0.5-4.0')
             else: pso_params['c1'] = round(v, 3)
         if 'c2' in new_pso:
             v = float(new_pso['c2'])
-            if not (0.5 <= v <= 4.0): errors.append('PSO c2 harus 0.5–4.0')
+            if not (0.5 <= v <= 4.0): errors.append('PSO c2 harus 0.5-4.0')
             else: pso_params['c2'] = round(v, 3)
         if 'brightness_min' in new_pso:
             v = int(new_pso['brightness_min'])
-            if not (0 <= v <= 100): errors.append('PSO brightness_min harus 0–100')
+            if not (0 <= v <= 100): errors.append('PSO brightness_min harus 0-100')
             else: pso_params['brightness_min'] = v
         if 'brightness_max' in new_pso:
             v = int(new_pso['brightness_max'])
-            if not (100 <= v <= 255): errors.append('PSO brightness_max harus 100–255')
+            if not (100 <= v <= 255): errors.append('PSO brightness_max harus 100-255')
             else: pso_params['brightness_max'] = v
         if 'target_lux_work' in new_pso:
             v = int(new_pso['target_lux_work'])
-            if not (100 <= v <= 1000): errors.append('PSO target_lux_work harus 100–1000')
+            if not (100 <= v <= 1000): errors.append('PSO target_lux_work harus 100-1000')
             else: pso_params['target_lux_work'] = v
         if 'target_lux_sleep' in new_pso:
             v = int(new_pso['target_lux_sleep'])
-            if not (0 <= v <= 300): errors.append('PSO target_lux_sleep harus 0–300')
+            if not (0 <= v <= 300): errors.append('PSO target_lux_sleep harus 0-300')
             else: pso_params['target_lux_sleep'] = v
 
     # Handle reset flag
@@ -5529,7 +5529,7 @@ def ml_params_api():
 @app.route('/api/ml/run', methods=['POST'])
 @admin_required
 def ml_run():
-    """Trigger optimization run (GA, PSO, or both) — runs embedded engine"""
+    """Trigger optimization run (GA, PSO, or both) -- runs embedded engine"""
     try:
         data = request.json
         algo = data.get('algorithm', 'both')
@@ -5544,7 +5544,7 @@ def ml_run():
             if 'ga' in params: ga_params.update({k: v for k, v in params['ga'].items() if k in ga_params})
             if 'pso' in params: pso_params.update({k: v for k, v in params['pso'].items() if k in pso_params})
         
-        # PSO: gunakan _pso_lamp_cycle() agar urutan Baca→Hitung→Send konsisten
+        # PSO: gunakan _pso_lamp_cycle() agar urutan Baca->Hitung->Send konsisten
         # with automatic cycle. GA still uses run_optimization_cycle().
         if algo == 'pso':
             t = threading.Thread(target=_pso_lamp_cycle, daemon=True)
@@ -6132,7 +6132,7 @@ def set_lamp_mode():
 
 @app.route('/api/optimization/update', methods=['POST'])
 def update_optimization():
-    """Receive optimization data from main.py — GA->AC / PSO->Lamp"""
+    """Receive optimization data from main.py -- GA->AC / PSO->Lamp"""
     try:
         data = request.json
         ga_sol = data.get('ga_solution', {})
@@ -6155,7 +6155,7 @@ def update_optimization():
         # Broadcast to all connected clients
         socketio.emit('mqtt_update', {'type': 'system', 'data': mqtt_data['system']})
         
-        # AUTO-APPLY AC — only if ga_solution was provided in this request
+        # AUTO-APPLY AC -- only if ga_solution was provided in this request
         if ga_sol and mqtt_data['ac'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently():
             opt_temp = ga_sol.get('temperature', mqtt_data['system'].get('ga_temp', 0))
             opt_fan  = ga_sol.get('fan_speed', mqtt_data['system'].get('ga_fan', 0))
@@ -6170,9 +6170,9 @@ def update_optimization():
                               'mode': opt_mode, 'set_rh': int(opt_rh), 'source': 'adaptive'}
                     mqtt_client.publish('smartroom/ac/control', json.dumps(ac_cmd))
                     mqtt_data['ac']['set_rh'] = int(opt_rh)
-                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp}°C Fan:{opt_fan} Mode:{opt_mode} RH:{opt_rh}%', 'level': 'success'})
+                    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'), 'msg': f'Adaptive AC: {opt_temp} degC Fan:{opt_fan} Mode:{opt_mode} RH:{opt_rh}%', 'level': 'success'})
         
-        # AUTO-APPLY Lamp — only if pso_solution was provided in this request
+        # AUTO-APPLY Lamp -- only if pso_solution was provided in this request
         if pso_sol and mqtt_data['lamp'].get('mode', 'MANUAL') == 'ADAPTIVE' and _person_present_recently_lamp():
             opt_b1, opt_b2 = _safe_lamp_brightness(
                 pso_sol.get('brightness1', mqtt_data['system'].get('pso_brightness1', pso_sol.get('brightness', 0))),
@@ -6428,7 +6428,7 @@ def esp32_data_receiver():
             'source':      'esp32_https',
         })
 
-        print(f"[ESP32-HTTPS] Data diterima: suhu={opt_sensor_data['temperature']}°C "
+        print(f"[ESP32-HTTPS] Data diterima: suhu={opt_sensor_data['temperature']} degC "
               f"hum={opt_sensor_data['humidity']}% AC={data.get('ac_state','?')}")
 
         return jsonify({'status': 'ok', 'received': True}), 200
@@ -6501,7 +6501,7 @@ def check_alert_rules():
         if rule.get('enabled') and temp > rule.get('threshold', 35):
             if not rule.get('triggered'):
                 rule['triggered'] = True
-                alert = {'type': 'high_temp', 'message': f'Temperature {temp:.1f}°C exceeds {rule.get("threshold", 35)}°C!', 'level': 'danger', 'time': now.strftime('%H:%M:%S')}
+                alert = {'type': 'high_temp', 'message': f'Temperature {temp:.1f} degC exceeds {rule.get("threshold", 35)} degC!', 'level': 'danger', 'time': now.strftime('%H:%M:%S')}
                 active_alerts.append(alert)
                 socketio.emit('alert', alert)
         else:
@@ -6621,7 +6621,7 @@ if __name__ == '__main__':
     opt_thread.start()
     print(f"  [OPT] GA auto-opt every {AUTO_OPT_INTERVAL_AC}s, PSO every {AUTO_OPT_INTERVAL_LAMP}s")
 
-    # Restore last GA/PSO results — first from JSON file (has stats/history arrays),
+    # Restore last GA/PSO results -- first from JSON file (has stats/history arrays),
     # then supplement with InfluxDB (has latest scalar values)
     print("  [RESTORE] Loading last optimization results...")
     load_opt_results_file()
