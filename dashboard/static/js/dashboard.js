@@ -3749,11 +3749,21 @@ function showEnergyBubble(power, voltage, current) {
 }
 
 // ==================== OCCUPANCY FEEDBACK ====================
-function selectFeedbackRating(value) {
-    selectedFeedbackRating = value;
-    document.querySelectorAll('#rating-row .rating-btn').forEach((btn, idx) => {
-        btn.classList.toggle('active', idx + 1 === value);
-    });
+let selectedThermalRating = 0;
+let selectedVisualRating = 0;
+
+function selectFeedbackRating(type, value) {
+    if (type === 'thermal') {
+        selectedThermalRating = value;
+        document.querySelectorAll('#rating-row-thermal .rating-btn').forEach((btn, idx) => {
+            btn.classList.toggle('active', idx + 1 === value);
+        });
+    } else if (type === 'visual') {
+        selectedVisualRating = value;
+        document.querySelectorAll('#rating-row-visual .rating-btn').forEach((btn, idx) => {
+            btn.classList.toggle('active', idx + 1 === value);
+        });
+    }
 }
 
 function saveGoogleFormUrl() {
@@ -3775,8 +3785,8 @@ function submitOccupancyFeedback() {
     const comment = (document.getElementById('feedback-comment').value || '').trim();
     const formUrl = (document.getElementById('google-form-url').value || '').trim() || localStorage.getItem('googleFormUrl') || DEFAULT_GOOGLE_FORM_URL;
 
-    if (!selectedFeedbackRating) {
-        showToast('Please select a rating 1-5 first', 'error');
+    if (!selectedThermalRating || !selectedVisualRating) {
+        showToast('Please select ratings for both Thermal and Visual comfort', 'error');
         return;
     }
 
@@ -3784,7 +3794,8 @@ function submitOccupancyFeedback() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            rating: selectedFeedbackRating,
+            thermal_rating: selectedThermalRating,
+            visual_rating: selectedVisualRating,
             comment: comment,
             google_form_url: formUrl,
             occupancy_count: parseInt((document.getElementById('cam-count') ? document.getElementById('cam-count').textContent : '0') || '0', 10)
@@ -3795,7 +3806,8 @@ function submitOccupancyFeedback() {
             if (result.status === 'success') {
                 showToast('Feedback submitted successfully', 'success');
                 document.getElementById('feedback-comment').value = '';
-                selectFeedbackRating(0);
+                selectFeedbackRating('thermal', 0);
+                selectFeedbackRating('visual', 0);
                 loadFeedbackHistory();
                 if (formUrl && formUrl !== DEFAULT_GOOGLE_FORM_URL) {
                     window.open(formUrl, '_blank');
@@ -3824,7 +3836,7 @@ function loadFeedbackHistory() {
                 const safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 return '<div class="feedback-history-item">' +
                     '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
-                    '<strong>Rating: ' + item.rating + '/5</strong>' +
+                    '<strong>Thermal: ' + (item.thermal_rating || '-') + '/5 | Visual: ' + (item.visual_rating || '-') + '/5</strong>' +
                     '<span style="font-size:12px; color: var(--text-secondary);">' + item.time + '</span>' +
                     '</div>' +
                     '<div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ' + item.occupancy_count + ' person(s)</div>' +
