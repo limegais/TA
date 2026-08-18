@@ -34,8 +34,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Authentication Credentials (role-based)
 USERS = {
-    'admin': {'password': 'admin', 'role': 'admin'},
-    'user':  {'password': 'user',  'role': 'user'},
+    'iotlab': {'password': 'iotlab2023', 'role': 'admin'},
+    'user':  {'password': 'iotlab2023',  'role': 'user'},
 }
 
 # Device Status Tracking
@@ -720,6 +720,7 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
     MIN_LUX    = 200.0   # lux minimum per sensor (tidak ada sudut gelap)
     W_BALANCE  = 0.5     # bobot penalti distribusi
     W_MIN      = 1.5     # bobot penalti sensor gelap (lebih ketat)
+    W_POWER    = 0.1     # bobot efisiensi energi (meminimalkan daya)
 
     # -- Langkah 3: Hitung komponen error -------------------------------------
     lux_est_avg = (est_lux1 + est_lux2 + est_lux3) / 3.0
@@ -739,14 +740,18 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
         if est < MIN_LUX:
             error_min += (MIN_LUX - est) ** 2
 
-    # -- Langkah 4: Tolerance check -- kondisi sempurna (fitness = 0) ----------
+    # Komponen 4: efisiensi energi (menggunakan estimasi daya)
+    error_power = power_est
+
+    # -- Langkah 4: Tolerance check -- kondisi sempurna (fitness = minimal) ----------
     # Lux rata-rata 315-385 DAN semua sensor >= 200 lux -> tujuan tercapai
+    # Nilai fitness hanya dipengaruhi konsumsi daya agar PSO memilih konfigurasi paling hemat
     if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
             and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
-        return 0.0
+        return round(W_POWER * error_power, 4)
 
     # -- Langkah 5: Gabungkan komponen fitness --------------------------------
-    fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min
+    fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min + W_POWER * error_power
     return round(fitness, 4)
 
 def update_opt_sensor_data(**kwargs):
@@ -1243,11 +1248,13 @@ def run_pso_optimization(verbose=False):
         # Tunggu sensor stabil
         time.sleep(SENSOR_SETTLE_S)
 
-        # Baca lux nyata
+        # Baca lux dan daya nyata
         lux1_r = float(opt_sensor_data.get('lux1', opt_sensor_data.get('lux', 0)))
         lux2_r = float(opt_sensor_data.get('lux2', opt_sensor_data.get('lux', 0)))
         lux3_r = float(opt_sensor_data.get('lux3', opt_sensor_data.get('lux', 0)))
         lux_real = round((lux1_r + lux2_r + lux3_r) / 3.0, 1)
+        
+        power_lamp_real = float(opt_sensor_data.get('power_lamp', 0))
 
         # Hitung fitness nyata menggunakan fungsi objektif yang sama dengan estimasi
         person_now = opt_sensor_data.get('person_detected', False) or _person_present_recently_lamp()
@@ -1257,14 +1264,16 @@ def run_pso_optimization(verbose=False):
         var_real = ((lux1_r - lux_real)**2 + (lux2_r - lux_real)**2 + (lux3_r - lux_real)**2) / 3.0
         err_min = 0.0
         MIN_LUX = 200.0
+        W_POWER = 0.1
+        
         for lux_val in [lux1_r, lux2_r, lux3_r]:
             if lux_val < MIN_LUX:
                 err_min += (MIN_LUX - lux_val) ** 2
                 
-        real_fit = err_avg + 0.5 * var_real + 1.5 * err_min
+        real_fit = err_avg + 0.5 * var_real + 1.5 * err_min + W_POWER * power_lamp_real
         
         if TARGET_LUX > 0 and 315.0 <= lux_real <= 385.0 and lux1_r >= MIN_LUX and lux2_r >= MIN_LUX and lux3_r >= MIN_LUX:
-            real_fit = 0.0
+            real_fit = W_POWER * power_lamp_real
             
         real_fit = round(real_fit, 4)
 
@@ -3967,17 +3976,19 @@ def mqtt_selftest():
 def occupancy_feedback_submit():
     try:
         data = request.json or {}
-        rating = int(data.get('rating', 0))
+        thermal_rating = int(data.get('thermal_rating', 0))
+        visual_rating = int(data.get('visual_rating', 0))
         comment = (data.get('comment') or '').strip()
         occupancy_count = int(data.get('occupancy_count', 0))
         google_form_url = (data.get('google_form_url') or GOOGLE_FORM_URL).strip()
 
-        if rating < 1 or rating > 5:
-            return jsonify({'status': 'error', 'message': 'Rating must be 1-5'}), 400
+        if thermal_rating < 1 or thermal_rating > 5 or visual_rating < 1 or visual_rating > 5:
+            return jsonify({'status': 'error', 'message': 'Ratings must be 1-5'}), 400
 
         row = {
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'rating': rating,
+            'thermal_rating': thermal_rating,
+            'visual_rating': visual_rating,
             'comment': comment,
             'occupancy_count': occupancy_count,
             'google_form_url': google_form_url
@@ -3985,9 +3996,22 @@ def occupancy_feedback_submit():
         occupancy_feedback.appendleft(row)
         log_messages.append({
             'time': datetime.now().strftime('%H:%M:%S'),
-            'msg': f'Occupancy Feedback: rating={rating}, occupancy={occupancy_count}, comment={comment[:40]}',
+            'msg': f'Feedback: Thermal={thermal_rating}, Visual={visual_rating}, occ={occupancy_count}',
             'level': 'info'
         })
+
+        # Save to InfluxDB
+        if influx_client and write_api:
+            try:
+                pt = (Point('comfort_feedback')
+                      .field('thermal_rating', thermal_rating)
+                      .field('visual_rating', visual_rating)
+                      .field('occupancy_count', occupancy_count)
+                      .field('comment', comment)
+                      .time(datetime.utcnow(), WritePrecision.NS))
+                write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=pt)
+            except Exception as e:
+                print(f"[ERROR] Failed to save feedback to InfluxDB: {e}")
 
         return jsonify({'status': 'success', 'message': 'Feedback saved', 'google_form_url': google_form_url})
     except Exception as e:
