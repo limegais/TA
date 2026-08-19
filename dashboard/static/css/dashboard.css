@@ -983,4 +983,145 @@
             .sbms-btn-group > button:last-child { grid-column: span 2; }
         }
 
-c
+        /* ========== MONITORING PAGE ========== */
+        .monitoring-section-title {
+            font-size: 20px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;
+            color: var(--text-primary);
+        }
+        .monitoring-section-title i { color: var(--primary); }
+        .monitoring-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px;
+        }
+        .monitor-card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 20px;
+            transition: all 0.3s; position: relative; overflow: hidden;
+        }
+        .monitor-card:hover {
+            transform: translateY(-4px); box-shadow: 0 8px 25px var(--shadow);
+        }
+        .monitor-card .card-icon {
+            width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+            font-size: 22px; margin-bottom: 14px;
+        }
+        .monitor-card .card-label {
+            font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 6px;
+        }
+        .monitor-card .card-value {
+            font-size: 36px; font-weight: 800; line-height: 1.1; margin-bottom: 8px;
+        }
+        .monitor-card .card-unit {
+            font-size: 16px; font-weight: 500; opacity: 0.7;
+        }
+        .monitor-card .card-status {
+            display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; margin-top: 6px;
+        }
+        .monitor-card .card-status.good { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+        .monitor-card .card-status.moderate { background: rgba(14, 165, 233, 0.15); color: #0ea5e9; }
+        .monitor-card .card-status.poor { background: rgba(30, 64, 175, 0.15); color: #1e40af; }
+        .monitor-card .card-status.offline { background: rgba(100, 116, 139, 0.15); color: #64748b; }
+        .monitor-card-chart { margin-top: 14px; }
+        .monitor-card-chart canvas { max-height: 100px; }
+        .monitor-divider {
+            border: none; border-top: 2px solid var(--border); margin: 10px 0 24px 0;
+        }
+
+        /* ========== SCHEDULING ========== */
+        .schedule-section {
+            margin-top: 24px; padding: 20px; border-radius: 14px; border: 2px solid var(--border);
+            background: var(--bg-card);
+        }
+        .schedule-section-title {
+            font-size: 16px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;
+            color: var(--primary);
+        }
+        .schedule-form {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;
+            padding: 16px; border-radius: 12px; background: rgba(37, 99, 235, 0.04); border: 1px solid var(--border);
+        }
+        .schedule-form .form-group { display: flex; flex-direction: column; gap: 4px; }
+        .schedule-form .form-group.full-width { grid-column: span 2; }
+        .schedule-form label {
+            font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .schedule-form input, .schedule-form select {
+            padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+            background: var(--input-bg); color: var(--text-primary); font-size: 14px; transition: border-color 0.3s;
+        }
+        .schedule-form input:focus, .schedule-form select:focus {
+            outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+        }
+        .day-selector { display: flex; gap: 6px; flex-wrap: wrap; }
+        .day-btn {
+            width: 38px; height: 38px; border-radius: 10px; border: 2px solid var(--border); background: var(--bg-card);
+            color: var(--text-secondary); font-size: 12px; font-weight: 700; cursor: pointer; transition: all 0.2s;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .day-btn.active {
+            background: var(--primary); border-color: var(--primary); color: #fff;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        }
+        .schedule-table {
+            width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px;
+        }
+        .schedule-table th {
+            padding: 10px 12px; text-align: left; background: rgba(37, 99, 235, 0.08); color: var(--primary);
+            font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid var(--border);
+        }
+        .schedule-table td {
+            padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle;
+        }
+        .schedule-table tr:hover { background: var(--bg-card-hover); }
+        .schedule-table .day-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+        .schedule-table .day-tag {
+            display: inline-block; padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700;
+            background: rgba(37, 99, 235, 0.1); color: var(--primary);
+        }
+        .schedule-toggle {
+            position: relative; width: 40px; height: 22px; display: inline-block;
+        }
+        .schedule-toggle input { opacity: 0; width: 0; height: 0; }
+        .schedule-toggle .toggle-slider {
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--border); border-radius: 22px; transition: 0.3s;
+        }
+        .schedule-toggle .toggle-slider:before {
+            content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+            background: #fff; border-radius: 50%; transition: 0.3s;
+        }
+        .schedule-toggle input:checked + .toggle-slider { background: var(--primary); }
+        .schedule-toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+        .schedule-empty {
+            text-align: center; padding: 24px; color: var(--text-secondary); font-size: 13px;
+        }
+        .schedule-active-badge {
+            display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 700;
+            background: rgba(59, 130, 246, 0.15); color: #3b82f6; animation: pulse 2s infinite;
+        }
+
+        /* ========== COMFORT PAGES ========== */
+        .comfort-header-bar {
+            display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+        }
+        .comfort-indicator {
+            flex: 1; min-width: 140px; background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 12px; padding: 14px; text-align: center; transition: all 0.3s;
+        }
+        .comfort-indicator:hover { transform: translateY(-3px); box-shadow: 0 6px 18px var(--shadow); }
+        .comfort-indicator .ci-label {
+            font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; margin-bottom: 4px;
+        }
+        .comfort-indicator .ci-value {
+            font-size: 28px; font-weight: 800; color: var(--primary); line-height: 1.2;
+        }
+        .comfort-indicator .ci-unit { font-size: 14px; font-weight: 500; opacity: 0.7; }
+
+        @media (max-width: 768px) {
+            .monitoring-grid { grid-template-columns: 1fr; }
+            .schedule-form { grid-template-columns: 1fr; }
+            .schedule-form .form-group.full-width { grid-column: span 1; }
+            .schedule-table { font-size: 12px; }
+            .schedule-table th, .schedule-table td { padding: 8px 6px; }
+            .comfort-header-bar { flex-direction: column; }
+            .monitor-card .card-value { font-size: 28px; }
+        }
+
