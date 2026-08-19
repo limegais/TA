@@ -200,7 +200,92 @@
                 </div>
 
                 <div style="margin-top: 15px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-                    IRMitsubishiHeavy library — no manual learning needed.
+                    IRMitsubishiHeavy library &mdash; no manual learning needed.
+                </div>
+
+                <!-- ========== RULE BASE: SCHEDULING ========== -->
+                <div class="schedule-section">
+                    <div class="schedule-section-title">
+                        <i class="fas fa-clock"></i> Rule Base: AC Scheduling
+                    </div>
+
+                <!-- Add Schedule Form -->
+                <div class="schedule-form" id="ac-schedule-form">
+                    <div class="form-group full-width">
+                        <label>Days</label>
+                        <div class="day-selector" id="ac-sched-days">
+                            <button type="button" class="day-btn" data-day="Mon" onclick="toggleSchedDay(this)">Mo</button>
+                            <button type="button" class="day-btn" data-day="Tue" onclick="toggleSchedDay(this)">Tu</button>
+                            <button type="button" class="day-btn" data-day="Wed" onclick="toggleSchedDay(this)">We</button>
+                            <button type="button" class="day-btn" data-day="Thu" onclick="toggleSchedDay(this)">Th</button>
+                            <button type="button" class="day-btn" data-day="Fri" onclick="toggleSchedDay(this)">Fr</button>
+                            <button type="button" class="day-btn" data-day="Sat" onclick="toggleSchedDay(this)">Sa</button>
+                            <button type="button" class="day-btn" data-day="Sun" onclick="toggleSchedDay(this)">Su</button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Start Time</label>
+                        <input type="time" id="ac-sched-start" value="08:00">
+                    </div>
+                    <div class="form-group">
+                        <label>End Time</label>
+                        <input type="time" id="ac-sched-end" value="17:00">
+                    </div>
+                    <div class="form-group">
+                        <label>Action</label>
+                        <select id="ac-sched-action">
+                            <option value="ON">AC ON</option>
+                            <option value="OFF">AC OFF</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Temperature (°C)</label>
+                        <input type="number" id="ac-sched-temp" min="16" max="30" value="24">
+                    </div>
+                    <div class="form-group">
+                        <label>Fan Speed</label>
+                        <select id="ac-sched-fan">
+                            <option value="1">Low (1)</option>
+                            <option value="2">Medium (2)</option>
+                            <option value="3">High (3)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <select id="ac-sched-mode">
+                            <option value="COOL">Cool</option>
+                            <option value="AUTO">Auto</option>
+                            <option value="FAN">Fan</option>
+                            <option value="DRY">Dry</option>
+                        </select>
+                    </div>
+                    <div class="form-group full-width" style="flex-direction: row; align-items: flex-end;">
+                        <button class="btn btn-primary" onclick="addACSchedule()" style="width: 100%;">
+                            <i class="fas fa-plus"></i> Add Schedule
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Schedule Table -->
+                <div style="overflow-x: auto;">
+                    <table class="schedule-table" id="ac-schedule-table">
+                        <thead>
+                            <tr>
+                                <th>Days</th>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Temp</th>
+                                <th>Fan</th>
+                                <th>Mode</th>
+                                <th>Active</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="ac-schedule-tbody">
+                            <tr><td colspan="8" class="schedule-empty"><i class="fas fa-calendar-alt" style="font-size: 24px; margin-bottom: 8px; display: block; opacity: 0.5;"></i>No schedules configured</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
+    </div>
