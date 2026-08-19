@@ -17,7 +17,7 @@ var charts = {};
 
 // ==================== ROLE-BASED ACCESS CONTROL ====================
 var userRole = 'admin'; // default until /api/auth/role responds
-var ADMIN_PAGES = ['ac-analytics', 'lamp-analytics', 'camera', 'energy', 'ml-optimization', 'logs', 'occupancy-feedback', 'outlet-analysis'];
+var ADMIN_PAGES = ['ac-analytics', 'lamp-analytics', 'camera', 'energy', 'ml-optimization', 'logs', 'thermal-comfort', 'visual-comfort', 'monitoring', 'outlet-analysis'];
 
 function applyRoleRestrictions(role, username) {
     userRole = role;
@@ -1501,9 +1501,22 @@ function showPage(pageId) {
         });
         try { loadAnalyticsEnergy('lamp', _analyticsEnergyPeriod.lamp || '24h', null); } catch (e) { }
     }
-    if (pageId === 'occupancy-feedback') {
-        try { updateChartData('occupancy', chartRanges.occupancy || 1); } catch (e) { }
-        try { loadFeedbackHistory(); } catch (e) { }
+    if (pageId === 'thermal-comfort') {
+        try { loadThermalFeedbackHistory(); } catch (e) { }
+        try { updateThermalComfortIndicators(); } catch (e) { }
+    }
+    if (pageId === 'visual-comfort') {
+        try { loadVisualFeedbackHistory(); } catch (e) { }
+        try { updateVisualComfortIndicators(); } catch (e) { }
+    }
+    if (pageId === 'monitoring') {
+        try { updateMonitoringData(); } catch (e) { }
+    }
+    if (pageId === 'control-ac') {
+        try { loadACSchedules(); } catch (e) { }
+    }
+    if (pageId === 'control-lamp') {
+        try { loadLampSchedules(); } catch (e) { }
     }
     if (pageId === 'energy') {
         try { ensureChartsReady(); } catch (e) { console.error('[NAV] ensureChartsReady error:', e); }
@@ -6043,5 +6056,492 @@ window.onload = function () {
     setInterval(fetchOutdoorWeather, 600000);
 
     console.log('[OK] Dashboard Ready!');
+
+    // Load schedules on startup
+    try { loadACSchedules(); } catch(e) {}
+    try { loadLampSchedules(); } catch(e) {}
 };
+
+// ==================== THERMAL COMFORT FEEDBACK ====================
+var _thermalPageRating = 0;
+
+function selectThermalPageRating(value) {
+    _thermalPageRating = value;
+    document.querySelectorAll('#rating-row-thermal-page .rating-btn').forEach(function(btn, idx) {
+        btn.classList.toggle('active', idx + 1 === value);
+    });
+}
+
+function submitThermalFeedback() {
+    var comment = (document.getElementById('thermal-feedback-comment').value || '').trim();
+    if (!_thermalPageRating) {
+        showToast('Please select a thermal comfort rating', 'error');
+        return;
+    }
+    fetch('/api/occupancy/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            thermal_rating: _thermalPageRating,
+            visual_rating: 0,
+            comment: '[THERMAL] ' + comment,
+            feedback_type: 'thermal',
+            occupancy_count: parseInt((document.getElementById('tc-occ') ? document.getElementById('tc-occ').textContent : '0') || '0', 10)
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Thermal feedback submitted', 'success');
+            document.getElementById('thermal-feedback-comment').value = '';
+            selectThermalPageRating(0);
+            loadThermalFeedbackHistory();
+        } else {
+            showToast(result.message || 'Failed to submit', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + (e.message || e), 'error'); });
+}
+
+function loadThermalFeedbackHistory() {
+    fetch('/api/occupancy/feedback/list')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var container = document.getElementById('thermal-feedback-history');
+        if (!container) return;
+        var rows = (data.feedback || []).filter(function(item) {
+            return item.thermal_rating && item.thermal_rating > 0;
+        });
+        if (rows.length === 0) {
+            container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">No thermal feedback yet.</div>';
+            return;
+        }
+        container.innerHTML = rows.slice(0, 20).map(function(item) {
+            var safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return '<div class="feedback-history-item">' +
+                '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                '<strong>Thermal: ' + (item.thermal_rating || '-') + '/5</strong>' +
+                '<span style="font-size:12px; color: var(--text-secondary);">' + item.time + '</span>' +
+                '</div>' +
+                '<div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ' + item.occupancy_count + ' person(s)</div>' +
+                '<div style="margin-top:6px; font-size:13px;">' + (safeComment || '-') + '</div>' +
+                '</div>';
+        }).join('');
+    })
+    .catch(function() {});
+}
+
+function exportThermalFeedback() {
+    fetch('/api/occupancy/feedback/list')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var rows = (data.feedback || []).filter(function(item) { return item.thermal_rating > 0; });
+        if (rows.length === 0) { showToast('No thermal data to export', 'error'); return; }
+        var csv = 'Time,Thermal Rating,Occupancy,Comment\n';
+        rows.forEach(function(r) {
+            csv += r.time + ',' + r.thermal_rating + ',' + r.occupancy_count + ',"' + (r.comment || '').replace(/"/g, '""') + '"\n';
+        });
+        downloadCSV('thermal_feedback.csv', csv);
+        showToast('Thermal feedback exported', 'success');
+    })
+    .catch(function() { showToast('Failed to fetch data', 'error'); });
+}
+
+function updateThermalComfortIndicators() {
+    fetch('/api/data', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var ac = data.ac || {};
+        var cam = data.camera || {};
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        setText('tc-temp', (parseFloat(ac.temperature) || 0).toFixed(1));
+        setText('tc-hum', (parseFloat(ac.humidity) || 0).toFixed(1));
+        setText('tc-hi', (parseFloat(ac.heat_index) || 0).toFixed(1));
+        setText('tc-occ', cam.count || 0);
+    }).catch(function() {});
+}
+
+function changeThermalChartRange(hours) {
+    document.querySelectorAll('#thermal-comfort .chart-option-btn').forEach(function(btn) {
+        btn.classList.remove('active');
+        if (btn.textContent.trim() === hours + 'h' || btn.textContent.trim() === (hours/24) + 'd') btn.classList.add('active');
+    });
+}
+
+// ==================== VISUAL COMFORT FEEDBACK ====================
+var _visualPageRating = 0;
+
+function selectVisualPageRating(value) {
+    _visualPageRating = value;
+    document.querySelectorAll('#rating-row-visual-page .rating-btn').forEach(function(btn, idx) {
+        btn.classList.toggle('active', idx + 1 === value);
+    });
+}
+
+function submitVisualFeedback() {
+    var comment = (document.getElementById('visual-feedback-comment').value || '').trim();
+    if (!_visualPageRating) {
+        showToast('Please select a visual comfort rating', 'error');
+        return;
+    }
+    fetch('/api/occupancy/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            thermal_rating: 0,
+            visual_rating: _visualPageRating,
+            comment: '[VISUAL] ' + comment,
+            feedback_type: 'visual',
+            occupancy_count: parseInt((document.getElementById('vc-occ') ? document.getElementById('vc-occ').textContent : '0') || '0', 10)
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Visual feedback submitted', 'success');
+            document.getElementById('visual-feedback-comment').value = '';
+            selectVisualPageRating(0);
+            loadVisualFeedbackHistory();
+        } else {
+            showToast(result.message || 'Failed to submit', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + (e.message || e), 'error'); });
+}
+
+function loadVisualFeedbackHistory() {
+    fetch('/api/occupancy/feedback/list')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var container = document.getElementById('visual-feedback-history');
+        if (!container) return;
+        var rows = (data.feedback || []).filter(function(item) {
+            return item.visual_rating && item.visual_rating > 0;
+        });
+        if (rows.length === 0) {
+            container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">No visual feedback yet.</div>';
+            return;
+        }
+        container.innerHTML = rows.slice(0, 20).map(function(item) {
+            var safeComment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return '<div class="feedback-history-item">' +
+                '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">' +
+                '<strong>Visual: ' + (item.visual_rating || '-') + '/5</strong>' +
+                '<span style="font-size:12px; color: var(--text-secondary);">' + item.time + '</span>' +
+                '</div>' +
+                '<div style="font-size: 13px; color: var(--text-secondary);">Occupancy: ' + item.occupancy_count + ' person(s)</div>' +
+                '<div style="margin-top:6px; font-size:13px;">' + (safeComment || '-') + '</div>' +
+                '</div>';
+        }).join('');
+    })
+    .catch(function() {});
+}
+
+function exportVisualFeedback() {
+    fetch('/api/occupancy/feedback/list')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var rows = (data.feedback || []).filter(function(item) { return item.visual_rating > 0; });
+        if (rows.length === 0) { showToast('No visual data to export', 'error'); return; }
+        var csv = 'Time,Visual Rating,Occupancy,Comment\n';
+        rows.forEach(function(r) {
+            csv += r.time + ',' + r.visual_rating + ',' + r.occupancy_count + ',"' + (r.comment || '').replace(/"/g, '""') + '"\n';
+        });
+        downloadCSV('visual_feedback.csv', csv);
+        showToast('Visual feedback exported', 'success');
+    })
+    .catch(function() { showToast('Failed to fetch data', 'error'); });
+}
+
+function updateVisualComfortIndicators() {
+    fetch('/api/data', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var lamp = data.lamp || {};
+        var cam = data.camera || {};
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        setText('vc-lux1', (parseFloat(lamp.lux1) || 0).toFixed(0));
+        setText('vc-lux2', (parseFloat(lamp.lux2) || 0).toFixed(0));
+        setText('vc-lux3', (parseFloat(lamp.lux3) || 0).toFixed(0));
+        setText('vc-lux-avg', (parseFloat(lamp.lux_avg) || 0).toFixed(0));
+        setText('vc-occ', cam.count || 0);
+    }).catch(function() {});
+}
+
+function changeVisualChartRange(hours) {
+    document.querySelectorAll('#visual-comfort .chart-option-btn').forEach(function(btn) {
+        btn.classList.remove('active');
+        if (btn.textContent.trim() === hours + 'h' || btn.textContent.trim() === (hours/24) + 'd') btn.classList.add('active');
+    });
+}
+
+// ==================== MONITORING PAGE ====================
+function updateMonitoringData() {
+    // Fetch indoor data from main API
+    fetch('/api/data', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var ac = data.ac || {};
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        setText('mon-indoor-temp', (parseFloat(ac.temperature) || 0).toFixed(1));
+        setText('mon-indoor-hum', (parseFloat(ac.humidity) || 0).toFixed(1));
+        // Airflow & CO2 placeholders — awaiting real sensor
+        setText('mon-airflow', '--');
+        setText('mon-co2', '--');
+    }).catch(function() {});
+
+    // Fetch outdoor weather
+    fetch('/api/outdoor-weather', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var out = data.outdoor || {};
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        if (out.fetch_ok) {
+            setText('mon-out-temp', out.temperature);
+            setText('mon-out-feels', out.apparent_temp);
+            setText('mon-out-hum', out.humidity);
+            setText('mon-out-wind', out.wind_speed);
+            setText('mon-out-cloud', out.cloud_cover);
+            setText('mon-out-uv', out.uv_index);
+            setText('mon-out-weather-desc', out.weather_desc);
+            setText('mon-out-weather-icon', out.weather_icon);
+            setText('mon-outdoor-updated', out.last_updated || '--:--');
+            // Solar & Lux placeholders
+            setText('mon-out-lux', '--');
+            setText('mon-out-solar', '--');
+        }
+    }).catch(function() {});
+
+    // Fetch monitoring-specific data (airflow, co2, outdoor lux, solar)
+    fetch('/api/monitoring/data', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        var setStatus = function(id, cls, text) {
+            var el = document.getElementById(id);
+            if (el) { el.textContent = text; el.className = 'card-status ' + cls; }
+        };
+        // Indoor sensors
+        if (data.indoor) {
+            if (data.indoor.airflow !== null && data.indoor.airflow !== undefined) {
+                setText('mon-airflow', parseFloat(data.indoor.airflow).toFixed(2));
+                setStatus('mon-airflow-status', 'good', 'Live');
+            }
+            if (data.indoor.co2 !== null && data.indoor.co2 !== undefined) {
+                var co2val = parseFloat(data.indoor.co2);
+                setText('mon-co2', co2val.toFixed(0));
+                if (co2val < 800) setStatus('mon-co2-status', 'good', 'Good');
+                else if (co2val < 1200) setStatus('mon-co2-status', 'moderate', 'Moderate');
+                else setStatus('mon-co2-status', 'poor', 'Poor');
+            }
+        }
+        // Outdoor sensors
+        if (data.outdoor) {
+            if (data.outdoor.lux !== null && data.outdoor.lux !== undefined) {
+                setText('mon-out-lux', parseFloat(data.outdoor.lux).toFixed(0));
+                setStatus('mon-out-lux-status', 'good', 'Live');
+            }
+            if (data.outdoor.solar_irradiance !== null && data.outdoor.solar_irradiance !== undefined) {
+                setText('mon-out-solar', parseFloat(data.outdoor.solar_irradiance).toFixed(1));
+                setStatus('mon-out-solar-status', 'good', 'Live');
+            }
+        }
+    }).catch(function() {});
+}
+
+// ==================== SCHEDULING ====================
+function toggleSchedDay(btn) {
+    btn.classList.toggle('active');
+}
+
+function _getSelectedDays(containerId) {
+    var days = [];
+    document.querySelectorAll('#' + containerId + ' .day-btn.active').forEach(function(btn) {
+        days.push(btn.getAttribute('data-day'));
+    });
+    return days;
+}
+
+// ---- AC Scheduling ----
+function addACSchedule() {
+    var days = _getSelectedDays('ac-sched-days');
+    if (days.length === 0) { showToast('Select at least one day', 'error'); return; }
+    var startTime = document.getElementById('ac-sched-start').value;
+    var endTime = document.getElementById('ac-sched-end').value;
+    if (!startTime || !endTime) { showToast('Set start and end time', 'error'); return; }
+    var payload = {
+        days: days,
+        start_time: startTime,
+        end_time: endTime,
+        action: document.getElementById('ac-sched-action').value,
+        temperature: parseInt(document.getElementById('ac-sched-temp').value),
+        fan_speed: parseInt(document.getElementById('ac-sched-fan').value),
+        mode: document.getElementById('ac-sched-mode').value,
+        enabled: true
+    };
+    fetch('/api/schedule/ac', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('AC schedule added', 'success');
+            // Clear day selection
+            document.querySelectorAll('#ac-sched-days .day-btn').forEach(function(b) { b.classList.remove('active'); });
+            loadACSchedules();
+        } else {
+            showToast(result.message || 'Failed', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + e.message, 'error'); });
+}
+
+function loadACSchedules() {
+    fetch('/api/schedule/ac')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var tbody = document.getElementById('ac-schedule-tbody');
+        if (!tbody) return;
+        var schedules = data.schedules || [];
+        if (schedules.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="schedule-empty"><i class="fas fa-calendar-alt" style="font-size:24px;margin-bottom:8px;display:block;opacity:0.5;"></i>No schedules configured</td></tr>';
+            return;
+        }
+        tbody.innerHTML = schedules.map(function(s) {
+            var dayTags = (s.days || []).map(function(d) { return '<span class="day-tag">' + d + '</span>'; }).join('');
+            return '<tr>' +
+                '<td><div class="day-tags">' + dayTags + '</div></td>' +
+                '<td>' + s.start_time + ' — ' + s.end_time + '</td>' +
+                '<td><strong>' + s.action + '</strong></td>' +
+                '<td>' + (s.temperature || '-') + '°C</td>' +
+                '<td>' + (s.fan_speed || '-') + '</td>' +
+                '<td>' + (s.mode || '-') + '</td>' +
+                '<td><label class="schedule-toggle"><input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleACSchedule(\'' + s.id + '\', this.checked)"><span class="toggle-slider"></span></label></td>' +
+                '<td><button class="btn btn-sm btn-danger" onclick="deleteACSchedule(\'' + s.id + '\')" style="padding:4px 10px;font-size:11px;"><i class="fas fa-trash"></i></button></td>' +
+                '</tr>';
+        }).join('');
+    })
+    .catch(function() {});
+}
+
+function deleteACSchedule(id) {
+    fetch('/api/schedule/ac/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Schedule deleted', 'success');
+            loadACSchedules();
+        } else {
+            showToast(result.message || 'Failed', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + e.message, 'error'); });
+}
+
+function toggleACSchedule(id, enabled) {
+    fetch('/api/schedule/ac/' + id + '/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Schedule ' + (enabled ? 'enabled' : 'disabled'), 'success');
+        }
+    })
+    .catch(function() {});
+}
+
+// ---- Lamp Scheduling ----
+function addLampSchedule() {
+    var days = _getSelectedDays('lamp-sched-days');
+    if (days.length === 0) { showToast('Select at least one day', 'error'); return; }
+    var startTime = document.getElementById('lamp-sched-start').value;
+    var endTime = document.getElementById('lamp-sched-end').value;
+    if (!startTime || !endTime) { showToast('Set start and end time', 'error'); return; }
+    var payload = {
+        days: days,
+        start_time: startTime,
+        end_time: endTime,
+        action: document.getElementById('lamp-sched-action').value,
+        brightness1: parseInt(document.getElementById('lamp-sched-bright1').value),
+        brightness2: parseInt(document.getElementById('lamp-sched-bright2').value),
+        enabled: true
+    };
+    fetch('/api/schedule/lamp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Lamp schedule added', 'success');
+            document.querySelectorAll('#lamp-sched-days .day-btn').forEach(function(b) { b.classList.remove('active'); });
+            loadLampSchedules();
+        } else {
+            showToast(result.message || 'Failed', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + e.message, 'error'); });
+}
+
+function loadLampSchedules() {
+    fetch('/api/schedule/lamp')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var tbody = document.getElementById('lamp-schedule-tbody');
+        if (!tbody) return;
+        var schedules = data.schedules || [];
+        if (schedules.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="schedule-empty"><i class="fas fa-calendar-alt" style="font-size:24px;margin-bottom:8px;display:block;opacity:0.5;"></i>No schedules configured</td></tr>';
+            return;
+        }
+        tbody.innerHTML = schedules.map(function(s) {
+            var dayTags = (s.days || []).map(function(d) { return '<span class="day-tag">' + d + '</span>'; }).join('');
+            return '<tr>' +
+                '<td><div class="day-tags">' + dayTags + '</div></td>' +
+                '<td>' + s.start_time + ' — ' + s.end_time + '</td>' +
+                '<td><strong>' + s.action + '</strong></td>' +
+                '<td>' + (s.brightness1 !== undefined ? s.brightness1 + '%' : '-') + '</td>' +
+                '<td>' + (s.brightness2 !== undefined ? s.brightness2 + '%' : '-') + '</td>' +
+                '<td><label class="schedule-toggle"><input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleLampSchedule(\'' + s.id + '\', this.checked)"><span class="toggle-slider"></span></label></td>' +
+                '<td><button class="btn btn-sm btn-danger" onclick="deleteLampSchedule(\'' + s.id + '\')" style="padding:4px 10px;font-size:11px;"><i class="fas fa-trash"></i></button></td>' +
+                '</tr>';
+        }).join('');
+    })
+    .catch(function() {});
+}
+
+function deleteLampSchedule(id) {
+    fetch('/api/schedule/lamp/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Schedule deleted', 'success');
+            loadLampSchedules();
+        } else {
+            showToast(result.message || 'Failed', 'error');
+        }
+    })
+    .catch(function(e) { showToast('Error: ' + e.message, 'error'); });
+}
+
+function toggleLampSchedule(id, enabled) {
+    fetch('/api/schedule/lamp/' + id + '/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.status === 'success') {
+            showToast('Schedule ' + (enabled ? 'enabled' : 'disabled'), 'success');
+        }
+    })
+    .catch(function() {});
+}
 
