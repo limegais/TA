@@ -6130,6 +6130,267 @@ def sbms_api_control(device_id):
         sbms_config['token'] = None
     return jsonify({'status': 'error', 'message': f"{msg} (HTTP {code} from SBMS)"}), code or 500
 
+# ==================== SCHEDULING (Rule-Based) ====================
+import uuid as _uuid_mod
+
+# In-memory schedule store (persisted to InfluxDB)
+_ac_schedules = []    # list of dicts
+_lamp_schedules = []  # list of dicts
+_schedules_loaded = False
+
+def _load_schedules_from_influx():
+    """Load schedules from InfluxDB on startup."""
+    global _ac_schedules, _lamp_schedules, _schedules_loaded
+    if _schedules_loaded:
+        return
+    try:
+        _, _, query_api = _get_influx_client()
+        # AC schedules
+        q = f'from(bucket:"{INFLUX_BUCKET}") |> range(start: -365d) |> filter(fn: (r) => r._measurement == "ac_schedule") |> last()'
+        tables = query_api.query(q, org=INFLUX_ORG)
+        ac_map = {}
+        for table in tables:
+            for record in table.records:
+                sid = record.values.get('schedule_id', '')
+                if sid not in ac_map:
+                    ac_map[sid] = {}
+                ac_map[sid][record.get_field()] = record.get_value()
+                ac_map[sid]['id'] = sid
+        for sid, s in ac_map.items():
+            if 'days' in s:
+                s['days'] = json.loads(s['days']) if isinstance(s['days'], str) else s['days']
+            s['enabled'] = bool(s.get('enabled', True))
+            s.setdefault('action', 'ON')
+            s.setdefault('temperature', 24)
+            s.setdefault('fan_speed', 1)
+            s.setdefault('mode', 'COOL')
+            s.setdefault('start_time', '08:00')
+            s.setdefault('end_time', '17:00')
+            _ac_schedules.append(s)
+
+        # Lamp schedules
+        q2 = f'from(bucket:"{INFLUX_BUCKET}") |> range(start: -365d) |> filter(fn: (r) => r._measurement == "lamp_schedule") |> last()'
+        tables2 = query_api.query(q2, org=INFLUX_ORG)
+        lamp_map = {}
+        for table in tables2:
+            for record in table.records:
+                sid = record.values.get('schedule_id', '')
+                if sid not in lamp_map:
+                    lamp_map[sid] = {}
+                lamp_map[sid][record.get_field()] = record.get_value()
+                lamp_map[sid]['id'] = sid
+        for sid, s in lamp_map.items():
+            if 'days' in s:
+                s['days'] = json.loads(s['days']) if isinstance(s['days'], str) else s['days']
+            s['enabled'] = bool(s.get('enabled', True))
+            s.setdefault('action', 'ON')
+            s.setdefault('brightness1', 80)
+            s.setdefault('brightness2', 80)
+            s.setdefault('start_time', '07:00')
+            s.setdefault('end_time', '18:00')
+            _lamp_schedules.append(s)
+
+        _schedules_loaded = True
+        print(f"[SCHED] Loaded {len(_ac_schedules)} AC + {len(_lamp_schedules)} Lamp schedules from InfluxDB")
+    except Exception as e:
+        _schedules_loaded = True  # Don't retry on error
+        print(f"[SCHED] Could not load schedules from InfluxDB: {e}")
+
+def _save_schedule_to_influx(measurement, schedule):
+    """Write a schedule to InfluxDB for persistence."""
+    try:
+        fields = {}
+        for k, v in schedule.items():
+            if k == 'id':
+                continue
+            if isinstance(v, list):
+                fields[k] = json.dumps(v)
+            elif isinstance(v, bool):
+                fields[k] = v
+            elif isinstance(v, (int, float)):
+                fields[k] = float(v)
+            else:
+                fields[k] = str(v)
+        write_to_influxdb(measurement, fields, tags={'schedule_id': schedule['id']})
+    except Exception as e:
+        print(f"[SCHED] Failed to save schedule: {e}")
+
+def _delete_schedule_from_influx(measurement, schedule_id):
+    """Delete a schedule from InfluxDB by writing a 'deleted' marker."""
+    try:
+        write_to_influxdb(measurement, {'deleted': True, 'days': '[]', 'action': 'DELETED'},
+                          tags={'schedule_id': schedule_id})
+    except Exception as e:
+        print(f"[SCHED] Failed to delete schedule from InfluxDB: {e}")
+
+# --- AC Schedule API ---
+@app.route('/api/schedule/ac', methods=['GET'])
+def get_ac_schedules():
+    _load_schedules_from_influx()
+    return jsonify({'status': 'success', 'schedules': _ac_schedules})
+
+@app.route('/api/schedule/ac', methods=['POST'])
+def add_ac_schedule():
+    _load_schedules_from_influx()
+    data = request.json or {}
+    schedule = {
+        'id': str(_uuid_mod.uuid4())[:8],
+        'days': data.get('days', []),
+        'start_time': data.get('start_time', '08:00'),
+        'end_time': data.get('end_time', '17:00'),
+        'action': data.get('action', 'ON'),
+        'temperature': int(data.get('temperature', 24)),
+        'fan_speed': int(data.get('fan_speed', 1)),
+        'mode': data.get('mode', 'COOL'),
+        'enabled': bool(data.get('enabled', True)),
+    }
+    _ac_schedules.append(schedule)
+    _save_schedule_to_influx('ac_schedule', schedule)
+    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                         'msg': f"AC Schedule added: {schedule['action']} {schedule['start_time']}-{schedule['end_time']}", 'level': 'info'})
+    return jsonify({'status': 'success', 'schedule': schedule})
+
+@app.route('/api/schedule/ac/<schedule_id>', methods=['DELETE'])
+def delete_ac_schedule(schedule_id):
+    global _ac_schedules
+    _ac_schedules = [s for s in _ac_schedules if s['id'] != schedule_id]
+    _delete_schedule_from_influx('ac_schedule', schedule_id)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/schedule/ac/<schedule_id>/toggle', methods=['POST'])
+def toggle_ac_schedule(schedule_id):
+    data = request.json or {}
+    for s in _ac_schedules:
+        if s['id'] == schedule_id:
+            s['enabled'] = bool(data.get('enabled', not s['enabled']))
+            _save_schedule_to_influx('ac_schedule', s)
+            return jsonify({'status': 'success', 'enabled': s['enabled']})
+    return jsonify({'status': 'error', 'message': 'Not found'}), 404
+
+# --- Lamp Schedule API ---
+@app.route('/api/schedule/lamp', methods=['GET'])
+def get_lamp_schedules():
+    _load_schedules_from_influx()
+    return jsonify({'status': 'success', 'schedules': _lamp_schedules})
+
+@app.route('/api/schedule/lamp', methods=['POST'])
+def add_lamp_schedule():
+    _load_schedules_from_influx()
+    data = request.json or {}
+    schedule = {
+        'id': str(_uuid_mod.uuid4())[:8],
+        'days': data.get('days', []),
+        'start_time': data.get('start_time', '07:00'),
+        'end_time': data.get('end_time', '18:00'),
+        'action': data.get('action', 'ON'),
+        'brightness1': int(data.get('brightness1', 80)),
+        'brightness2': int(data.get('brightness2', 80)),
+        'enabled': bool(data.get('enabled', True)),
+    }
+    _lamp_schedules.append(schedule)
+    _save_schedule_to_influx('lamp_schedule', schedule)
+    log_messages.append({'time': datetime.now().strftime('%H:%M:%S'),
+                         'msg': f"Lamp Schedule added: {schedule['action']} {schedule['start_time']}-{schedule['end_time']}", 'level': 'info'})
+    return jsonify({'status': 'success', 'schedule': schedule})
+
+@app.route('/api/schedule/lamp/<schedule_id>', methods=['DELETE'])
+def delete_lamp_schedule(schedule_id):
+    global _lamp_schedules
+    _lamp_schedules = [s for s in _lamp_schedules if s['id'] != schedule_id]
+    _delete_schedule_from_influx('lamp_schedule', schedule_id)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/schedule/lamp/<schedule_id>/toggle', methods=['POST'])
+def toggle_lamp_schedule(schedule_id):
+    data = request.json or {}
+    for s in _lamp_schedules:
+        if s['id'] == schedule_id:
+            s['enabled'] = bool(data.get('enabled', not s['enabled']))
+            _save_schedule_to_influx('lamp_schedule', s)
+            return jsonify({'status': 'success', 'enabled': s['enabled']})
+    return jsonify({'status': 'error', 'message': 'Not found'}), 404
+
+# --- Schedule Checker Background Thread ---
+_DAY_MAP = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+
+def _check_schedules():
+    """Check and execute schedules every 60 seconds."""
+    while True:
+        try:
+            now = datetime.now()
+            current_day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][now.weekday()]
+            current_time = now.strftime('%H:%M')
+
+            # Check AC schedules
+            for s in _ac_schedules:
+                if not s.get('enabled', False):
+                    continue
+                if current_day_name not in s.get('days', []):
+                    continue
+                if s.get('start_time') == current_time:
+                    action = s.get('action', 'ON')
+                    try:
+                        if action == 'ON':
+                            mqtt_client.publish('smartroom/ac/command', json.dumps({
+                                'command': 'SET_ALL',
+                                'temp': s.get('temperature', 24),
+                                'fan': s.get('fan_speed', 1),
+                                'mode': s.get('mode', 'COOL'),
+                                'power': True
+                            }))
+                        else:
+                            mqtt_client.publish('smartroom/ac/command', json.dumps({'command': 'POWER_OFF'}))
+                        log_messages.append({'time': now.strftime('%H:%M:%S'),
+                                             'msg': f'[SCHED] AC {action} executed (scheduled)', 'level': 'info'})
+                        print(f"[SCHED] AC {action} at {current_time}")
+                    except Exception as e:
+                        print(f"[SCHED] AC command error: {e}")
+
+            # Check Lamp schedules
+            for s in _lamp_schedules:
+                if not s.get('enabled', False):
+                    continue
+                if current_day_name not in s.get('days', []):
+                    continue
+                if s.get('start_time') == current_time:
+                    action = s.get('action', 'ON')
+                    try:
+                        b1 = s.get('brightness1', 80) if action == 'ON' else 0
+                        b2 = s.get('brightness2', 80) if action == 'ON' else 0
+                        mqtt_client.publish('smartroom/lamp/set', json.dumps({
+                            'brightness1': b1,
+                            'brightness2': b2
+                        }))
+                        log_messages.append({'time': now.strftime('%H:%M:%S'),
+                                             'msg': f'[SCHED] Lamp {action} B1={b1}% B2={b2}% executed', 'level': 'info'})
+                        print(f"[SCHED] Lamp {action} at {current_time}")
+                    except Exception as e:
+                        print(f"[SCHED] Lamp command error: {e}")
+
+        except Exception as e:
+            print(f"[SCHED] Checker error: {e}")
+        time.sleep(60)
+
+# ==================== MONITORING DATA API ====================
+# Placeholder data store for sensors not yet connected
+_monitoring_data = {
+    'indoor': {
+        'airflow': None,    # Air Flow Velocity (m/s) — awaiting sensor
+        'co2': None,        # CO2 (ppm) — awaiting sensor
+    },
+    'outdoor': {
+        'lux': None,              # Outdoor Lux — awaiting sensor
+        'solar_irradiance': None, # Solar Irradiance (W/m²) — awaiting sensor
+    }
+}
+
+@app.route('/api/monitoring/data')
+def get_monitoring_data():
+    """Return monitoring sensor data (indoor airflow/CO2, outdoor lux/solar)."""
+    resp = jsonify(_monitoring_data)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
 @app.route('/api/ac/mode', methods=['POST'])
 def set_ac_mode():
     try:
@@ -6660,6 +6921,11 @@ if __name__ == '__main__':
     weather_thread = threading.Thread(target=weather_poll_loop, daemon=True)
     weather_thread.start()
     print(f"  [WEATHER] Outdoor weather polling started (UNS Surakarta, update every {WEATHER_FETCH_INTERVAL}s)")
+
+    # Start schedule checker thread (Rule-Based Scheduling)
+    sched_thread = threading.Thread(target=_check_schedules, daemon=True)
+    sched_thread.start()
+    print("  [SCHED] Schedule checker thread started (checking every 60s)")
 
     print("  [URL] Dashboard: http://172.20.0.65:5000")
 
