@@ -77,5 +77,76 @@
                         </button>
                     </div>
                 </div>
+
+            <!-- ========== RULE BASE: SCHEDULING ========== -->
+            <div class="schedule-section">
+                <div class="schedule-section-title">
+                    <i class="fas fa-clock"></i> Rule Base: Lamp Scheduling
+                </div>
+
+                <!-- Add Schedule Form -->
+                <div class="schedule-form" id="lamp-schedule-form">
+                    <div class="form-group full-width">
+                        <label>Days</label>
+                        <div class="day-selector" id="lamp-sched-days">
+                            <button type="button" class="day-btn" data-day="Mon" onclick="toggleSchedDay(this)">Mo</button>
+                            <button type="button" class="day-btn" data-day="Tue" onclick="toggleSchedDay(this)">Tu</button>
+                            <button type="button" class="day-btn" data-day="Wed" onclick="toggleSchedDay(this)">We</button>
+                            <button type="button" class="day-btn" data-day="Thu" onclick="toggleSchedDay(this)">Th</button>
+                            <button type="button" class="day-btn" data-day="Fri" onclick="toggleSchedDay(this)">Fr</button>
+                            <button type="button" class="day-btn" data-day="Sat" onclick="toggleSchedDay(this)">Sa</button>
+                            <button type="button" class="day-btn" data-day="Sun" onclick="toggleSchedDay(this)">Su</button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Start Time</label>
+                        <input type="time" id="lamp-sched-start" value="07:00">
+                    </div>
+                    <div class="form-group">
+                        <label>End Time</label>
+                        <input type="time" id="lamp-sched-end" value="18:00">
+                    </div>
+                    <div class="form-group">
+                        <label>Action</label>
+                        <select id="lamp-sched-action">
+                            <option value="ON">Lamp ON</option>
+                            <option value="OFF">Lamp OFF</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Brightness 1 (%)</label>
+                        <input type="number" id="lamp-sched-bright1" min="0" max="100" value="80">
+                    </div>
+                    <div class="form-group">
+                        <label>Brightness 2 (%)</label>
+                        <input type="number" id="lamp-sched-bright2" min="0" max="100" value="80">
+                    </div>
+                    <div class="form-group full-width" style="flex-direction: row; align-items: flex-end;">
+                        <button class="btn btn-primary" onclick="addLampSchedule()" style="width: 100%; background: #0ea5e9;">
+                            <i class="fas fa-plus"></i> Add Schedule
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Schedule Table -->
+                <div style="overflow-x: auto;">
+                    <table class="schedule-table" id="lamp-schedule-table">
+                        <thead>
+                            <tr>
+                                <th>Days</th>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Brightness 1</th>
+                                <th>Brightness 2</th>
+                                <th>Active</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="lamp-schedule-tbody">
+                            <tr><td colspan="7" class="schedule-empty"><i class="fas fa-calendar-alt" style="font-size: 24px; margin-bottom: 8px; display: block; opacity: 0.5;"></i>No schedules configured</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
+    </div>
