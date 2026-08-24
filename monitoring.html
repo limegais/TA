@@ -1,0 +1,385 @@
+<div id="monitoring" class="page">
+    <div class="header">
+        <h1>Environmental Monitoring</h1>
+        <p>Real-time indoor &amp; outdoor environmental conditions — Sensor data from Smart Room IoT</p>
+    </div>
+
+    <!-- ========== INDOOR MONITORING ========== -->
+    <div class="monitoring-section-title">
+        <i class="fas fa-building"></i> Indoor Monitoring
+    </div>
+    <div class="monitoring-grid">
+        <!-- Air Flow Velocity -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(59, 130, 246, 0.12); color: #3b82f6;">
+                <i class="fas fa-wind"></i>
+            </div>
+            <div class="card-label">Air Flow Velocity</div>
+            <div class="card-value" style="color: #3b82f6;">
+                <span id="mon-airflow">--</span><span class="card-unit"> m/s</span>
+            </div>
+            <div class="card-status offline" id="mon-airflow-status">Awaiting Sensor</div>
+            <div class="monitor-card-chart">
+                <canvas id="monAirflowChart" height="60"></canvas>
+            </div>
+        </div>
+
+        <!-- CO2 — terhubung ke ESP Outdoor via MQTT -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(14, 165, 233, 0.12); color: #0ea5e9;">
+                <i class="fas fa-smog"></i>
+            </div>
+            <div class="card-label">CO₂ Level</div>
+            <div class="card-value" style="color: #0ea5e9;">
+                <span id="mon-co2">--</span><span class="card-unit"> ppm</span>
+            </div>
+            <div class="card-status offline" id="mon-co2-status">Awaiting Sensor</div>
+            <div class="monitor-card-chart">
+                <canvas id="monCO2Chart" height="60"></canvas>
+            </div>
+        </div>
+
+        <!-- Indoor Temp (from existing AC sensor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(37, 99, 235, 0.12); color: #2563eb;">
+                <i class="fas fa-thermometer-half"></i>
+            </div>
+            <div class="card-label">Indoor Temperature</div>
+            <div class="card-value" style="color: #2563eb;">
+                <span id="mon-indoor-temp">--</span><span class="card-unit"> °C</span>
+            </div>
+            <div class="card-status good" id="mon-indoor-temp-status">Live</div>
+        </div>
+
+        <!-- Indoor Humidity (from existing AC sensor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(30, 64, 175, 0.12); color: #1e40af;">
+                <i class="fas fa-tint"></i>
+            </div>
+            <div class="card-label">Indoor Humidity</div>
+            <div class="card-value" style="color: #1e40af;">
+                <span id="mon-indoor-hum">--</span><span class="card-unit"> %</span>
+            </div>
+            <div class="card-status good" id="mon-indoor-hum-status">Live</div>
+        </div>
+    </div>
+
+    <hr class="monitor-divider">
+
+    <!-- ========== OUTDOOR MONITORING (ESP32 Outdoor Sensor Node) ========== -->
+    <div class="monitoring-section-title">
+        <i class="fas fa-broadcast-tower"></i> Outdoor ESP32 Sensor Node
+        <span style="margin-left: auto; font-size: 12px; font-weight: 500; color: var(--text-secondary);">
+            Status: <span id="mon-outdoor-esp-status"
+                style="font-weight: 700; color: var(--text-secondary);">Offline</span>
+            &bull; Uptime: <span id="mon-outdoor-uptime">--</span>s
+            &bull; RSSI: <span id="mon-outdoor-rssi">--</span> dBm
+        </span>
+    </div>
+    <div class="monitoring-grid">
+        <!-- Outdoor Temperature (dari ESP Outdoor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(239, 68, 68, 0.12); color: #ef4444;">
+                <i class="fas fa-temperature-high"></i>
+            </div>
+            <div class="card-label">Outdoor Temperature</div>
+            <div class="card-value" style="color: #ef4444;">
+                <span id="mon-outdoor-temp">--</span><span class="card-unit"> °C</span>
+            </div>
+            <div class="card-status offline" id="mon-outdoor-temp-status">Awaiting Sensor</div>
+        </div>
+
+        <!-- Outdoor Humidity (dari ESP Outdoor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(6, 182, 212, 0.12); color: #06b6d4;">
+                <i class="fas fa-tint"></i>
+            </div>
+            <div class="card-label">Outdoor Humidity (RH)</div>
+            <div class="card-value" style="color: #06b6d4;">
+                <span id="mon-outdoor-hum">--</span><span class="card-unit"> %</span>
+            </div>
+            <div class="card-status offline" id="mon-outdoor-hum-status">Awaiting Sensor</div>
+        </div>
+
+        <!-- CO2 Outdoor (dari ESP Outdoor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(34, 197, 94, 0.12); color: #22c55e;">
+                <i class="fas fa-cloud"></i>
+            </div>
+            <div class="card-label">Outdoor CO₂</div>
+            <div class="card-value" style="color: #22c55e;">
+                <span id="mon-outdoor-co2">--</span><span class="card-unit"> ppm</span>
+            </div>
+            <div class="card-status offline" id="mon-outdoor-co2-status">Awaiting Sensor</div>
+            <!-- CO2 Quality Bar -->
+            <div style="margin-top: 8px;">
+                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary); margin-bottom:3px;">
+                    <span>Udara Baik</span><span>Buruk</span>
+                </div>
+                <div style="height:6px; border-radius:4px; background: linear-gradient(to right, #22c55e, #f59e0b, #ef4444); overflow:hidden; position:relative;">
+                    <div id="mon-co2-bar-indicator"
+                        style="position:absolute; top:-2px; width:10px; height:10px; border-radius:50%; background:#fff; border:2px solid #666; transition: left 0.5s ease; left: 5%;"></div>
+                </div>
+                <div style="font-size:11px; color:var(--text-secondary); margin-top:3px; text-align:center;">
+                    <span id="mon-outdoor-co2-label">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Outdoor Lux (dari ESP Outdoor) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(245, 158, 11, 0.12); color: #f59e0b;">
+                <i class="fas fa-sun"></i>
+            </div>
+            <div class="card-label">Outdoor Illuminance (Lux)</div>
+            <div class="card-value" style="color: #f59e0b;">
+                <span id="mon-out-lux">--</span><span class="card-unit"> lx</span>
+            </div>
+            <div class="card-status offline" id="mon-out-lux-status">Awaiting Sensor</div>
+        </div>
+    </div>
+
+    <hr class="monitor-divider">
+
+    <!-- ========== OUTDOOR WEATHER (Open-Meteo API) ========== -->
+    <div class="monitoring-section-title">
+        <i class="fas fa-cloud-sun"></i> Outdoor Weather (Open-Meteo API)
+        <span style="margin-left: auto; font-size: 12px; font-weight: 500; color: var(--text-secondary);">
+            <i class="fas fa-map-marker-alt"></i> UNS Surakarta &mdash; Updated: <span id="mon-outdoor-updated">--:--</span>
+        </span>
+    </div>
+    <div class="monitoring-grid">
+        <!-- Outdoor Temperature (API) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(239, 68, 68, 0.12); color: #ef4444;">
+                <i class="fas fa-temperature-high"></i>
+            </div>
+            <div class="card-label">Outdoor Temperature</div>
+            <div class="card-value" style="color: #ef4444;">
+                <span id="mon-out-temp">--</span><span class="card-unit"> °C</span>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                Feels like: <span id="mon-out-feels">--</span>°C
+            </div>
+        </div>
+
+        <!-- Outdoor Humidity (API) -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(6, 182, 212, 0.12); color: #06b6d4;">
+                <i class="fas fa-tint"></i>
+            </div>
+            <div class="card-label">Outdoor Humidity (RH)</div>
+            <div class="card-value" style="color: #06b6d4;">
+                <span id="mon-out-hum">--</span><span class="card-unit"> %</span>
+            </div>
+        </div>
+
+        <!-- Solar Irradiance -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(234, 88, 12, 0.12); color: #ea580c;">
+                <i class="fas fa-solar-panel"></i>
+            </div>
+            <div class="card-label">Solar Irradiance</div>
+            <div class="card-value" style="color: #ea580c;">
+                <span id="mon-out-solar">--</span><span class="card-unit"> W/m²</span>
+            </div>
+            <div class="card-status offline" id="mon-out-solar-status">Awaiting Sensor</div>
+        </div>
+
+        <!-- Weather Condition -->
+        <div class="monitor-card">
+            <div class="card-icon" style="background: rgba(99, 102, 241, 0.12); color: #6366f1;">
+                <i class="fas fa-cloud"></i>
+            </div>
+            <div class="card-label">Weather Condition</div>
+            <div class="card-value" style="color: #6366f1; font-size: 20px;">
+                <span id="mon-out-weather-icon">☀️</span>
+                <span id="mon-out-weather-desc">--</span>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+                Wind: <span id="mon-out-wind">--</span> km/h &bull;
+                Cloud: <span id="mon-out-cloud">--</span>% &bull;
+                UV: <span id="mon-out-uv">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Info Banner -->
+    <div style="margin-top: 10px; padding: 14px 18px; border-radius: 12px; background: rgba(37, 99, 235, 0.06); border: 1px solid var(--border); font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 10px;">
+        <i class="fas fa-info-circle" style="color: var(--primary); font-size: 16px;"></i>
+        <span>
+            <strong>Note:</strong> Outdoor Temp, Humi, CO₂, dan Lux menggunakan
+            <strong>ESP32 Outdoor Sensor Node</strong> via MQTT (<code>smartroom/outdoor/sensors</code>).
+            Data cuaca (Weather API) diambil dari Open-Meteo API (UNS Surakarta).
+            Air Flow Velocity dan Solar Irradiance menunggu sensor fisik.
+        </span>
+    </div>
+</div>
+
+<script>
+// =====================================================
+// MONITORING PAGE — JavaScript
+// Menghubungkan data MQTT (via WebSocket) ke elemen UI
+// =====================================================
+
+(function () {
+    'use strict';
+
+    // -------------------------------------------------
+    // Helper: format angka dengan fallback "--"
+    // -------------------------------------------------
+    function fmt(val, decimals) {
+        if (val === null || val === undefined || val === 0 && decimals === undefined) return '--';
+        var n = parseFloat(val);
+        if (isNaN(n)) return '--';
+        return decimals !== undefined ? n.toFixed(decimals) : n.toString();
+    }
+
+    // -------------------------------------------------
+    // Helper: set status badge online / offline / good
+    // -------------------------------------------------
+    function setStatus(id, online, label) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.className = 'card-status ' + (online ? 'good' : 'offline');
+        el.textContent = label || (online ? 'Live' : 'Offline');
+    }
+
+    // -------------------------------------------------
+    // Update indoor dari data AC (sudah ada sebelumnya)
+    // -------------------------------------------------
+    function updateIndoorFromAC(data) {
+        var t = document.getElementById('mon-indoor-temp');
+        var h = document.getElementById('mon-indoor-hum');
+        if (t && data.temperature) t.textContent = fmt(data.temperature, 1);
+        if (h && data.humidity)    h.textContent = fmt(data.humidity, 1);
+        setStatus('mon-indoor-temp-status', true, 'Live');
+        setStatus('mon-indoor-hum-status',  true, 'Live');
+    }
+
+    // -------------------------------------------------
+    // CO2 Quality Label + Bar Indicator
+    // -------------------------------------------------
+    function updateCO2Quality(ppm) {
+        var labelEl = document.getElementById('mon-outdoor-co2-label');
+        var barEl   = document.getElementById('mon-co2-bar-indicator');
+        if (!labelEl || ppm <= 0) return;
+
+        var label, pct, color;
+        if (ppm < 600) {
+            label = '🟢 Udara Sangat Baik (<600 ppm)';
+            pct   = Math.max(2, (ppm / 600) * 20);
+            color = '#22c55e';
+        } else if (ppm < 1000) {
+            label = '🟡 Udara Baik (600–1000 ppm)';
+            pct   = 20 + ((ppm - 600) / 400) * 40;
+            color = '#f59e0b';
+        } else if (ppm < 1500) {
+            label = '🟠 Udara Cukup (1000–1500 ppm)';
+            pct   = 60 + ((ppm - 1000) / 500) * 25;
+            color = '#f97316';
+        } else {
+            label = '🔴 Udara Buruk (>1500 ppm)';
+            pct   = 90;
+            color = '#ef4444';
+        }
+
+        labelEl.textContent = label;
+        if (barEl) {
+            barEl.style.left   = Math.min(93, pct) + '%';
+            barEl.style.border = '2px solid ' + color;
+        }
+    }
+
+    // -------------------------------------------------
+    // Update OUTDOOR dari mqtt_data['outdoor']
+    // -------------------------------------------------
+    function updateOutdoorESP(data) {
+        var connected = data.connected === true;
+
+        // Status header
+        var statusEl = document.getElementById('mon-outdoor-esp-status');
+        if (statusEl) {
+            statusEl.textContent  = connected ? 'Online ✓' : 'Offline';
+            statusEl.style.color  = connected ? '#22c55e' : 'var(--text-secondary)';
+        }
+        var uptimeEl = document.getElementById('mon-outdoor-uptime');
+        var rssiEl   = document.getElementById('mon-outdoor-rssi');
+        if (uptimeEl) uptimeEl.textContent = data.uptime !== undefined ? data.uptime : '--';
+        if (rssiEl)   rssiEl.textContent   = data.rssi   !== undefined ? data.rssi   : '--';
+
+        // Temperature outdoor ESP
+        var tempEl = document.getElementById('mon-outdoor-temp');
+        if (tempEl) tempEl.textContent = data.temperature > 0 ? fmt(data.temperature, 1) : '--';
+        setStatus('mon-outdoor-temp-status', connected && data.temperature > 0, connected ? 'Live' : 'Offline');
+
+        // Humidity outdoor ESP
+        var humiEl = document.getElementById('mon-outdoor-hum');
+        if (humiEl) humiEl.textContent = data.humidity > 0 ? fmt(data.humidity, 1) : '--';
+        setStatus('mon-outdoor-hum-status', connected && data.humidity > 0, connected ? 'Live' : 'Offline');
+
+        // CO2 outdoor ESP (juga update card indoor CO2 yang sudah ada)
+        var co2OutEl = document.getElementById('mon-outdoor-co2');
+        var co2InEl  = document.getElementById('mon-co2');            // card indoor CO2 lama
+        if (co2OutEl) co2OutEl.textContent = data.co2 > 0 ? fmt(data.co2, 1) : '--';
+        if (co2InEl)  co2InEl.textContent  = data.co2 > 0 ? fmt(data.co2, 1) : '--';
+        setStatus('mon-outdoor-co2-status', connected && data.co2 > 0, connected ? 'Live' : 'Offline');
+        setStatus('mon-co2-status',         connected && data.co2 > 0, connected ? 'Live' : 'Offline');
+        if (data.co2 > 0) updateCO2Quality(data.co2);
+
+        // Lux outdoor ESP
+        var luxEl = document.getElementById('mon-out-lux');
+        if (luxEl) luxEl.textContent = data.lux > 0 ? fmt(data.lux, 1) : '--';
+        setStatus('mon-out-lux-status', connected && data.lux > 0, connected ? 'Live' : 'Offline');
+    }
+
+    // -------------------------------------------------
+    // Initial load: isi dari /api/data saat halaman dibuka
+    // -------------------------------------------------
+    function initialLoad() {
+        fetch('/api/data')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d.ac)      updateIndoorFromAC(d.ac);
+                if (d.outdoor) updateOutdoorESP(d.outdoor);
+            })
+            .catch(function(e) { console.warn('[monitoring] initial load failed:', e); });
+    }
+
+    // -------------------------------------------------
+    // WebSocket listener — update real-time via MQTT
+    // -------------------------------------------------
+    function setupSocketListeners() {
+        // Tunggu socket global yang diinisialisasi oleh dashboard.js (var socket = io())
+        var attempts = 0;
+        var timer = setInterval(function () {
+            attempts++;
+            if (typeof window.socket !== 'undefined' && window.socket) {
+                clearInterval(timer);
+                window.socket.on('mqtt_update', function (msg) {
+                    if (msg.type === 'ac')      updateIndoorFromAC(msg.data);
+                    if (msg.type === 'outdoor') updateOutdoorESP(msg.data);
+                });
+            }
+            if (attempts > 40) clearInterval(timer); // berhenti setelah 4 detik
+        }, 100);
+    }
+
+    // -------------------------------------------------
+    // Init
+    // -------------------------------------------------
+    document.addEventListener('DOMContentLoaded', function () {
+        initialLoad();
+        setupSocketListeners();
+    });
+
+    // Jika halaman sudah loaded (SPA navigation)
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        setTimeout(function () {
+            initialLoad();
+            setupSocketListeners();
+        }, 50);
+    }
+
+})();
+</script>
