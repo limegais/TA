@@ -6277,77 +6277,143 @@ function changeVisualChartRange(hours) {
 
 // ==================== MONITORING PAGE ====================
 function updateMonitoringData() {
-    // Fetch indoor data from main API
+    var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+    var setStatus = function(id, cls, text) {
+        var el = document.getElementById(id);
+        if (el) { el.textContent = text; el.className = 'card-status ' + cls; }
+    };
+
+    // ---------------------------------------------------------
+    // 1. Indoor + Outdoor ESP data dari /api/data (mqtt_data)
+    // ---------------------------------------------------------
     fetch('/api/data', { cache: 'no-store' })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        // Indoor AC sensor
         var ac = data.ac || {};
-        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
-        setText('mon-indoor-temp', (parseFloat(ac.temperature) || 0).toFixed(1));
-        setText('mon-indoor-hum', (parseFloat(ac.humidity) || 0).toFixed(1));
-        // Airflow & CO2 placeholders — awaiting real sensor
-        setText('mon-airflow', '--');
-        setText('mon-co2', '--');
+        if (ac.temperature) setText('mon-indoor-temp', parseFloat(ac.temperature).toFixed(1));
+        if (ac.humidity)    setText('mon-indoor-hum',  parseFloat(ac.humidity).toFixed(1));
+
+        // Outdoor ESP32 Sensor Node
+        var out = data.outdoor || {};
+        var connected = out.connected === true;
+
+        // Status header
+        var statusEl = document.getElementById('mon-outdoor-esp-status');
+        if (statusEl) {
+            statusEl.textContent = connected ? 'Online ✓' : 'Offline';
+            statusEl.style.color = connected ? '#22c55e' : 'var(--text-secondary)';
+        }
+        setText('mon-outdoor-uptime', out.uptime !== undefined ? out.uptime : '--');
+        setText('mon-outdoor-rssi',   out.rssi   !== undefined ? out.rssi   : '--');
+
+        // Outdoor Temperature (ESP)
+        if (out.temperature > 0) {
+            setText('mon-outdoor-temp', parseFloat(out.temperature).toFixed(1));
+            setStatus('mon-outdoor-temp-status', 'good', 'Live');
+        } else {
+            setStatus('mon-outdoor-temp-status', 'offline', connected ? 'No Data' : 'Offline');
+        }
+
+        // Outdoor Humidity (ESP)
+        if (out.humidity > 0) {
+            setText('mon-outdoor-hum', parseFloat(out.humidity).toFixed(1));
+            setStatus('mon-outdoor-hum-status', 'good', 'Live');
+        } else {
+            setStatus('mon-outdoor-hum-status', 'offline', connected ? 'No Data' : 'Offline');
+        }
+
+        // CO2 (ESP) — tampilkan di dua elemen: indoor card lama + outdoor card baru
+        if (out.co2 > 0) {
+            var co2val = parseFloat(out.co2);
+            setText('mon-co2',         co2val.toFixed(0));
+            setText('mon-outdoor-co2', co2val.toFixed(1));
+            var co2cls = co2val < 600 ? 'good' : (co2val < 1000 ? 'moderate' : 'poor');
+            var co2lbl = co2val < 600 ? 'Sangat Baik' : (co2val < 1000 ? 'Baik' : (co2val < 1500 ? 'Cukup' : 'Buruk'));
+            setStatus('mon-co2-status',         co2cls, co2lbl);
+            setStatus('mon-outdoor-co2-status', co2cls, 'Live');
+            // CO2 quality bar indicator
+            var pct = co2val < 600  ? Math.max(2,  (co2val / 600)  * 20) :
+                      co2val < 1000 ? 20 + ((co2val - 600) / 400) * 40 :
+                      co2val < 1500 ? 60 + ((co2val - 1000) / 500) * 25 : 90;
+            var barEl = document.getElementById('mon-co2-bar-indicator');
+            if (barEl) barEl.style.left = Math.min(93, pct) + '%';
+            var lblEl = document.getElementById('mon-outdoor-co2-label');
+            if (lblEl) {
+                var co2emoji = co2val < 600 ? '🟢' : (co2val < 1000 ? '🟡' : (co2val < 1500 ? '🟠' : '🔴'));
+                lblEl.textContent = co2emoji + ' ' + co2lbl + ' (' + co2val.toFixed(0) + ' ppm)';
+            }
+        } else {
+            setStatus('mon-co2-status',         'offline', connected ? 'No Data' : 'Offline');
+            setStatus('mon-outdoor-co2-status', 'offline', connected ? 'No Data' : 'Offline');
+        }
+
+        // Lux outdoor (ESP)
+        if (out.lux > 0) {
+            setText('mon-out-lux', parseFloat(out.lux).toFixed(0));
+            setStatus('mon-out-lux-status', 'good', 'Live');
+        } else {
+            setStatus('mon-out-lux-status', 'offline', connected ? 'No Data' : 'Offline');
+        }
     }).catch(function() {});
 
-    // Fetch outdoor weather
+    // ---------------------------------------------------------
+    // 2. Outdoor Weather API (Open-Meteo)
+    // ---------------------------------------------------------
     fetch('/api/outdoor-weather', { cache: 'no-store' })
     .then(function(r) { return r.json(); })
     .then(function(data) {
         var out = data.outdoor || {};
-        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
         if (out.fetch_ok) {
-            setText('mon-out-temp', out.temperature);
-            setText('mon-out-feels', out.apparent_temp);
-            setText('mon-out-hum', out.humidity);
-            setText('mon-out-wind', out.wind_speed);
-            setText('mon-out-cloud', out.cloud_cover);
-            setText('mon-out-uv', out.uv_index);
-            setText('mon-out-weather-desc', out.weather_desc);
-            setText('mon-out-weather-icon', out.weather_icon);
-            setText('mon-outdoor-updated', out.last_updated || '--:--');
-            // Solar & Lux placeholders
-            setText('mon-out-lux', '--');
-            setText('mon-out-solar', '--');
+            setText('mon-out-temp',         out.temperature);
+            setText('mon-out-feels',         out.apparent_temp);
+            setText('mon-out-hum',           out.humidity);
+            setText('mon-out-wind',          out.wind_speed);
+            setText('mon-out-cloud',         out.cloud_cover);
+            setText('mon-out-uv',            out.uv_index);
+            setText('mon-out-weather-desc',  out.weather_desc);
+            setText('mon-out-weather-icon',  out.weather_icon);
+            setText('mon-outdoor-updated',   out.last_updated || '--:--');
         }
     }).catch(function() {});
 
-    // Fetch monitoring-specific data (airflow, co2, outdoor lux, solar)
+    // ---------------------------------------------------------
+    // 3. Monitoring legacy endpoint (airflow, solar — future sensors)
+    // ---------------------------------------------------------
     fetch('/api/monitoring/data', { cache: 'no-store' })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
-        var setStatus = function(id, cls, text) {
-            var el = document.getElementById(id);
-            if (el) { el.textContent = text; el.className = 'card-status ' + cls; }
-        };
-        // Indoor sensors
         if (data.indoor) {
-            if (data.indoor.airflow !== null && data.indoor.airflow !== undefined) {
+            if (data.indoor.airflow != null) {
                 setText('mon-airflow', parseFloat(data.indoor.airflow).toFixed(2));
                 setStatus('mon-airflow-status', 'good', 'Live');
             }
-            if (data.indoor.co2 !== null && data.indoor.co2 !== undefined) {
-                var co2val = parseFloat(data.indoor.co2);
-                setText('mon-co2', co2val.toFixed(0));
-                if (co2val < 800) setStatus('mon-co2-status', 'good', 'Good');
-                else if (co2val < 1200) setStatus('mon-co2-status', 'moderate', 'Moderate');
-                else setStatus('mon-co2-status', 'poor', 'Poor');
-            }
         }
-        // Outdoor sensors
         if (data.outdoor) {
-            if (data.outdoor.lux !== null && data.outdoor.lux !== undefined) {
-                setText('mon-out-lux', parseFloat(data.outdoor.lux).toFixed(0));
-                setStatus('mon-out-lux-status', 'good', 'Live');
-            }
-            if (data.outdoor.solar_irradiance !== null && data.outdoor.solar_irradiance !== undefined) {
+            if (data.outdoor.solar_irradiance != null) {
                 setText('mon-out-solar', parseFloat(data.outdoor.solar_irradiance).toFixed(1));
                 setStatus('mon-out-solar-status', 'good', 'Live');
             }
         }
     }).catch(function() {});
 }
+
+// Real-time MQTT update untuk halaman Monitoring
+socket.on('mqtt_update', function(msg) {
+    // Hanya proses jika halaman monitoring sedang aktif
+    var monPage = document.getElementById('monitoring');
+    if (!monPage || !monPage.classList.contains('active')) return;
+    if (msg.type === 'outdoor') {
+        try { updateMonitoringData(); } catch(e) {}
+    }
+    if (msg.type === 'ac') {
+        var setText = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+        var ac = msg.data || {};
+        if (ac.temperature) setText('mon-indoor-temp', parseFloat(ac.temperature).toFixed(1));
+        if (ac.humidity)    setText('mon-indoor-hum',  parseFloat(ac.humidity).toFixed(1));
+    }
+});
+
 
 // ==================== SCHEDULING ====================
 function toggleSchedDay(btn) {
