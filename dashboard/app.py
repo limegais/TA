@@ -40,9 +40,10 @@ USERS = {
 
 # Device Status Tracking
 device_last_seen = {
-    'esp32_ac': {'last_seen': None, 'status': 'offline'},
-    'esp32_lamp': {'last_seen': None, 'status': 'offline'},
-    'camera': {'last_seen': None, 'status': 'offline'}
+    'esp32_ac':      {'last_seen': None, 'status': 'offline'},
+    'esp32_lamp':    {'last_seen': None, 'status': 'offline'},
+    'esp32_outdoor': {'last_seen': None, 'status': 'offline'},
+    'camera':        {'last_seen': None, 'status': 'offline'}
 }
 
 # Alert Rules
@@ -2512,6 +2513,7 @@ LAMP_ADAPTIVE_DEBOUNCE = 300    # 5 minutes -- sesuai interval PSO dokumen
 mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'set_rh': 50, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
+    'outdoor': {'co2': 0, 'temperature': 0, 'humidity': 0, 'lux': 0, 'rssi': 0, 'uptime': 0, 'connected': False},
     'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'algo_config': 'ga_pso', 'ac_algo': 'ga', 'lamp_algo': 'pso', 'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
@@ -2544,10 +2546,11 @@ lamp_runtime_history = deque(maxlen=5000)
 
 # InfluxDB write throttle -- save every 6 minutes so database does not fill up
 INFLUX_WRITE_INTERVAL = 360  # seconds (6 minutes)
-_last_sensor_influx_ts   = 0.0   # when last ac_sensor written to InfluxDB
-_last_lamp_influx_ts     = 0.0   # when last lamp_sensor written to InfluxDB
-_last_lamp_mqtt_ts       = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
-_last_ac_energy_influx_ts = 0.0  # when last AC energy written to InfluxDB
+_last_sensor_influx_ts    = 0.0   # when last ac_sensor written to InfluxDB
+_last_lamp_influx_ts      = 0.0   # when last lamp_sensor written to InfluxDB
+_last_lamp_mqtt_ts        = 0.0   # kapan terakhir pesan MQTT lamp/sensors diterima (termasuk lux=0)
+_last_ac_energy_influx_ts = 0.0   # when last AC energy written to InfluxDB
+_last_outdoor_influx_ts   = 0.0   # when last outdoor_sensor written to InfluxDB
 
 # ==================== INFLUXDB SINGLETON ====================
 # One persistent client + write_api shared across all threads.
@@ -2709,6 +2712,23 @@ def save_ac_control(ac_temp, fan_speed, ac_state):
         }, tags={'device': 'esp32_ac', 'type': 'control'})
     except Exception as e:
         print(f'[ERROR] save_ac_control: {e}')
+
+def save_outdoor_data(co2, temperature, humidity, lux):
+    """Write outdoor sensor data to InfluxDB (throttled to INFLUX_WRITE_INTERVAL)."""
+    global _last_outdoor_influx_ts
+    now = time.time()
+    if now - _last_outdoor_influx_ts < INFLUX_WRITE_INTERVAL:
+        return
+    _last_outdoor_influx_ts = now
+    try:
+        write_to_influxdb('outdoor_sensor', {
+            'co2':         float(co2),
+            'temperature': float(temperature),
+            'humidity':    float(humidity),
+            'lux':         float(lux),
+        }, tags={'device': 'esp32_outdoor', 'location': 'outdoor'})
+    except Exception as e:
+        print(f'[ERROR] save_outdoor_data: {e}')
 
 # ==================== YOLO INITIALIZATION ====================
 def load_yolo_model():
@@ -3344,7 +3364,40 @@ def on_message(client, userdata, msg):
             # Track device status
             device_last_seen['esp32_lamp']['last_seen'] = datetime.now()
             device_last_seen['esp32_lamp']['status'] = 'online'
-            
+
+        elif 'outdoor/sensors' in topic:
+            # ======================================================
+            # ESP32 OUTDOOR SENSOR NODE
+            # Topik: smartroom/outdoor/sensors
+            # Payload: {co2, temperature, humidity, lux, rssi, uptime}
+            # ======================================================
+            co2_val  = payload.get('co2',         None)
+            temp_val = payload.get('temperature', None)
+            humi_val = payload.get('humidity',    None)
+            lux_val  = payload.get('lux',         None)
+            mqtt_data['outdoor'].update({
+                'co2':         round(float(co2_val),  1) if co2_val  is not None else mqtt_data['outdoor']['co2'],
+                'temperature': round(float(temp_val), 2) if temp_val is not None else mqtt_data['outdoor']['temperature'],
+                'humidity':    round(float(humi_val), 2) if humi_val is not None else mqtt_data['outdoor']['humidity'],
+                'lux':         round(float(lux_val),  1) if lux_val  is not None else mqtt_data['outdoor']['lux'],
+                'rssi':        payload.get('rssi',   0),
+                'uptime':      payload.get('uptime', 0),
+                'connected':   True,
+            })
+            save_outdoor_data(
+                mqtt_data['outdoor']['co2'],
+                mqtt_data['outdoor']['temperature'],
+                mqtt_data['outdoor']['humidity'],
+                mqtt_data['outdoor']['lux'],
+            )
+            socketio.emit('mqtt_update', {'type': 'outdoor', 'data': mqtt_data['outdoor']})
+            device_last_seen['esp32_outdoor']['last_seen'] = datetime.now()
+            device_last_seen['esp32_outdoor']['status']    = 'online'
+            print(f"[OUTDOOR] co2={mqtt_data['outdoor']['co2']} ppm | "
+                  f"temp={mqtt_data['outdoor']['temperature']}°C | "
+                  f"humi={mqtt_data['outdoor']['humidity']}% | "
+                  f"lux={mqtt_data['outdoor']['lux']} lx")
+
         elif 'energy/data' in topic:
             mqtt_data['energy'].update({
                 'voltage': payload.get('voltage', 0),
