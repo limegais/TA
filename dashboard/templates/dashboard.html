@@ -27,8 +27,12 @@
         {% include "pages/ml_optimization.html" %}
         {% include "pages/logs.html" %}
         {% include "pages/occupancy_feedback.html" %}
+        {% include "pages/thermal_comfort.html" %}
+        {% include "pages/visual_comfort.html" %}
+        {% include "pages/monitoring.html" %}
         {% include "pages/control_outlet.html" %}
         {% include "pages/outlet_analytics.html" %}
+        {% include "pages/esp32_ota.html" %}
 
     </div><!-- /main-content -->
 
@@ -37,5 +41,5 @@
 {% endblock %}
 
 {% block scripts %}
-    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=1.0.4"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.3.0"></script>
 {% endblock %}
