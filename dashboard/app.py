@@ -2389,14 +2389,19 @@ def optimization_auto_loop():
       - If lux not at target: immediately retry PSO without waiting 5 minutes
     GA and PSO never run simultaneously."""
     time.sleep(10)
-    print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)")
+    print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)", flush=True)
     last_ga_time  = 0
     last_pso_time = 0
+    _heartbeat_count = 0
     while True:
         try:
             now     = time.time()
             run_ga  = (now - last_ga_time)  >= AUTO_OPT_INTERVAL_AC
             run_pso = (now - last_pso_time) >= AUTO_OPT_INTERVAL_LAMP
+            _heartbeat_count += 1
+            if _heartbeat_count % 4 == 0:  # print every ~60s (4 x 15s sleep)
+                lock_held = optimization_lock.locked()
+                print(f"[OPT-HB] tick={_heartbeat_count} run_count={optimization_run_count} lock={lock_held} run_ga={run_ga} run_pso={run_pso}", flush=True)
 
             if run_ga:
                 run_optimization_cycle('ga')
@@ -5210,6 +5215,20 @@ def ml_status():
         'algo_config':      mqtt_data['system'].get('algo_config', 'ga_pso'),
         'ac_algo':          mqtt_data['system'].get('ac_algo', 'ga'),
         'lamp_algo':        mqtt_data['system'].get('lamp_algo', 'pso'),
+    })
+
+@app.route('/api/debug/opt')
+def debug_opt_status():
+    """Public debug endpoint -- shows raw optimization state. No login required."""
+    import threading as _th
+    threads = [t.name for t in _th.enumerate()]
+    return jsonify({
+        'optimization_run_count': optimization_run_count,
+        'lock_locked': optimization_lock.locked(),
+        'mqtt_optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
+        'ga_fitness': last_opt_results['ga'].get('fitness', 0),
+        'pso_fitness': last_opt_results['pso'].get('fitness', 0),
+        'active_threads': threads,
     })
 
 @app.route('/api/ga/export-csv')
