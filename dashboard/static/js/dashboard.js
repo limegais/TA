@@ -5661,6 +5661,11 @@ socket.on('ml_status', function (data) {
         var modeLabel = '';
         if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
         var _psoFitPct = Math.max(0, 100.0 - ((data.pso_fitness || 0) / 122500.0) * 100.0);
+        // Update Total Cycles immediately from socket payload (no need to wait for API)
+        if (data.optimization_runs != null) {
+            var runsEl = document.getElementById('ml-opt-runs');
+            if (runsEl) runsEl.textContent = data.optimization_runs;
+        }
         // Toast with actual algo labels
         showToast(acAlgo + '→AC: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel +
                   ' | ' + lampAlgo + '→Lamp: ' + _psoFitPct.toFixed(1) + '%', 'success');
@@ -5854,6 +5859,16 @@ window.onload = function () {
     setInterval(function () { try { updateDashboard(); } catch (e) { } }, 1000);
     setInterval(function () { try { updateDeviceStatus(); } catch (e) { } }, 5000);
     setInterval(function () { try { updateLogs(); } catch (e) { } }, 5000);
+
+    // Periodic ML data refresh (every 30s) to keep Total Cycles and fitness current
+    setInterval(function () {
+        try {
+            var mlPage = document.getElementById('ml-optimization');
+            if (mlPage && mlPage.classList.contains('active')) {
+                refreshMLData();
+            }
+        } catch (e) { }
+    }, 30000);
 
     setInterval(() => {
         Object.keys(chartRanges).forEach(chartName => {
