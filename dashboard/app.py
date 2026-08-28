@@ -1763,6 +1763,7 @@ def save_opt_results_file():
         ga = last_opt_results.get('ga', {})
         pso = last_opt_results.get('pso', {})
         payload = {
+            'optimization_run_count': optimization_run_count,
             'ga': {
                 'fitness':         ga.get('fitness', 0),
                 'temp':            ga.get('temp', 0),
@@ -1820,6 +1821,12 @@ def load_opt_results_file():
             return False
         ga_data  = data.get('ga', {})
         pso_data = data.get('pso', {})
+        saved_run_count = data.get('optimization_run_count', 0)
+        if isinstance(saved_run_count, int) and saved_run_count > 0:
+            global optimization_run_count
+            optimization_run_count = saved_run_count
+            mqtt_data['system']['optimization_runs'] = optimization_run_count
+            print(f"  [RESTORE-FILE] optimization_run_count={optimization_run_count}")
         if ga_data and ga_data.get('fitness', 0) > 0:
             last_opt_results['ga'].update(ga_data)
             mqtt_data['system']['ga_fitness']  = _ga_fitness_pct(ga_data.get('fitness', 0))
@@ -5506,7 +5513,7 @@ def ml_params_api():
                     'ac_temp_min': 16, 'ac_temp_max': 30, 'fan_min': 1, 'fan_max': 3}
     PSO_DEFAULTS = {'swarm_size': 10, 'iterations': 20, 'w': 0.5, 'c1': 1.5, 'c2': 1.5,
                     'brightness_min': 0, 'brightness_max': 255,
-                    'target_lux_work': 400, 'target_lux_sleep': 50}
+                    'target_lux_work': 350, 'target_lux_sleep': 50}
 
     if request.method == 'GET':
         return jsonify({
