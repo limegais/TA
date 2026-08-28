@@ -1639,11 +1639,9 @@ def run_optimization_cycle(algo='both'):
             }
             print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
-        optimization_run_count += 1
-        # Update mqtt_data immediately so the API reflects the new count
-        # even if an exception occurs later in this function.
-        mqtt_data['system']['optimization_runs'] = optimization_run_count
-        print(f"[OPT] Cycle #{optimization_run_count} selesai")
+        # NOTE: optimization_run_count is incremented in the finally block
+        # below so it ALWAYS counts the cycle even if an exception occurs.
+        print(f"[OPT] Cycle #{optimization_run_count + 1} selesai")
         # Normalize GA fitness from raw score (0-~149) to percentage (0-100) for display
         ga_fitness_pct = _ga_fitness_pct(last_opt_results['ga']['fitness'])
         # Update mqtt_data system
@@ -1653,7 +1651,7 @@ def run_optimization_cycle(algo='both'):
             'ga_fitness': ga_fitness_pct,             # normalized 0-100%
             'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score for export/debug
             'pso_fitness': last_opt_results['pso']['fitness'],
-            'optimization_runs': optimization_run_count,
+            'optimization_runs': optimization_run_count + 1,  # +1 because finally increments after try
             'ga_temp': last_opt_results['ga']['temp'],
             'ga_fan': last_opt_results['ga']['fan'],
             'ga_mode': last_opt_results['ga'].get('mode', 'COOL'),
@@ -1741,8 +1739,8 @@ def run_optimization_cycle(algo='both'):
             'ga_fitness': ga_fitness_pct,              # normalized 0-100% for display
             'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score
             'pso_fitness': last_opt_results['pso']['fitness'],
-            'optimization_count': optimization_run_count,
-            'optimization_runs': optimization_run_count,
+            'optimization_count': optimization_run_count + 1,  # +1 because finally increments after try
+            'optimization_runs': optimization_run_count + 1,
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', []),
             'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
@@ -1765,6 +1763,15 @@ def run_optimization_cycle(algo='both'):
         socketio.emit('ml_status', {'status': 'error', 'message': str(e)})
         return False
     finally:
+        # Always increment the cycle counter -- even when an exception occurs,
+        # so the dashboard always reflects the real number of attempted cycles.
+        optimization_run_count += 1
+        mqtt_data['system']['optimization_runs'] = optimization_run_count
+        # Persist counter to JSON file so restarts restore the correct value.
+        try:
+            save_opt_results_file()
+        except Exception:
+            pass
         optimization_lock.release()
 
 # ==================== PERSIST & RESTORE OPT RESULTS ====================
@@ -2411,6 +2418,24 @@ def optimization_auto_loop():
                 socketio.emit('pso_iter_progress', {'status': 'new_cycle'})
                 converged = _pso_lamp_cycle()
                 now_after = time.time()
+                # _pso_lamp_cycle() bypasses run_optimization_cycle so we
+                # must increment the counter here to keep Total Cycles accurate.
+                global optimization_run_count
+                optimization_run_count += 1
+                mqtt_data['system']['optimization_runs'] = optimization_run_count
+                print(f"[OPT] PSO Lamp Cycle #{optimization_run_count} selesai")
+                # Notify dashboard immediately so Total Cycles updates in real-time
+                socketio.emit('ml_status', {
+                    'status': 'completed',
+                    'algorithm': 'pso',
+                    'optimization_runs': optimization_run_count,
+                    'optimization_count': optimization_run_count,
+                })
+                # Persist counter to JSON file so restarts restore the correct value.
+                try:
+                    save_opt_results_file()
+                except Exception:
+                    pass
                 if converged:
                     # Lux within target -- wait normal 5 minutes
                     last_pso_time = now_after
