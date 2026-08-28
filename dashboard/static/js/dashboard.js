@@ -1447,7 +1447,7 @@ function showPage(pageId) {
         pageEl.classList.add('active');
         console.log('[NAV] Page activated:', pageId);
     } else {
-        console.error('[NAV] Page not found:', pageId);
+        console.error('[NAV] Page not found:', pageId); alert('ERROR KRITIKAL: Halaman ' + pageId + ' tidak ditemukan di dalam HTML! Pastikan file monitoring.html tidak kosong dan sudah di-include di dashboard.html');
     }
 
     // Mark the correct nav-item as active
@@ -2361,8 +2361,8 @@ function updateMLChart(chartName, history, algo) {
             // ML tab not yet active - store data to render when tab opens
             window.__pendingMLData = window.__pendingMLData || {};
             window.__pendingMLData[chartName] = { history, algo };
-            // Also save to localStorage so data survives refresh
-            if (algo === 'GA') {
+            // Cache AC history regardless of algo (GA or PSO for AC)
+            if (chartName === 'gaFitness') {
                 try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch (e) { }
             }
             return;
@@ -2371,19 +2371,21 @@ function updateMLChart(chartName, history, algo) {
     const chart = charts[chartName];
     if (!chart || !history || history.length === 0) return;
 
-    if (algo === 'GA') {
-        chart.data.labels = history.map((_, i) => 'Gen ' + (i + 1));
+    // Use algo string only for axis labels (Gen vs Iter), not to determine chart type
+    var labelPrefix = (algo === 'PSO') ? 'Iter ' : 'Gen ';
+
+    if (chartName === 'gaFitness') {
+        // AC convergence chart — fitness per generation / iteration
+        chart.data.labels = history.map(function(_, i) { return labelPrefix + (i + 1); });
         chart.data.datasets[0].data = history;
         chart.update('none');
-        // Cache to localStorage for persistence across refresh
         try { localStorage.setItem('ml_ga_history', JSON.stringify(history)); } catch (e) { }
-    } else if (algo === 'PSO') {
-        // PSO fitness history sebagai fallback jika belum ada iteration_log
-        // Tampilkan sebagai Lux Avg estimasi (dataset index 2)
-        chart.data.labels = history.map((_, i) => i + 1);
+    } else if (chartName === 'psoFitness') {
+        // Lamp convergence fallback — show estimated Lux Avg (dataset index 2)
+        chart.data.labels = history.map(function(_, i) { return labelPrefix + (i + 1); });
         chart.data.datasets[0].data = [];
         chart.data.datasets[1].data = [];
-        chart.data.datasets[2].data = history.map(f => Math.max(0, 350 - Math.sqrt(Math.max(0, f))));
+        chart.data.datasets[2].data = history.map(function(f) { return Math.max(0, 350 - Math.sqrt(Math.max(0, f))); });
         chart.update('none');
     }
 }
@@ -2563,6 +2565,64 @@ function refreshMLHistory() {
     refreshMLData();
     showToast('ML data refreshed', 'success');
 }
+
+// ==================== AC ITER PROGRESS (live progress for GA/PSO running on AC) ====================
+socket.on('ac_iter_progress', function(d) {
+    if (d.status === 'new_cycle') {
+        // Clear Chart 1 (AC convergence)
+        var gaChart = charts.gaFitness;
+        if (gaChart) {
+            gaChart.data.labels = [];
+            gaChart.data.datasets[0].data = [];
+            gaChart.update('none');
+        }
+        // Clear AC iteration table
+        var tbody = document.getElementById('ac-iter-tbody');
+        var wrap  = document.getElementById('ac-iter-table-wrap');
+        if (tbody) tbody.innerHTML = '';
+        if (wrap)  wrap.style.display = 'none';
+        return;
+    }
+    if (d.status !== 'done') return;
+
+    var algo = (d.algo || 'GA').toUpperCase();
+    var iterLabel = (algo === 'PSO' ? 'Iter ' : 'Gen ') + d.iter + (d.total ? '/' + d.total : '');
+
+    // ── Update Chart 1 (AC convergence) live ──
+    var gaChart = charts.gaFitness;
+    if (gaChart) {
+        gaChart.data.labels.push(iterLabel);
+        gaChart.data.datasets[0].data.push(d.best_fitness);
+        gaChart.update('none');
+    }
+
+    // ── Update AC iteration detail table ──
+    var tbody = document.getElementById('ac-iter-tbody');
+    var wrap  = document.getElementById('ac-iter-table-wrap');
+    if (tbody && wrap) {
+        wrap.style.display = 'block';
+        tbody.insertAdjacentHTML('beforeend',
+            '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">' +
+            '<td style="padding:4px 8px;text-align:center;font-weight:600;">' + iterLabel + '</td>' +
+            '<td style="padding:4px 8px;text-align:center;color:#2563eb;font-weight:600;">' + d.best_temp + '\xB0C</td>' +
+            '<td style="padding:4px 8px;text-align:center;color:#3b82f6;">' + d.best_fan + '</td>' +
+            '<td style="padding:4px 8px;text-align:center;color:#0ea5e9;">' + d.best_mode + '</td>' +
+            '<td style="padding:4px 8px;text-align:center;color:#94a3b8;">' + d.best_rh + '%</td>' +
+            '<td style="padding:4px 8px;text-align:center;color:#3b82f6;font-weight:600;">' + d.best_fitness.toFixed(2) + '</td>' +
+            '</tr>'
+        );
+        // Keep at most 30 rows visible
+        while (tbody.rows.length > 30) tbody.deleteRow(0);
+    }
+
+    // ── Update summary card values live ──
+    var _s = function(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; };
+    if (d.best_temp) _s('ml-ga-temp', d.best_temp);
+    if (d.best_fan)  _s('ml-ga-fan',  d.best_fan);
+    if (d.best_mode) _s('ml-ga-mode', d.best_mode);
+    if (d.best_rh)   _s('ml-ga-rh',   d.best_rh);
+    _s('ml-ga-fitness', d.best_fitness.toFixed(2));
+});
 
 // ==================== EXPORT FUNCTIONS ====================
 function downloadCSV(filename, csvContent) {
@@ -5398,13 +5458,15 @@ socket.on('mqtt_update', function (data) {
             b1: psoBrightness1 + '%', b2: psoBrightness2 + '%', runs: runs
         });
 
-        // Show toast with actual PWM values
+        // Show toast with actual algo labels and PWM values
+        var _acAlgoLabel  = (data.data.ac_algo  || 'ga').toUpperCase();
+        var _lampAlgoLabel = (data.data.lamp_algo || 'pso').toUpperCase();
         if (gaFitness > 0 && psoFitness > 0) {
-            showToast('GA->AC: ' + gaTemp + '\xB0C (' + gaFitness.toFixed(1) + ') | PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(1) + ')', 'success');
+            showToast(_acAlgoLabel + '\u2192AC: ' + gaTemp + '\xB0C (' + gaFitness.toFixed(1) + ') | ' + _lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255', 'success');
         } else if (gaFitness > 0) {
-            showToast('GA->AC: ' + gaTemp + '\xB0C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
+            showToast(_acAlgoLabel + '\u2192AC: ' + gaTemp + '\xB0C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
         } else if (psoFitness > 0) {
-            showToast('PSO->Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
+            showToast(_lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
         }
 
         // === Update ML Optimization Page ===
@@ -5421,12 +5483,14 @@ socket.on('mqtt_update', function (data) {
                 pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
             });
         }
-        // Update GA/PSO convergence charts from history arrays
+        // Update convergence charts from history arrays (use actual algo labels)
+        var _sysAcAlgo   = (data.data.ac_algo   || 'ga').toUpperCase();
+        var _sysLampAlgo = (data.data.lamp_algo || 'pso').toUpperCase();
         if (data.data.ga_history && data.data.ga_history.length > 0) {
-            updateMLChart('gaFitness', data.data.ga_history, 'GA');
+            updateMLChart('gaFitness', data.data.ga_history, _sysAcAlgo);
         }
         if (data.data.pso_history && data.data.pso_history.length > 0) {
-            updateMLChart('psoFitness', data.data.pso_history, 'PSO');
+            updateMLChart('psoFitness', data.data.pso_history, _sysLampAlgo);
         }
     }
 
@@ -5579,28 +5643,44 @@ socket.on('ml_status', function (data) {
     console.log('[ML] ML Status:', data);
     const status = data.status || '';
     const algo = (data.algorithm || '').toUpperCase();
+    const acAlgo  = (data.ac_algo   || 'ga').toUpperCase();
+    const lampAlgo = (data.lamp_algo || 'pso').toUpperCase();
 
     if (status === 'running') {
-        showToast(algo + ' optimization running...', 'success');
+        showToast(algo + ' optimization running... AC:' + acAlgo + ' Lamp:' + lampAlgo, 'success');
         document.querySelectorAll('.ml-param-grid button').forEach(btn => {
             btn.disabled = true;
             btn.style.opacity = '0.5';
         });
-        // Reset PSO iteration table when new run starts
-        if (algo === 'PSO') {
-            const tbody = document.getElementById('pso-iter-tbody');
-            if (tbody) tbody.innerHTML = '';
-            const chart = charts.psoFitness;
-            if (chart) {
-                chart.data.labels = [];
-                chart.data.datasets.forEach(ds => ds.data = []);
-                chart.update('none');
-            }
+        // Reset BOTH iteration tables and BOTH charts for every new run
+        var acTbody = document.getElementById('ac-iter-tbody');
+        var acWrap  = document.getElementById('ac-iter-table-wrap');
+        if (acTbody) acTbody.innerHTML = '';
+        if (acWrap)  acWrap.style.display = 'none';
+
+        var psoTbody = document.getElementById('pso-iter-tbody');
+        var psoWrap  = document.getElementById('pso-iter-table-wrap');
+        if (psoTbody) psoTbody.innerHTML = '';
+        if (psoWrap)  psoWrap.style.display = 'none';
+
+        var gaChart = charts.gaFitness;
+        if (gaChart) {
+            gaChart.data.labels = [];
+            gaChart.data.datasets[0].data = [];
+            gaChart.update('none');
+        }
+        var psoChart = charts.psoFitness;
+        if (psoChart) {
+            psoChart.data.labels = [];
+            psoChart.data.datasets.forEach(function(ds) { ds.data = []; });
+            psoChart.update('none');
         }
     } else if (status === 'completed') {
         var modeLabel = '';
         if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
-        showToast(algo + ' optimization completed! GA: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel + ', PSO: ' + (data.pso_fitness || 0).toFixed(2), 'success');
+        // Toast with actual algo labels
+        showToast(acAlgo + '→AC: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel +
+                  ' | ' + lampAlgo + '→Lamp: ' + (data.pso_fitness || 0).toFixed(2), 'success');
         // Re-enable run buttons
         document.querySelectorAll('.ml-param-grid button').forEach(btn => {
             btn.disabled = false;
@@ -5613,12 +5693,15 @@ socket.on('ml_status', function (data) {
             var rhEl = document.getElementById('ml-ga-rh');
             if (rhEl && data.ga_solution.set_rh != null) rhEl.textContent = data.ga_solution.set_rh;
         }
-        // Directly update GA chart from socket payload (faster than waiting for refreshMLData fetch)
+        // Update AC convergence chart with correct algo label
         if (data.ga_history && data.ga_history.length > 0) {
-            try { updateMLChart('gaFitness', data.ga_history, 'GA'); } catch (e) { console.warn('[ML] Direct GA chart update failed:', e); }
+            try { updateMLChart('gaFitness', data.ga_history, acAlgo); } catch (e) { console.warn('[ML] AC chart update failed:', e); }
         }
-        if (data.pso_history && data.pso_history.length > 0) {
-            try { updateMLChart('psoFitness', data.pso_history, 'PSO'); } catch (e) { console.warn('[ML] Direct PSO chart update failed:', e); }
+        // Update Lamp chart: prefer detailed iteration log, fallback to history
+        if (data.pso_iteration_log && data.pso_iteration_log.length > 0) {
+            try { updatePSOIterChart(data.pso_iteration_log); } catch (e) { console.warn('[ML] Lamp iter chart failed:', e); }
+        } else if (data.pso_history && data.pso_history.length > 0) {
+            try { updateMLChart('psoFitness', data.pso_history, lampAlgo); } catch (e) { console.warn('[ML] Lamp chart update failed:', e); }
         }
         // Refresh ML data
         refreshMLData();
@@ -6610,4 +6693,5 @@ function toggleLampSchedule(id, enabled) {
     })
     .catch(function() {});
 }
+
 
