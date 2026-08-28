@@ -5654,29 +5654,9 @@ socket.on('ml_status', function (data) {
             btn.disabled = true;
             btn.style.opacity = '0.5';
         });
-        // Reset BOTH iteration tables and BOTH charts for every new run
-        var acTbody = document.getElementById('ac-iter-tbody');
-        var acWrap  = document.getElementById('ac-iter-table-wrap');
-        if (acTbody) acTbody.innerHTML = '';
-        if (acWrap)  acWrap.style.display = 'none';
-
-        var psoTbody = document.getElementById('pso-iter-tbody');
-        var psoWrap  = document.getElementById('pso-iter-table-wrap');
-        if (psoTbody) psoTbody.innerHTML = '';
-        if (psoWrap)  psoWrap.style.display = 'none';
-
-        var gaChart = charts.gaFitness;
-        if (gaChart) {
-            gaChart.data.labels = [];
-            gaChart.data.datasets[0].data = [];
-            gaChart.update('none');
-        }
-        var psoChart = charts.psoFitness;
-        if (psoChart) {
-            psoChart.data.labels = [];
-            psoChart.data.datasets.forEach(function(ds) { ds.data = []; });
-            psoChart.update('none');
-        }
+        // NOTE: Charts and tables are NOT cleared here so previous results
+        // remain visible while a new run is in progress (adaptive mode).
+        // They will be overwritten naturally as new iteration data arrives.
     } else if (status === 'completed') {
         var modeLabel = '';
         if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
@@ -5782,16 +5762,8 @@ function loadSavedPreferences() {
     if (savedPage === 'control') savedPage = 'control-ac';
     if (savedPage === 'power') savedPage = 'energy';
     if (savedPage && document.getElementById(savedPage)) {
-        document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
-        document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
-
-        document.getElementById(savedPage).classList.add('active');
-        document.querySelectorAll('.nav-item').forEach(function (item) {
-            const oc = item.getAttribute('onclick') || '';
-            if (oc.indexOf("showPage('" + savedPage + "')") !== -1) {
-                item.classList.add('active');
-            }
-        });
+        // Use showPage() so all per-page init logic (charts, refreshMLData, etc.) runs correctly
+        try { showPage(savedPage); } catch (e) { console.error('[INIT] savedPage showPage error:', e); }
     }
 
     const savedRanges = localStorage.getItem('chartRanges');
