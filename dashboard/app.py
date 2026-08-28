@@ -3732,7 +3732,7 @@ def admin_required(f):
 
 @app.before_request
 def require_login():
-    public_paths = ['/login', '/api/optimization/update', '/api/esp32/data']
+    public_paths = ['/login', '/api/optimization/update', '/api/esp32/data', '/api/debug/opt']
     if request.path in public_paths:
         return None
     if request.path.startswith('/socket.io'):
