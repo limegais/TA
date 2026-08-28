@@ -946,6 +946,8 @@ def run_ga_optimization(verbose=False):
     fitness_history = []
     stagnation_counter, stagnation_limit = 0, max(5, generations // 4)
     prev_best = 0
+    _ga_emit_step = max(1, generations // 30)  # throttle: ≤30 live events
+    socketio.emit('ac_iter_progress', {'status': 'new_cycle', 'algo': 'GA'})
 
     for gen in range(generations):
         scores = [calculate_ac_fitness(int(round(ind[0])), ind[1], ind[2], ind[3]) for ind in population]
@@ -956,6 +958,16 @@ def run_ga_optimization(verbose=False):
             best_fitness = scores[0]
             best_solution = population[0][:]
         fitness_history.append(best_fitness)
+        # Live progress event (throttled to ≤30 events per run)
+        if best_solution and (gen % _ga_emit_step == 0 or gen == generations - 1):
+            socketio.emit('ac_iter_progress', {
+                'iter': gen + 1, 'total': generations, 'algo': 'GA', 'status': 'done',
+                'best_temp': int(round(best_solution[0])),
+                'best_fan': int(best_solution[1]),
+                'best_mode': AC_MODE_NAMES.get(int(best_solution[2]), 'COOL'),
+                'best_rh': int(best_solution[3]),
+                'best_fitness': round(best_fitness, 2),
+            })
         improvement = best_fitness - prev_best
         stagnation_counter = stagnation_counter + 1 if improvement < 0.01 else 0
         prev_best = best_fitness
@@ -1098,6 +1110,8 @@ def run_pso_for_ac(verbose=False):
     g_fit  = pb_fit[g_idx]
 
     fitness_history = []
+    _pso_ac_emit_step = max(1, iterations // 30)  # throttle: ≤30 live events
+    socketio.emit('ac_iter_progress', {'status': 'new_cycle', 'algo': 'PSO'})
 
     for it in range(iterations):
         # Adaptive inertia
@@ -1131,6 +1145,16 @@ def run_pso_for_ac(verbose=False):
                 g_pos = positions[i][:]
 
         fitness_history.append(g_fit)
+        # Live progress event (throttled)
+        if it % _pso_ac_emit_step == 0 or it == iterations - 1:
+            socketio.emit('ac_iter_progress', {
+                'iter': it + 1, 'total': iterations, 'algo': 'PSO', 'status': 'done',
+                'best_temp': round(g_pos[0], 1),
+                'best_fan': int(round(g_pos[1])),
+                'best_mode': AC_MODE_NAMES.get(int(round(g_pos[2])), 'COOL'),
+                'best_rh': int(round(g_pos[3])),
+                'best_fitness': round(g_fit, 2),
+            })
 
     # Brute-force validation (same as GA)
     bf_best_fit, bf_best_sol = -1, None
@@ -1704,7 +1728,8 @@ def run_optimization_cycle(algo='both'):
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
             'ga_history': last_opt_results['ga'].get('stats', []),
-            'pso_history': last_opt_results['pso'].get('stats', [])
+            'pso_history': last_opt_results['pso'].get('stats', []),
+            'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
         }
         if algo in ('ga', 'both'):
             status_payload['ga_solution'] = {
