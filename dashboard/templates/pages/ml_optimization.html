@@ -387,6 +387,22 @@
         </button>
       </div>
     </div>
+    <!-- AC Iteration/Generation detail table (live progress) -->
+    <div id="ac-iter-table-wrap" style="overflow-x: auto; margin-bottom: 8px; display: none">
+      <table style="width: 100%; border-collapse: collapse; font-size: 12px">
+        <thead>
+          <tr style="background: rgba(59, 130, 246, 0.15)">
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Iter/Gen</th>
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Best Temp</th>
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Fan</th>
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Mode</th>
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Set RH</th>
+            <th style="padding: 4px 8px; text-align: center; border-bottom: 1px solid rgba(59,130,246,0.3);">Fitness (%)</th>
+          </tr>
+        </thead>
+        <tbody id="ac-iter-tbody"></tbody>
+      </table>
+    </div>
     <canvas id="gaFitnessChart" height="80"></canvas>
   </div>
 
