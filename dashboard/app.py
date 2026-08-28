@@ -1640,6 +1640,10 @@ def run_optimization_cycle(algo='both'):
             print(f"[PSO] Done: PWM1={pwm1_val}/255 PWM2={pwm2_val}/255 (B1={b1}% B2={b2}%) lux_error={fit:.2f}")
             persist_opt_results('pso')
         optimization_run_count += 1
+        # Update mqtt_data immediately so the API reflects the new count
+        # even if an exception occurs later in this function.
+        mqtt_data['system']['optimization_runs'] = optimization_run_count
+        print(f"[OPT] Cycle #{optimization_run_count} selesai")
         # Normalize GA fitness from raw score (0-~149) to percentage (0-100) for display
         ga_fitness_pct = _ga_fitness_pct(last_opt_results['ga']['fitness'])
         # Update mqtt_data system
@@ -2421,7 +2425,9 @@ def optimization_auto_loop():
                         last_pso_time = now_after - AUTO_OPT_INTERVAL_LAMP + 10
 
         except Exception as e:
+            import traceback
             print(f"[OPT] Auto cycle error: {e}")
+            traceback.print_exc()
         time.sleep(15)  # check timer more often (15 seconds) for fast re-run
 
 # InfluxDB Configuration
@@ -5194,7 +5200,9 @@ def ml_status():
         'pso_brightness2':  mqtt_data['system'].get('pso_brightness2', 0),
         'pso_pwm1':         mqtt_data['system'].get('pso_pwm1', 0),
         'pso_pwm2':         mqtt_data['system'].get('pso_pwm2', 0),
-        'optimization_runs': mqtt_data['system'].get('optimization_runs', 0),
+        # Read directly from the global counter so it's always accurate
+        # even if mqtt_data['system'] hasn't been updated yet this cycle.
+        'optimization_runs': optimization_run_count,
         'ga_history':       mqtt_data['system'].get('ga_history', []),
         'pso_history':      mqtt_data['system'].get('pso_history', []),
         # iteration_log for detailed PSO chart (PWM1, PWM2, Lux per iteration)
