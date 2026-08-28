@@ -2395,6 +2395,7 @@ def optimization_auto_loop():
       - If lux is within 315-385: wait 5 minutes then check again
       - If lux not at target: immediately retry PSO without waiting 5 minutes
     GA and PSO never run simultaneously."""
+    global optimization_run_count  # declared here so the function can increment it
     time.sleep(10)
     print(f"[OPT] Auto-optimization started (AC every {AUTO_OPT_INTERVAL_AC}s, Lamp every {AUTO_OPT_INTERVAL_LAMP}s)", flush=True)
     last_ga_time  = 0
@@ -2420,7 +2421,6 @@ def optimization_auto_loop():
                 now_after = time.time()
                 # _pso_lamp_cycle() bypasses run_optimization_cycle so we
                 # must increment the counter here to keep Total Cycles accurate.
-                global optimization_run_count
                 optimization_run_count += 1
                 mqtt_data['system']['optimization_runs'] = optimization_run_count
                 print(f"[OPT] PSO Lamp Cycle #{optimization_run_count} selesai")
