@@ -1741,6 +1741,8 @@ def run_optimization_cycle(algo='both'):
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count + 1,  # +1 because finally increments after try
             'optimization_runs': optimization_run_count + 1,
+            'pso_cycles': pso_params.get('iterations', 20),
+            'ga_cycles': ga_params.get('generations', 20),
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', []),
             'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
@@ -2430,6 +2432,8 @@ def optimization_auto_loop():
                     'algorithm': 'pso',
                     'optimization_runs': optimization_run_count,
                     'optimization_count': optimization_run_count,
+                    'pso_cycles': pso_params.get('iterations', 20),
+                    'ga_cycles': ga_params.get('generations', 20),
                 })
                 # Persist counter to JSON file so restarts restore the correct value.
                 try:
@@ -5233,6 +5237,8 @@ def ml_status():
         # Read directly from the global counter so it's always accurate
         # even if mqtt_data['system'] hasn't been updated yet this cycle.
         'optimization_runs': optimization_run_count,
+        'pso_cycles': pso_params.get('iterations', 20),
+        'ga_cycles': ga_params.get('generations', 20),
         'ga_history':       mqtt_data['system'].get('ga_history', []),
         'pso_history':      mqtt_data['system'].get('pso_history', []),
         # iteration_log for detailed PSO chart (PWM1, PWM2, Lux per iteration)
