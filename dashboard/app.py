@@ -14,10 +14,21 @@ from ultralytics import YOLO
 import random
 import math
 import os
+import sys
 import tempfile
 import subprocess
 import urllib.request
 import urllib.error
+
+# Force stdout/stderr to be line-buffered/unbuffered so print() logs show up
+# immediately in `journalctl` when running under systemd (systemd captures
+# stdout as a pipe, not a TTY, so Python defaults to full buffering there).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 
 # ==================== SBMS API CONFIG ====================
 # External SBMS server for device control (Outlet, AC, Lamp, Master)
@@ -1727,6 +1738,7 @@ def run_optimization_cycle(algo='both'):
             'ga_fitness_raw': last_opt_results['ga']['fitness'],  # raw score
             'pso_fitness': last_opt_results['pso']['fitness'],
             'optimization_count': optimization_run_count,
+            'optimization_runs': optimization_run_count,
             'ga_history': last_opt_results['ga'].get('stats', []),
             'pso_history': last_opt_results['pso'].get('stats', []),
             'pso_iteration_log': last_opt_results['pso'].get('iteration_log', []),
