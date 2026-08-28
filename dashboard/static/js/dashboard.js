@@ -1999,9 +1999,10 @@ function updateMLDisplay(data) {
     const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
 
     setEl('ml-ga-fitness', (data.ga_fitness || 0).toFixed(2));
-    // PSO fitness is already in percent from server
-    setEl('ml-pso-fitness', (data.pso_fitness != null ? parseFloat(data.pso_fitness) : 0).toFixed(1));
-    setEl('dash-pso-fitness-main', (data.pso_fitness != null ? parseFloat(data.pso_fitness) : 0).toFixed(2));
+    // PSO fitness is raw error from server. Convert to % accuracy (0 error = 100%)
+    var psoFitPct = Math.max(0, 100.0 - ((data.pso_fitness || 0) / 122500.0) * 100.0);
+    setEl('ml-pso-fitness', psoFitPct.toFixed(1));
+    setEl('dash-pso-fitness-main', psoFitPct.toFixed(2));
     setEl('dash-pso-brightness-main', data.pso_brightness != null ? Math.round(parseFloat(data.pso_brightness)) : '--');
     setEl('ml-ga-temp', data.ga_temp || '--');
     setEl('ml-ga-fan', data.ga_fan || '--');
@@ -2528,7 +2529,7 @@ function addMLHistoryRow(data) {
         pso_brightness: data.pso_brightness || '--',
         // GA fitness sekarang sudah 0-100% dari server (normalized)
         // PSO fitness adalah raw error — konversi ke % (100% = error 0, skala 350²=122500)
-        combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100.0 - (data.pso_fitness || 0) / 1225.0) * 0.5
+        combined: (data.ga_fitness || 0) * 0.5 + Math.max(0, 100.0 - (data.pso_fitness || 0) / 122500.0 * 100.0) * 0.5
     };
     mlHistory.unshift(entry);
     if (mlHistory.length > 50) mlHistory.pop();
@@ -5419,7 +5420,8 @@ socket.on('mqtt_update', function (data) {
     // Real-time optimization (GA->AC / PSO->Lamp) updates
     if (data.type === 'system') {
         const gaFitness = parseFloat(data.data.ga_fitness) || 0;
-        const psoFitness = parseFloat(data.data.pso_fitness) || 0;
+        const psoFitnessRaw = parseFloat(data.data.pso_fitness) || 0;
+        const psoFitness = Math.max(0, 100.0 - (psoFitnessRaw / 122500.0) * 100.0);
         const runs = data.data.optimization_runs || 0;
         const gaTemp = data.data.ga_temp || 0;
         const gaFan = data.data.ga_fan || 0;
@@ -5461,17 +5463,17 @@ socket.on('mqtt_update', function (data) {
         // Show toast with actual algo labels and PWM values
         var _acAlgoLabel  = (data.data.ac_algo  || 'ga').toUpperCase();
         var _lampAlgoLabel = (data.data.lamp_algo || 'pso').toUpperCase();
-        if (gaFitness > 0 && psoFitness > 0) {
-            showToast(_acAlgoLabel + '\u2192AC: ' + gaTemp + '\xB0C (' + gaFitness.toFixed(1) + ') | ' + _lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255', 'success');
+        if (gaFitness > 0 && psoFitnessRaw > 0) {
+            showToast(_acAlgoLabel + '\u2192AC: ' + gaTemp + '\xB0C (' + gaFitness.toFixed(1) + ') | ' + _lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (fit=' + psoFitness.toFixed(1) + '%)', 'success');
         } else if (gaFitness > 0) {
             showToast(_acAlgoLabel + '\u2192AC: ' + gaTemp + '\xB0C Fan:' + gaFan + ' (Fitness: ' + gaFitness.toFixed(2) + ')', 'success');
-        } else if (psoFitness > 0) {
-            showToast(_lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (err=' + psoFitness.toFixed(2) + ')', 'success');
+        } else if (psoFitnessRaw > 0) {
+            showToast(_lampAlgoLabel + '\u2192Lamp: PWM1=' + psoPwm1 + '/255 PWM2=' + psoPwm2 + '/255 (fit=' + psoFitness.toFixed(1) + '%)', 'success');
         }
 
         // === Update ML Optimization Page ===
         updateMLDisplay(data.data);
-        if (gaFitness > 0 || psoFitness > 0) {
+        if (gaFitness > 0 || psoFitnessRaw > 0) {
             addMLHistoryRow({
                 ga_fitness:     gaFitness,
                 ga_temp:        gaTemp,
@@ -5479,7 +5481,7 @@ socket.on('mqtt_update', function (data) {
                 ga_mode:        data.data.ga_mode   || '--',
                 ga_rh:          data.data.ga_set_rh !== undefined ? data.data.ga_set_rh : '--',
                 mode:           data.data.mode       || 'ADAPTIVE',
-                pso_fitness:    psoFitness,
+                pso_fitness:    psoFitnessRaw,
                 pso_brightness: Math.round((psoPwm1 + psoPwm2) / 2)
             });
         }
@@ -5678,9 +5680,10 @@ socket.on('ml_status', function (data) {
     } else if (status === 'completed') {
         var modeLabel = '';
         if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
+        var _psoFitPct = Math.max(0, 100.0 - ((data.pso_fitness || 0) / 122500.0) * 100.0);
         // Toast with actual algo labels
         showToast(acAlgo + '→AC: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel +
-                  ' | ' + lampAlgo + '→Lamp: ' + (data.pso_fitness || 0).toFixed(2), 'success');
+                  ' | ' + lampAlgo + '→Lamp: ' + _psoFitPct.toFixed(1) + '%', 'success');
         // Re-enable run buttons
         document.querySelectorAll('.ml-param-grid button').forEach(btn => {
             btn.disabled = false;
