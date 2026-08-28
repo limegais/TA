@@ -2015,7 +2015,14 @@ function updateMLDisplay(data) {
     // Sinkron Lamp Dashboard brightness dari PSO result
     if (data.pso_brightness1 != null) setText('dash-bright1', Math.round(parseFloat(data.pso_brightness1)));
     if (data.pso_brightness2 != null) setText('dash-bright2', Math.round(parseFloat(data.pso_brightness2)));
-    setEl('ml-opt-runs', data.optimization_runs || 0);
+    let optRunsStr = (data.pso_cycles && data.ga_cycles) ? `PSO: ${data.pso_cycles} | GA: ${data.ga_cycles}` : (data.optimization_runs || 0);
+    var runsEl = document.getElementById('ml-opt-runs');
+    if (runsEl) {
+        if (typeof optRunsStr === 'string' && optRunsStr.includes('PSO')) {
+            runsEl.style.fontSize = '18px';
+        }
+        runsEl.textContent = optRunsStr;
+    }
 
     // GA chart - use server data, or fallback to localStorage
     var gaHistory = (data.ga_history && data.ga_history.length > 0) ? data.ga_history : null;
@@ -5662,9 +5669,15 @@ socket.on('ml_status', function (data) {
         if (data.ga_solution && data.ga_solution.mode) modeLabel = ' Mode:' + data.ga_solution.mode;
         var _psoFitPct = Math.max(0, 100.0 - ((data.pso_fitness || 0) / 122500.0) * 100.0);
         // Update Total Cycles immediately from socket payload (no need to wait for API)
-        if (data.optimization_runs != null) {
+        if (data.optimization_runs != null || (data.pso_cycles && data.ga_cycles)) {
             var runsEl = document.getElementById('ml-opt-runs');
-            if (runsEl) runsEl.textContent = data.optimization_runs;
+            if (runsEl) {
+                let optRunsStr = (data.pso_cycles && data.ga_cycles) ? `PSO: ${data.pso_cycles} | GA: ${data.ga_cycles}` : data.optimization_runs;
+                if (typeof optRunsStr === 'string' && optRunsStr.includes('PSO')) {
+                    runsEl.style.fontSize = '18px';
+                }
+                runsEl.textContent = optRunsStr;
+            }
         }
         // Toast with actual algo labels
         showToast(acAlgo + '→AC: ' + (data.ga_fitness || 0).toFixed(2) + modeLabel +
