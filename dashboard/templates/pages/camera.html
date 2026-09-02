@@ -53,7 +53,18 @@
                         <div class="camera-info-label">Confidence</div>
                         <div class="camera-info-value" id="cam-confidence-display">0%</div>
                     </div>
+                    <div class="camera-info-card" style="transition: all 0.3s;">
+                        <div class="camera-info-label">Estimated MET</div>
+                        <div class="camera-info-value" id="cam-met-display">-</div>
+                    </div>
+                    <div class="camera-info-card" style="transition: all 0.3s;">
+                        <div class="camera-info-label">Activity</div>
+                        <div class="camera-info-value" id="cam-activity-display" style="font-size: 14px;">-</div>
+                    </div>
                 </div>
+                <p style="margin-top:10px;font-size:11px;color:var(--text-secondary);">
+                    <i class="fas fa-info-circle"></i> MET (Metabolic Equivalent of Task) diestimasi secara heuristik dari kecepatan pergerakan orang di frame kamera (bukan pengukuran metabolik langsung).
+                </p>
                 
                 <div style="margin-top: 20px; text-align: center; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
                     <button class="btn" id="camera-toggle-btn" onclick="toggleCamera()" style="padding: 12px 24px; border-radius: 12px; font-weight: 600; background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; border: none; transition: all 0.3s;">
