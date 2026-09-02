@@ -5560,6 +5560,20 @@ socket.on('mqtt_update', function (data) {
             confDisplayEl.parentElement.style.borderColor = 'var(--border)';
         }
 
+        // Update MET (metabolic rate) estimate + activity label
+        const metDisplayEl = document.getElementById('cam-met-display');
+        const activityDisplayEl = document.getElementById('cam-activity-display');
+        const metValue = data.data.met || 0;
+        const activityLabel = data.data.activity || '-';
+        if (metDisplayEl) {
+            metDisplayEl.textContent = personCount > 0 ? (metValue.toFixed(1) + ' met') : '-';
+            metDisplayEl.style.color = personCount > 0 ? '#3b82f6' : '#94a3b8';
+        }
+        if (activityDisplayEl) {
+            activityDisplayEl.textContent = personCount > 0 ? activityLabel : '-';
+            activityDisplayEl.style.color = personCount > 0 ? '#3b82f6' : '#94a3b8';
+        }
+
         // Update person detected card
         const personEl = document.getElementById('cam-person');
         const personCard = document.getElementById('person-detected-card');
