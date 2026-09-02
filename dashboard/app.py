@@ -2598,7 +2598,8 @@ mqtt_data = {
     'ac': {'temperature': 0, 'humidity': 0, 'heat_index': 0, 'ac_state': 'OFF', 'ac_temp': 24, 'fan_speed': 1, 'set_rh': 50, 'mode': 'ADAPTIVE', 'ac_fan_mode': 'COOL', 'rssi': 0, 'uptime': 0, 'temp1': 0, 'hum1': 0, 'temp2': 0, 'hum2': 0, 'temp3': 0, 'hum3': 0},
     'lamp': {'lux1': 0, 'lux2': 0, 'lux3': 0, 'lux_avg': 0, 'motion': False, 'brightness1': 0, 'brightness2': 0, 'brightness_avg': 0, 'mode': 'ADAPTIVE', 'rssi': 0, 'uptime': 0},
     'outdoor': {'co2': 0, 'temperature': 0, 'humidity': 0, 'lux': 0, 'rssi': 0, 'uptime': 0, 'connected': False},
-    'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive'},
+    'camera': {'person_detected': False, 'count': 0, 'confidence': 0, 'status': 'inactive',
+               'met': 0.0, 'activity': '-'},
     'energy': {'voltage': 0, 'current': 0, 'power': 0, 'energy': 0, 'frequency': 0, 'pf': 0, 'connected': False, 'ac_state': 'OFF'},
     'system': {'algo_config': 'ga_pso', 'ac_algo': 'ga', 'lamp_algo': 'pso', 'ga_fitness': 0, 'pso_fitness': 0, 'optimization_runs': 0, 'ga_temp': 0, 'ga_fan': 0, 'ga_mode': 'COOL', 'pso_pwm1': 0, 'pso_pwm2': 0, 'pso_brightness': 0, 'pso_brightness1': 0, 'pso_brightness2': 0, 'ga_history': [], 'pso_history': []},
     'ir_codes': {},
@@ -2882,6 +2883,70 @@ def detect_persons(frame):
     except Exception as e:
         print(f"[ERROR] YOLO detection error: {str(e)}")
         return frame, 0, 0.0, []
+
+
+# ==================== MET (METABOLIC RATE) ESTIMATION ====================
+# CATATAN PENTING: Kamera hanya melakukan deteksi orang (bounding box) via
+# YOLOv8, TIDAK ada pose/keypoint estimation atau sensor wearable. Sehingga
+# MET di sini adalah ESTIMASI HEURISTIK berbasis kecepatan pergerakan
+# centroid bounding box antar frame YOLO, dipetakan ke tabel MET standar
+# ASHRAE 55 (bukan pengukuran metabolik yang presisi):
+#   Duduk / diam              -> ~1.1 met
+#   Berdiri / aktivitas ringan -> ~1.6 met
+#   Berjalan pelan             -> ~2.3 met
+#   Berjalan cepat             -> ~3.3 met
+_met_prev_boxes = []  # [(cx, cy, h, ts), ...] centroid bbox dari frame YOLO sebelumnya
+_met_lock = threading.Lock()
+
+
+def _classify_met(speed_bph):
+    """speed_bph = kecepatan centroid dalam 'body-height per second' (dinormalisasi
+    terhadap tinggi bounding box supaya tidak bergantung jarak orang ke kamera)."""
+    if speed_bph < 0.15:
+        return 1.1, 'Duduk / Diam'
+    elif speed_bph < 0.5:
+        return 1.6, 'Berdiri / Aktivitas Ringan'
+    elif speed_bph < 1.4:
+        return 2.3, 'Berjalan Pelan'
+    else:
+        return 3.3, 'Berjalan Cepat'
+
+
+def _estimate_met(boxes_list):
+    """Estimasi rata-rata MET seluruh orang di frame berdasarkan pergerakan
+    centroid bbox dibanding frame YOLO sebelumnya (nearest-neighbor matching).
+    Mengembalikan (avg_met, activity_label)."""
+    global _met_prev_boxes
+    now = time.time()
+    with _met_lock:
+        prev = _met_prev_boxes
+        cur = []
+        met_list = []
+        for (x1, y1, x2, y2, conf) in boxes_list:
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            h = max(1.0, y2 - y1)
+            best, best_d = None, None
+            for (px, py, ph, pts) in prev:
+                d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                # hanya cocokkan jika perpindahan masuk akal (< 1.5x tinggi bbox)
+                if d < ph * 1.5 and (best_d is None or d < best_d):
+                    best, best_d = (px, py, ph, pts), d
+            if best is not None:
+                dt = max(0.05, now - best[3])
+                speed_bph = (best_d / best[2]) / dt
+                met_val, label = _classify_met(speed_bph)
+            else:
+                # penampakan pertama, belum ada data gerak -> asumsikan berdiri
+                met_val, label = 1.6, 'Berdiri / Aktivitas Ringan'
+            met_list.append((met_val, label))
+            cur.append((cx, cy, h, now))
+        _met_prev_boxes = cur
+
+    if not met_list:
+        return 0.0, '-'
+    avg_met = round(sum(m for m, _ in met_list) / len(met_list), 2)
+    dominant_label = max(met_list, key=lambda x: x[0])[1]
+    return avg_met, dominant_label
 
 def _person_present_recently():
     """True if person confirmed within 5 min (NO_PERSON_TIMEOUT_SECONDS) -- used for AC."""
@@ -3211,6 +3276,10 @@ def camera_detection_loop():
                 mqtt_data['camera']['person_detected'] = person_count > 0
                 mqtt_data['camera']['count'] = person_count
                 mqtt_data['camera']['confidence'] = int(confidence * 100)
+                # Estimasi MET (metabolic rate) heuristik dari pergerakan bbox
+                avg_met, activity_label = _estimate_met(last_boxes)
+                mqtt_data['camera']['met'] = avg_met
+                mqtt_data['camera']['activity'] = activity_label
                 # Sync to opt_sensor_data so PSO fitness function uses current local YOLO result
                 update_opt_sensor_data(person_detected=person_count > 0, person_count=person_count)
                 
