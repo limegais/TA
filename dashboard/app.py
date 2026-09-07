@@ -755,14 +755,12 @@ def calculate_lamp_fitness_2d(pwm1, pwm2):
     # Komponen 4: efisiensi energi (menggunakan estimasi daya)
     error_power = power_est
 
-    # -- Langkah 4: Tolerance check -- kondisi sempurna (fitness = minimal) ----------
-    # Lux rata-rata 315-385 DAN semua sensor >= 200 lux -> tujuan tercapai
-    # Nilai fitness hanya dipengaruhi konsumsi daya agar PSO memilih konfigurasi paling hemat
-    if (TARGET_LUX > 0 and 315.0 <= lux_est_avg <= 385.0
-            and est_lux1 >= MIN_LUX and est_lux2 >= MIN_LUX and est_lux3 >= MIN_LUX):
-        return round(W_POWER * error_power, 4)
-
-    # -- Langkah 5: Gabungkan komponen fitness --------------------------------
+    # -- Langkah 4: Gabungkan komponen fitness --------------------------------
+    # Catatan: TIDAK ada shortcut "power-only" saat lux sudah dalam toleransi --
+    # error_avg tetap dihitung supaya PSO konvergen ke brightness yang paling
+    # dekat 350 lux, bukan brightness paling redup yang sekadar lolos MIN_LUX.
+    # W_POWER kecil (0.1) hanya jadi tie-breaker hemat energi antar solusi yang
+    # sama-sama dekat target, sehingga hasil akhir stabil di sekitar target.
     fitness = error_avg + W_BALANCE * error_balance + W_MIN * error_min + W_POWER * error_power
     return round(fitness, 4)
 
