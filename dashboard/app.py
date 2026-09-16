@@ -5169,6 +5169,9 @@ def energy_history():
             )
         except Exception as ex:
             print(f'[WARN] energy_history MySQL kwh failed ({device}): {ex}')
+            if field == 'energy_kwh':
+                return jsonify({'error': str(ex), 'period': period, 'field': field, 'device': device, 'data': []}), 500
+        
         if field == 'energy_kwh':
             return jsonify({'period': period, 'field': field, 'device': device, 'data': kwh_points})
 
