@@ -5044,248 +5044,240 @@ def energy_export_csv():
 
 @app.route('/api/energy/history')
 def energy_history():
-    """Get energy history from InfluxDB -- supports 1h to 30 days.
-    device=ac  -> MySQL AC data (tag device='mysql_ac')
-    device=lamp -> MySQL Lamp data (tag device='mysql_lamp')
-    device omitted -> AC data (backward compat)
+    """Get energy history.
+    energy_kwh -> query MySQL directly (full resolution, same as reference website).
+    power/voltage/current -> InfluxDB.
+    device: ac (id_kwh=1), outlet (id_kwh=2), lamp (id_kwh=3)
     """
     period = request.args.get('period', '24h')
     field = request.args.get('field')
-    device = request.args.get('device', 'ac')  # 'ac' or 'lamp'
+    device = request.args.get('device', 'ac')
 
     period_map = {
         '1h':   {'range': '-1h',   'window': '1m'},
         '6h':   {'range': '-6h',   'window': '5m'},
-        '24h':  {'range': '-24h',  'window': '1h'},    # 24 titik (per jam)
-        '7d':   {'range': '-7d',   'window': '1d'},    # 7 titik (per hari)
-        '30d':  {'range': '-30d',  'window': '1d'},    # 30 titik (per hari)
-        '12mo': {'range': '-12mo', 'window': '1mo'},   # 12 titik (per bulan)
-        '5y':   {'range': '-5y',   'window': '1y'},    # yearly: last 5 years
+        '24h':  {'range': '-24h',  'window': '1h'},
+        '7d':   {'range': '-7d',   'window': '1d'},
+        '30d':  {'range': '-30d',  'window': '1d'},
+        '12mo': {'range': '-12mo', 'window': '1mo'},
+        '5y':   {'range': '-5y',   'window': '1y'},
     }
-
     if period not in period_map:
         return jsonify({'error': 'Invalid period. Use: 1h, 6h, 24h, 7d, 30d, 12mo, 5y'}), 400
-
     allowed_fields = ['voltage', 'current', 'power', 'energy_kwh', 'frequency', 'power_factor']
     if field and field not in allowed_fields:
         return jsonify({'error': f'Invalid field. Use: {", ".join(allowed_fields)}'}), 400
 
-    # Map device to InfluxDB tag value
-    device_tag = {'ac': 'mysql_ac', 'lamp': 'mysql_lamp', 'outlet': 'mysql_outlet'}.get(device, 'mysql_ac')
+    id_kwh = {'ac': 1, 'outlet': 2, 'lamp': 3}.get(device, 1)
+    device_tag = {'ac': 'esp32_ac', 'lamp': 'esp32_lamp', 'outlet': 'mysql_outlet'}.get(device, 'esp32_ac')
     p = period_map[period]
 
+    if period in ('1h', '6h'):
+        time_format = '%H:%M'
+    elif period == '24h':
+        time_format = '%H:00'
+    elif period == '7d':
+        time_format = '%a %d/%m'
+    elif period == '30d':
+        time_format = '%d/%m'
+    elif period == '12mo':
+        time_format = '%b %Y'
+    else:
+        time_format = '%Y'
+
+    wib_tz = timezone(timedelta(hours=7))
+    now_wib = datetime.now(wib_tz)
+
+    def _mysql_range():
+        offsets = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24),
+                   '7d': timedelta(days=7), '30d': timedelta(days=30),
+                   '12mo': timedelta(days=365), '5y': timedelta(days=1825)}
+        start = now_wib - offsets.get(period, timedelta(hours=24))
+        return start.strftime('%Y-%m-%d %H:%M:%S'), now_wib.strftime('%Y-%m-%d %H:%M:%S')
+
+    def _bucket_key(dt):
+        if isinstance(dt, str):
+            try:
+                dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S').replace(tzinfo=wib_tz)
+            except Exception:
+                return None
+        if not dt.tzinfo:
+            dt = dt.replace(tzinfo=wib_tz)
+        if period in ('1h', '6h'):
+            return dt.replace(second=0, microsecond=0)
+        elif period == '24h':
+            return dt.replace(minute=0, second=0, microsecond=0)
+        elif period in ('7d', '30d'):
+            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == '12mo':
+            return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            return dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    def _mysql_kwh_to_points(rows):
+        """Group MySQL cumulative kWh by bucket (max per bucket = last value),
+        prepend a baseline, return cumulative list for JS delta computation."""
+        if not rows:
+            return []
+        grouped = {}
+        for row in rows:
+            try:
+                kwh = float(row.get('energy_kwh') or 0)
+            except (TypeError, ValueError):
+                continue
+            key = _bucket_key(row.get('timestamp', ''))
+            if key is None:
+                continue
+            if key not in grouped or kwh > grouped[key]:
+                grouped[key] = kwh
+        if not grouped:
+            return []
+        skeys = sorted(grouped.keys())
+        first = skeys[0]
+        if period == '24h':
+            bk = first - timedelta(hours=1)
+        elif period in ('7d', '30d'):
+            bk = first - timedelta(days=1)
+        elif period == '12mo':
+            mi = first.month - 2
+            bk = first.replace(year=first.year + mi // 12, month=mi % 12 + 1)
+        else:
+            bk = first - timedelta(hours=1)
+        grouped[bk] = grouped[first]
+        skeys = [bk] + skeys
+        return [{'time': k.strftime(time_format), 'value': round(grouped[k], 5)} for k in skeys]
+
+    # ── energy_kwh: always from MySQL ─────────────────────────────────────────
+    kwh_points = []
+    if field == 'energy_kwh' or field is None:
+        try:
+            fs, ts = _mysql_range()
+            kwh_points = _mysql_kwh_to_points(
+                _fetch_energy_history_from_mysql(id_kwh, fs, ts, limit=10000)
+            )
+        except Exception as ex:
+            print(f'[WARN] energy_history MySQL kwh failed ({device}): {ex}')
+        if field == 'energy_kwh':
+            return jsonify({'period': period, 'field': field, 'device': device, 'data': kwh_points})
+
+    # ── power / voltage / current: InfluxDB ───────────────────────────────────
     try:
         _, _, query_api = _get_influx_client()
 
-        if period in ('1h', '6h'):
-            time_format = '%H:%M'
-        elif period == '24h':
-            time_format = '%H:00'   # jam bulat: 00:00, 01:00, ..., 23:00
-        elif period == '7d':
-            time_format = '%a %d/%m'   # Mon 02/06, Tue 03/06, ...
-        elif period == '30d':
-            time_format = '%d/%m'      # 05/05, 06/05, ..., 03/06
-        elif period == '12mo':
-            time_format = '%b %Y'   # Jan 2026, Feb 2026, ...
-        else:  # 5y
-            time_format = '%Y'      # 2024, 2025, 2026, ...
+        def _add_months(dt, n):
+            mi = dt.month - 1 + n
+            return dt.replace(year=dt.year + mi // 12, month=mi % 12 + 1, day=1)
 
-        def _add_months(dt, months):
-            month_index = dt.month - 1 + months
-            year = dt.year + month_index // 12
-            month = month_index % 12 + 1
-            return dt.replace(year=year, month=month, day=1)
-
-        def _to_flux_time(dt):
+        def _flux_t(dt):
             return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
-        def _fixed_bucket_spec(extra_baseline=False):
-            """Return fixed local bucket starts so charts always show the requested count."""
+        def _spec():
             now = datetime.now()
             if period == '24h':
                 end = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                starts = [end - timedelta(hours=i) for i in range(24, 0, -1)]
-                prev_start = starts[0] - timedelta(hours=1)
-                window = '1h'
+                return {'starts': [end - timedelta(hours=i) for i in range(24, 0, -1)],
+                        'start': end - timedelta(hours=24), 'end': end, 'window': '1h'}
             elif period == '7d':
                 end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                starts = [end - timedelta(days=i) for i in range(7, 0, -1)]
-                prev_start = starts[0] - timedelta(days=1)
-                window = '1d'
+                return {'starts': [end - timedelta(days=i) for i in range(7, 0, -1)],
+                        'start': end - timedelta(days=7), 'end': end, 'window': '1d'}
             elif period == '30d':
                 end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                starts = [end - timedelta(days=i) for i in range(30, 0, -1)]
-                prev_start = starts[0] - timedelta(days=1)
-                window = '1d'
+                return {'starts': [end - timedelta(days=i) for i in range(30, 0, -1)],
+                        'start': end - timedelta(days=30), 'end': end, 'window': '1d'}
             elif period == '12mo':
-                this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-                end = _add_months(this_month, 1)
+                this_m = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                end = _add_months(this_m, 1)
                 starts = [_add_months(end, -i) for i in range(12, 0, -1)]
-                prev_start = _add_months(starts[0], -1)
-                window = '1mo'
-            else:
-                return None
+                return {'starts': starts, 'start': starts[0], 'end': end, 'window': '1mo'}
+            return None
 
-            if extra_baseline:
-                starts = [prev_start] + starts
-            return {'starts': starts, 'start': starts[0], 'end': end, 'window': window}
-
-        def _bucket_key(dt):
-            if period == '24h':
-                return dt.replace(minute=0, second=0, microsecond=0)
-            if period in ('7d', '30d'):
-                return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            if period == '12mo':
-                return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        def _bk_influx(dt):
+            if period == '24h': return dt.replace(minute=0, second=0, microsecond=0)
+            if period in ('7d','30d'): return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            if period == '12mo': return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             return dt
 
-        def _runtime_bucket_values(field_name, spec):
-            if device == 'lamp':
-                buf = lamp_runtime_history
-            elif device == 'outlet':
-                buf = outlet_runtime_history
-            else:
-                buf = energy_runtime_history
-            rows = [r for r in buf if r.get('ts') and spec['start'] <= r['ts'] < spec['end']]
-            if not rows:
-                return {}
+        def _rtfb(fn, sp):
+            buf = lamp_runtime_history if device == 'lamp' else (outlet_runtime_history if device == 'outlet' else energy_runtime_history)
+            rows = [r for r in buf if r.get('ts') and sp['start'] <= r['ts'] < sp['end']]
+            g = {}
+            for r in rows:
+                g.setdefault(_bk_influx(r['ts']), []).append(float(r.get(fn, 0) or 0))
+            return {k: sum(v)/len(v) for k,v in g.items()}
 
-            grouped = {}
-            for row in rows:
-                key = _bucket_key(row['ts'])
-                grouped.setdefault(key, []).append(row)
+        def influx_field(fn):
+            sp = _spec()
+            if sp:
+                q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: time(v: "{_flux_t(sp['start'])}"), stop: time(v: "{_flux_t(sp['end'])}"))
+  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+  |> filter(fn: (r) => r["_field"] == "{fn}")
+  |> filter(fn: (r) => r["device"] == "{device_tag}")
+  |> aggregateWindow(every: {sp['window']}, fn: mean, createEmpty: false, timeSrc: "_start")
+  |> yield(name: "mean")
+'''
+                result = query_api.query(query=q)
+                vb = {}
+                ss = set(sp['starts'])
+                for t in result:
+                    for rec in t.records:
+                        k = _bk_influx(rec.get_time().astimezone().replace(tzinfo=None))
+                        if k in ss:
+                            vb[k] = float(rec.get_value())
+                if not vb:
+                    vb = _rtfb(fn, sp)
+                return [{'time': s.strftime(time_format), 'value': round(float(vb.get(s, 0.0)), 2)} for s in sp['starts']]
+            # simple fallback
+            q = f'''
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {p['range']})
+  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
+  |> filter(fn: (r) => r["_field"] == "{fn}")
+  |> filter(fn: (r) => r["device"] == "{device_tag}")
+  |> aggregateWindow(every: {p['window']}, fn: mean, createEmpty: false)
+  |> yield(name: "mean")
+'''
+            result = query_api.query(query=q)
+            return [{'time': rec.get_time().astimezone().strftime(time_format), 'value': round(float(rec.get_value()), 2)}
+                    for t in result for rec in t.records]
 
-            values = {}
-            for key, items in grouped.items():
-                if field_name == 'energy_kwh':
-                    latest = max(items, key=lambda r: r.get('ts'))
-                    values[key] = float(latest.get(field_name, 0) or 0)
-                else:
-                    vals = [float(r.get(field_name, 0) or 0) for r in items]
-                    values[key] = sum(vals) / len(vals) if vals else 0.0
-            return values
+        if field and field != 'energy_kwh':
+            pts = influx_field(field)
+            if not pts:
+                now_l = datetime.now()
+                lb = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24),
+                      '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365),
+                      '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
+                buf = lamp_runtime_history if device == 'lamp' else (outlet_runtime_history if device == 'outlet' else energy_runtime_history)
+                rt = [r for r in buf if r.get('ts') and r['ts'] >= now_l - lb]
+                if rt:
+                    step = max(1, len(rt) // 120)
+                    pts = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)} for r in rt[::step]]
+            return jsonify({'period': period, 'field': field, 'device': device, 'data': pts})
 
-        def _points_from_fixed_buckets(field_name, values_by_bucket, spec):
-            dec = 5 if field_name == 'energy_kwh' else 2
-            starts = spec['starts']
-
-            if field_name == 'energy_kwh':
-                first_available = next((values_by_bucket[s] for s in starts if s in values_by_bucket), 0.0)
-                last_value = first_available
-                points = []
-                for start in starts:
-                    if start in values_by_bucket:
-                        last_value = values_by_bucket[start]
-                    val = float(last_value)
-                    val = val / 1000.0
-                    points.append({'time': start.strftime(time_format), 'value': round(val, dec)})
-                return points
-
-            return [
-                {'time': start.strftime(time_format), 'value': round(float(values_by_bucket.get(start, 0.0)), dec)}
-                for start in starts
-            ]
-
-        def query_field_points(field_name):
-            # energy_kwh is cumulative -- use last() per window so final value
-            # of each interval is taken (not average), so JS can diff between points
-            agg_fn = 'last' if field_name == 'energy_kwh' else 'mean'
-            fixed_spec = _fixed_bucket_spec(extra_baseline=(field_name == 'energy_kwh'))
-            if fixed_spec:
-                query = f'''
-                from(bucket: "{INFLUX_BUCKET}")
-                  |> range(start: time(v: "{_to_flux_time(fixed_spec['start'])}"), stop: time(v: "{_to_flux_time(fixed_spec['end'])}"))
-                  |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
-                  |> filter(fn: (r) => r["_field"] == "{field_name}")
-                  |> filter(fn: (r) => r["device"] == "{device_tag}")
-                  |> aggregateWindow(every: {fixed_spec['window']}, fn: {agg_fn}, createEmpty: false, timeSrc: "_start")
-                  |> yield(name: "{agg_fn}")
-                '''
-                result = query_api.query(query=query)
-                values_by_bucket = {}
-                expected_starts = set(fixed_spec['starts'])
-                for table in result:
-                    for record in table.records:
-                        rec_time = record.get_time().astimezone().replace(tzinfo=None)
-                        key = _bucket_key(rec_time)
-                        if key in expected_starts:
-                            values_by_bucket[key] = float(record.get_value())
-
-                if not values_by_bucket:
-                    values_by_bucket = _runtime_bucket_values(field_name, fixed_spec)
-
-                return _points_from_fixed_buckets(field_name, values_by_bucket, fixed_spec)
-            query = f'''
-            from(bucket: "{INFLUX_BUCKET}")
-              |> range(start: {p['range']})
-              |> filter(fn: (r) => r["_measurement"] == "energy_monitor")
-              |> filter(fn: (r) => r["_field"] == "{field_name}")
-              |> filter(fn: (r) => r["device"] == "{device_tag}")
-              |> aggregateWindow(every: {p['window']}, fn: {agg_fn}, createEmpty: false)
-              |> yield(name: "{agg_fn}")
-            '''
-            result = query_api.query(query=query)
-            points = []
-            for table in result:
-                for record in table.records:
-                    dec = 5 if field_name == 'energy_kwh' else 2
-                    val = float(record.get_value())
-                    if field_name == 'energy_kwh':
-                        val = val / 1000.0
-                    points.append({
-                        'time': record.get_time().astimezone().strftime(time_format),
-                        'value': round(val, dec)
-                    })
-            return points
-
-        if field:
-            data_points = query_field_points(field)
-            # Fallback to runtime buffer when InfluxDB has no data yet
-            if not data_points:
-                now = datetime.now()
-                lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
-                cutoff = now - lookback
-                if device == 'lamp':
-                    buf = lamp_runtime_history
-                elif device == 'outlet':
-                    buf = outlet_runtime_history
-                else:
-                    buf = energy_runtime_history
-                runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
-                if runtime:
-                    step = max(1, len(runtime) // 120)
-                    data_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get(field, 0)), 2)} for r in runtime[::step]]
-            return jsonify({'period': period, 'field': field, 'device': device, 'data': data_points})
-
-        power_points = query_field_points('power')
-        voltage_points = query_field_points('voltage')
-        kwh_points = query_field_points('energy_kwh')
-
-        if not power_points and not voltage_points and not kwh_points:
-            now = datetime.now()
-            lookback = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365), '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
-            cutoff = now - lookback
-            if device == 'lamp':
-                buf = lamp_runtime_history
-            elif device == 'outlet':
-                buf = outlet_runtime_history
-            else:
-                buf = energy_runtime_history
-            runtime = [r for r in buf if r.get('ts') and r['ts'] >= cutoff]
-            if runtime:
-                step = max(1, len(runtime) // 120)
-                sampled = runtime[::step]
-                power_points   = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sampled]
-                voltage_points = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sampled]
-                kwh_points     = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('energy_kwh', 0)), 3)} for r in sampled]
-
-        return jsonify({'period': period, 'device': device, 'power': power_points, 'voltage': voltage_points, 'energy_kwh': kwh_points})
+        pw = influx_field('power')
+        vo = influx_field('voltage')
+        if not pw and not vo:
+            now_l = datetime.now()
+            lb = {'1h': timedelta(hours=1), '6h': timedelta(hours=6), '24h': timedelta(hours=24),
+                  '7d': timedelta(days=7), '30d': timedelta(days=30), '12mo': timedelta(days=365),
+                  '5y': timedelta(days=1825)}.get(period, timedelta(days=1))
+            buf = lamp_runtime_history if device == 'lamp' else (outlet_runtime_history if device == 'outlet' else energy_runtime_history)
+            rt = [r for r in buf if r.get('ts') and r['ts'] >= now_l - lb]
+            if rt:
+                step = max(1, len(rt) // 120)
+                sm = rt[::step]
+                pw = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('power', 0)), 2)} for r in sm]
+                vo = [{'time': r['ts'].strftime(time_format), 'value': round(float(r.get('voltage', 0)), 2)} for r in sm]
+        return jsonify({'period': period, 'device': device, 'power': pw, 'voltage': vo, 'energy_kwh': kwh_points})
 
     except Exception as e:
-        print(f"[ERROR] Energy history query error: {e}")
-        if field:
+        print(f"[ERROR] Energy history: {e}")
+        if field and field != 'energy_kwh':
             return jsonify({'error': str(e), 'period': period, 'field': field, 'device': device, 'data': []}), 500
-        return jsonify({'error': str(e), 'period': period, 'device': device, 'power': [], 'voltage': [], 'energy_kwh': []}), 500
+        return jsonify({'error': str(e), 'period': period, 'device': device, 'power': [], 'voltage': [], 'energy_kwh': kwh_points}), 500
 
 @app.route('/api/ml/status')
 def ml_status():
