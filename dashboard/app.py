@@ -5093,7 +5093,8 @@ def energy_history():
                    '7d': timedelta(days=7), '30d': timedelta(days=30),
                    '12mo': timedelta(days=365), '5y': timedelta(days=1825)}
         start = now_wib - offsets.get(period, timedelta(hours=24))
-        return start.strftime('%Y-%m-%d %H:%M:%S'), now_wib.strftime('%Y-%m-%d %H:%M:%S')
+        # PHP API only accepts YYYY-MM-DD
+        return start.strftime('%Y-%m-%d'), now_wib.strftime('%Y-%m-%d'), start
 
     def _bucket_key(dt):
         if isinstance(dt, str):
@@ -5114,7 +5115,7 @@ def energy_history():
         else:
             return dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    def _mysql_kwh_to_points(rows):
+    def _mysql_kwh_to_points(rows, start_dt):
         """Group MySQL cumulative kWh by bucket (max per bucket = last value),
         prepend a baseline, return cumulative list for JS delta computation."""
         if not rows:
@@ -5125,7 +5126,17 @@ def energy_history():
                 kwh = float(row.get('energy_kwh') or 0)
             except (TypeError, ValueError):
                 continue
-            key = _bucket_key(row.get('timestamp', ''))
+            
+            ts_str = row.get('timestamp', '')
+            try:
+                row_dt = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=wib_tz)
+            except Exception:
+                continue
+            
+            if row_dt < start_dt:
+                continue
+                
+            key = _bucket_key(row_dt)
             if key is None:
                 continue
             if key not in grouped or kwh > grouped[key]:
@@ -5151,9 +5162,10 @@ def energy_history():
     kwh_points = []
     if field == 'energy_kwh' or field is None:
         try:
-            fs, ts = _mysql_range()
+            fs, ts, start_dt = _mysql_range()
             kwh_points = _mysql_kwh_to_points(
-                _fetch_energy_history_from_mysql(id_kwh, fs, ts, limit=10000)
+                _fetch_energy_history_from_mysql(id_kwh, fs, ts, limit=10000),
+                start_dt
             )
         except Exception as ex:
             print(f'[WARN] energy_history MySQL kwh failed ({device}): {ex}')
