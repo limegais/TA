@@ -965,14 +965,10 @@ function loadAnalyticsEnergy(device, period, btnEl) {
             var raw = result.data || [];
             var cumValues = raw.map(function (d) { return parseFloat(d.value || 0); });
             var labels = raw.map(function (d) { return d.time; });
-            // Compute deltas from cumulative values
-            var deltas = [];
-            var rangeLabels = [];
-            for (var i = 1; i < cumValues.length; i++) {
-                var diff = cumValues[i] - cumValues[i - 1];
-                deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
-                rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
-            }
+            // Data from backend is ALREADY delta values
+            var deltas = raw.map(function (d) { return parseFloat(d.value || 0); });
+            var rangeLabels = raw.map(function (d) { return d.time; });
+            
             var chartKey = device === 'ac' ? 'acEnergyKwh' : (device === 'lamp' ? 'lampEnergyKwh' : 'outletEnergyKwhMySQL');
             var chart = charts[chartKey];
             if (chart && chart.data) {
