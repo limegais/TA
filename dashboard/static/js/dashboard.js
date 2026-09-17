@@ -134,13 +134,16 @@ function makeEnergyOpts(unit) {
                 callbacks: {
                     label: function (ctx) {
                         var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
-                        var delta = ctx.parsed.y;
-                        // If kWh chart and cumulative arrays exist, show calculation
-                        return dsLabel + ': ' + formatChartValue(delta, unit);
+                        var val = ctx.parsed.y;
+                        if (unit === 'kWh') {
+                            return dsLabel + ': ' + val.toFixed(5) + ' kWh';
+                        }
+                        return dsLabel + ': ' + formatChartValue(val, unit);
                     },
                     title: function (items) {
                         if (!items || !items[0]) return '';
                         var lbl = items[0].label || '';
+                        if (unit === 'kWh') return lbl;
                         return 'Time: ' + lbl;
                     }
                 }
@@ -796,8 +799,8 @@ function loadEnergyHistory(field, period, btnElement) {
                 var lampLabels = lampData.map(function (d) { return d.time; });
 
 
-                // -- Determine chart type: Daily (24h) = line, others = bar --
-                var useBarForAll = (period !== '24h');
+                // -- Determine chart type: 24h = line, others = bar --
+                var useBarForAll = (period !== '24h' && period !== '1h' && period !== '6h');
                 var targetType = useBarForAll ? 'bar' : 'line';
                 var unitMap = { power: 'kW', voltage: 'V', current: 'A', energy_kwh: 'kWh' };
                 var unit = unitMap[field] || '';
