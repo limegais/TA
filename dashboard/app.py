@@ -5180,7 +5180,7 @@ def energy_history():
                     is_anomaly = delta_kwh < 0
                     points.append({
                         'time': cur_dt.strftime(time_format),
-                        'value': round(max(0.0, delta_kwh), 6),
+                        'value': round(max(0.0, delta_kwh), 2),
                         'is_anomaly': is_anomaly
                     })
                 # else: data gap > 5.5 menit, tidak dihitung sebagai satu interval
@@ -5223,7 +5223,7 @@ def energy_history():
                 is_anomaly = delta_kwh < 0
                 points.append({
                     'time': bk.strftime(time_format),
-                    'value': round(max(0.0, delta_kwh), 5),
+                    'value': round(max(0.0, delta_kwh), 2),
                     'is_anomaly': is_anomaly
                 })
             else:
