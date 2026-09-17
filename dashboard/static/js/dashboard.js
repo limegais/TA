@@ -136,7 +136,7 @@ function makeEnergyOpts(unit) {
                         var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
                         var val = ctx.parsed.y;
                         if (unit === 'kWh') {
-                            return dsLabel + ': ' + val.toFixed(5) + ' kWh';
+                            return dsLabel + ': ' + val.toFixed(2) + ' kWh';
                         }
                         return dsLabel + ': ' + formatChartValue(val, unit);
                     },
@@ -985,9 +985,9 @@ function loadAnalyticsEnergy(device, period, btnEl) {
                 var last = deltas[deltas.length - 1];
                 var total = deltas.reduce(function (a, b) { return a + b; }, 0);
                 var avg = total / deltas.length;
-                if (lastEl) lastEl.textContent = last.toFixed(4) + ' kWh';
-                if (totalEl) totalEl.textContent = total.toFixed(4) + ' kWh';
-                if (avgEl) avgEl.textContent = avg.toFixed(4) + ' kWh';
+                if (lastEl) lastEl.textContent = last.toFixed(2) + ' kWh';
+                if (totalEl) totalEl.textContent = total.toFixed(2) + ' kWh';
+                if (avgEl) avgEl.textContent = avg.toFixed(2) + ' kWh';
             } else {
                 if (lastEl) lastEl.textContent = '--';
                 if (totalEl) totalEl.textContent = '--';
