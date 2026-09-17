@@ -5116,47 +5116,125 @@ def energy_history():
             return dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
     def _mysql_kwh_to_points(rows, start_dt):
-        """Group MySQL cumulative kWh by bucket (max per bucket = last value),
-        prepend a baseline, return cumulative list for JS delta computation."""
+        """
+        Hitung konsumsi energi per interval menggunakan metode selisih kumulatif.
+        E_periode = (E_total(t_akhir) - E_total(t_awal)) / 1000
+        di mana E_total dari MySQL dalam Wh, dikonversi ke kWh.
+
+        Aturan per periode:
+        - 1h/6h  : interval 5 menit, validasi Dt <= 5 menit (data gap diabaikan)
+        - 24h    : per jam -- E_hour = last_of_hour[i] - last_of_hour[i-1]
+        - 7d/30d : per hari -- E_day  = last_of_day[i]  - last_of_day[i-1]
+        - 12mo   : per bulan -- E_month = last_of_month[i] - last_of_month[i-1]
+
+        Nilai negatif -> anomali (reset meter / rollover), set 0 dan flag is_anomaly=True.
+        """
         if not rows:
             return []
-        grouped = {}
+
+        # 1. Parse & urutkan rows
+        parsed = []
         for row in rows:
-            try:
-                kwh = float(row.get('energy_kwh') or 0)
-            except (TypeError, ValueError):
-                continue
-            
             ts_str = row.get('timestamp', '')
             try:
                 row_dt = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=wib_tz)
             except Exception:
                 continue
-            
-            if row_dt < start_dt:
+            try:
+                wh = float(row.get('energy_kwh') or 0)  # unit sebenarnya Wh dari MySQL
+            except (TypeError, ValueError):
                 continue
-                
+            parsed.append((row_dt, wh))
+
+        if not parsed:
+            return []
+
+        parsed.sort(key=lambda x: x[0])
+
+        # 2. MODE 5-menit (periode 1h / 6h)
+        if period in ('1h', '6h'):
+            # Cari baseline: row terakhir sebelum start_dt
+            baseline_wh = None
+            baseline_dt = start_dt
+            for row_dt, wh in parsed:
+                if row_dt < start_dt:
+                    baseline_wh = wh
+                    baseline_dt = row_dt
+                else:
+                    break
+
+            in_range = [(dt, wh) for dt, wh in parsed if dt >= start_dt]
+            if not in_range:
+                return []
+
+            points = []
+            prev_wh = baseline_wh if baseline_wh is not None else in_range[0][1]
+            prev_dt = baseline_dt if baseline_wh is not None else in_range[0][0]
+
+            start_idx = 0 if baseline_wh is not None else 1
+            for cur_dt, cur_wh in in_range[start_idx:]:
+                delta_min = (cur_dt - prev_dt).total_seconds() / 60.0
+                # Validasi data gap: hanya hitung jika Dt <= 5.5 menit
+                if delta_min <= 5.5:
+                    delta_kwh = (cur_wh - prev_wh) / 1000.0
+                    is_anomaly = delta_kwh < 0
+                    points.append({
+                        'time': cur_dt.strftime(time_format),
+                        'value': round(max(0.0, delta_kwh), 6),
+                        'is_anomaly': is_anomaly
+                    })
+                # else: data gap > 5.5 menit, tidak dihitung sebagai satu interval
+                prev_wh = cur_wh
+                prev_dt = cur_dt
+
+            return points
+
+        # 3. MODE per-bucket (24h, 7d, 30d, 12mo)
+        # Kelompokkan: ambil nilai Wh TERAKHIR (max timestamp) di setiap bucket
+        grouped = {}  # bucket_key -> (row_dt, wh)
+        for row_dt, wh in parsed:
             key = _bucket_key(row_dt)
             if key is None:
                 continue
-            if key not in grouped or kwh > grouped[key]:
-                grouped[key] = kwh
+            if key not in grouped or row_dt > grouped[key][0]:
+                grouped[key] = (row_dt, wh)
+
         if not grouped:
             return []
+
         skeys = sorted(grouped.keys())
-        first = skeys[0]
-        if period == '24h':
-            bk = first - timedelta(hours=1)
-        elif period in ('7d', '30d'):
-            bk = first - timedelta(days=1)
-        elif period == '12mo':
-            mi = first.month - 2
-            bk = first.replace(year=first.year + mi // 12, month=mi % 12 + 1)
-        else:
-            bk = first - timedelta(hours=1)
-        grouped[bk] = grouped[first]
-        skeys = [bk] + skeys
-        return [{'time': k.strftime(time_format), 'value': round(grouped[k], 5)} for k in skeys]
+        first_bucket = skeys[0]
+
+        # Cari baseline: nilai Wh terakhir sebelum bucket pertama
+        baseline_wh = None
+        for row_dt, wh in parsed:
+            if row_dt < first_bucket:
+                baseline_wh = wh
+
+        # Hitung delta per bucket
+        points = []
+        prev_wh = baseline_wh
+
+        for bk in skeys:
+            cur_wh = grouped[bk][1]
+            if prev_wh is not None:
+                delta_kwh = (cur_wh - prev_wh) / 1000.0
+                is_anomaly = delta_kwh < 0
+                points.append({
+                    'time': bk.strftime(time_format),
+                    'value': round(max(0.0, delta_kwh), 5),
+                    'is_anomaly': is_anomaly
+                })
+            else:
+                # Bucket pertama tanpa baseline: tampilkan 0
+                points.append({
+                    'time': bk.strftime(time_format),
+                    'value': 0.0,
+                    'is_anomaly': False
+                })
+            prev_wh = cur_wh
+
+        return points
 
     # ── energy_kwh: always from MySQL ─────────────────────────────────────────
     kwh_points = []
