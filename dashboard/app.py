@@ -5176,7 +5176,7 @@ def energy_history():
                 delta_min = (cur_dt - prev_dt).total_seconds() / 60.0
                 # Validasi data gap: hanya hitung jika Dt <= 5.5 menit (toleransi ±30 detik)
                 if delta_min <= 5.5:
-                    delta_kwh = cur_kwh - prev_kwh  # sudah dalam kWh (kumulatif)
+                    delta_kwh = (cur_kwh - prev_kwh) * 100  # kalikan 100 sesuai request
                     is_anomaly = delta_kwh < 0
                     points.append({
                         'time': cur_dt.strftime(time_format),
@@ -5219,7 +5219,7 @@ def energy_history():
         for bk in skeys:
             cur_kwh = grouped[bk][1]
             if prev_kwh is not None:
-                delta_kwh = cur_kwh - prev_kwh  # sudah dalam kWh
+                delta_kwh = (cur_kwh - prev_kwh) * 100  # kalikan 100 sesuai request
                 is_anomaly = delta_kwh < 0
                 points.append({
                     'time': bk.strftime(time_format),
