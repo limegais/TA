@@ -5141,10 +5141,10 @@ def energy_history():
             except Exception:
                 continue
             try:
-                wh = float(row.get('energy_kwh') or 0)  # unit sebenarnya Wh dari MySQL
+                kwh = float(row.get('energy_kwh') or 0)  # unit sudah kWh dari PHP API (kumulatif)
             except (TypeError, ValueError):
                 continue
-            parsed.append((row_dt, wh))
+            parsed.append((row_dt, kwh))
 
         if not parsed:
             return []
@@ -5154,29 +5154,29 @@ def energy_history():
         # 2. MODE 5-menit (periode 1h / 6h)
         if period in ('1h', '6h'):
             # Cari baseline: row terakhir sebelum start_dt
-            baseline_wh = None
+            baseline_kwh = None
             baseline_dt = start_dt
-            for row_dt, wh in parsed:
+            for row_dt, kwh in parsed:
                 if row_dt < start_dt:
-                    baseline_wh = wh
+                    baseline_kwh = kwh
                     baseline_dt = row_dt
                 else:
                     break
 
-            in_range = [(dt, wh) for dt, wh in parsed if dt >= start_dt]
+            in_range = [(dt, kwh) for dt, kwh in parsed if dt >= start_dt]
             if not in_range:
                 return []
 
             points = []
-            prev_wh = baseline_wh if baseline_wh is not None else in_range[0][1]
-            prev_dt = baseline_dt if baseline_wh is not None else in_range[0][0]
+            prev_kwh = baseline_kwh if baseline_kwh is not None else in_range[0][1]
+            prev_dt = baseline_dt if baseline_kwh is not None else in_range[0][0]
 
-            start_idx = 0 if baseline_wh is not None else 1
-            for cur_dt, cur_wh in in_range[start_idx:]:
+            start_idx = 0 if baseline_kwh is not None else 1
+            for cur_dt, cur_kwh in in_range[start_idx:]:
                 delta_min = (cur_dt - prev_dt).total_seconds() / 60.0
-                # Validasi data gap: hanya hitung jika Dt <= 5.5 menit
+                # Validasi data gap: hanya hitung jika Dt <= 5.5 menit (toleransi ±30 detik)
                 if delta_min <= 5.5:
-                    delta_kwh = (cur_wh - prev_wh) / 1000.0
+                    delta_kwh = cur_kwh - prev_kwh  # sudah dalam kWh (kumulatif)
                     is_anomaly = delta_kwh < 0
                     points.append({
                         'time': cur_dt.strftime(time_format),
@@ -5184,20 +5184,21 @@ def energy_history():
                         'is_anomaly': is_anomaly
                     })
                 # else: data gap > 5.5 menit, tidak dihitung sebagai satu interval
-                prev_wh = cur_wh
+                prev_kwh = cur_kwh
                 prev_dt = cur_dt
 
             return points
 
+
         # 3. MODE per-bucket (24h, 7d, 30d, 12mo)
-        # Kelompokkan: ambil nilai Wh TERAKHIR (max timestamp) di setiap bucket
-        grouped = {}  # bucket_key -> (row_dt, wh)
-        for row_dt, wh in parsed:
+        # Kelompokkan: ambil nilai kWh TERAKHIR (max timestamp) di setiap bucket
+        grouped = {}  # bucket_key -> (row_dt, kwh)
+        for row_dt, kwh in parsed:
             key = _bucket_key(row_dt)
             if key is None:
                 continue
             if key not in grouped or row_dt > grouped[key][0]:
-                grouped[key] = (row_dt, wh)
+                grouped[key] = (row_dt, kwh)
 
         if not grouped:
             return []
@@ -5205,20 +5206,20 @@ def energy_history():
         skeys = sorted(grouped.keys())
         first_bucket = skeys[0]
 
-        # Cari baseline: nilai Wh terakhir sebelum bucket pertama
-        baseline_wh = None
-        for row_dt, wh in parsed:
+        # Cari baseline: nilai kWh terakhir sebelum bucket pertama
+        baseline_kwh = None
+        for row_dt, kwh in parsed:
             if row_dt < first_bucket:
-                baseline_wh = wh
+                baseline_kwh = kwh
 
         # Hitung delta per bucket
         points = []
-        prev_wh = baseline_wh
+        prev_kwh = baseline_kwh
 
         for bk in skeys:
-            cur_wh = grouped[bk][1]
-            if prev_wh is not None:
-                delta_kwh = (cur_wh - prev_wh) / 1000.0
+            cur_kwh = grouped[bk][1]
+            if prev_kwh is not None:
+                delta_kwh = cur_kwh - prev_kwh  # sudah dalam kWh
                 is_anomaly = delta_kwh < 0
                 points.append({
                     'time': bk.strftime(time_format),
@@ -5232,7 +5233,7 @@ def energy_history():
                     'value': 0.0,
                     'is_anomaly': False
                 })
-            prev_wh = cur_wh
+            prev_kwh = cur_kwh
 
         return points
 
