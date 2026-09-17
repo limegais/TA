@@ -136,24 +136,11 @@ function makeEnergyOpts(unit) {
                         var dsLabel = (ctx.dataset && ctx.dataset.label) ? ctx.dataset.label : 'Value';
                         var delta = ctx.parsed.y;
                         // If kWh chart and cumulative arrays exist, show calculation
-                        if (unit === 'kWh' && ctx.chart._kwhCumAc) {
-                            var idx = ctx.dataIndex;
-                            var cumArr = [ctx.chart._kwhCumAc, ctx.chart._kwhCumOutlet, ctx.chart._kwhCumLamp, null][ctx.datasetIndex];
-                            if (cumArr && cumArr.length > idx + 1) {
-                                var prev = cumArr[idx].toFixed(4);
-                                var curr = cumArr[idx + 1].toFixed(4);
-                                return dsLabel + ': ' + curr + ' \u2212 ' + prev + ' = ' + delta.toFixed(5) + ' kWh';
-                            }
-                            return dsLabel + ': ' + delta.toFixed(5) + ' kWh';
-                        }
                         return dsLabel + ': ' + formatChartValue(delta, unit);
                     },
                     title: function (items) {
                         if (!items || !items[0]) return '';
                         var lbl = items[0].label || '';
-                        if (unit === 'kWh') {
-                            return lbl.indexOf('\u2192') >= 0 ? lbl.replace('\u2192', ' \u2192 ') : lbl;
-                        }
                         return 'Time: ' + lbl;
                     }
                 }
@@ -808,45 +795,6 @@ function loadEnergyHistory(field, period, btnElement) {
                 var outletLabels = outletData.map(function (d) { return d.time; });
                 var lampLabels = lampData.map(function (d) { return d.time; });
 
-                // energy_kwh is cumulative - compute delta per interval
-                if (field === 'energy_kwh') {
-                    function computeDeltas(cumValues) {
-                        var deltas = [];
-                        if (cumValues.length <= 1) return cumValues.slice();
-                        for (var i = 1; i < cumValues.length; i++) {
-                            var diff = cumValues[i] - cumValues[i - 1];
-                            deltas.push(parseFloat(Math.max(0, diff).toFixed(5)));
-                        }
-                        return deltas;
-                    }
-                    function buildRangeLabels(labels) {
-                        var rangeLabels = [];
-                        if (labels.length <= 1) return labels.slice();
-                        for (var i = 1; i < labels.length; i++) {
-                            rangeLabels.push(labels[i - 1] + '\u2192' + labels[i]);
-                        }
-                        return rangeLabels;
-                    }
-
-                    var acCumRaw = acValues.slice();
-                    var outletCumRaw = outletValues.slice();
-                    var lampCumRaw = lampValues.slice();
-                    acValues = computeDeltas(acValues);
-                    outletValues = computeDeltas(outletValues);
-                    lampValues = computeDeltas(lampValues);
-
-                    // Daily stays as a line; every longer Energy Usage period is a bar chart.
-                    var useBarChart = (period !== '24h');
-                    if (useBarChart) {
-                        if (acLabels.length > 1) acLabels = acLabels.slice(1);
-                        if (outletLabels.length > 1) outletLabels = outletLabels.slice(1);
-                        if (lampLabels.length > 1) lampLabels = lampLabels.slice(1);
-                    } else {
-                        acLabels = buildRangeLabels(acLabels);
-                        outletLabels = buildRangeLabels(outletLabels);
-                        lampLabels = buildRangeLabels(lampLabels);
-                    }
-                }
 
                 // -- Determine chart type: Daily (24h) = line, others = bar --
                 var useBarForAll = (period !== '24h');
@@ -901,11 +849,7 @@ function loadEnergyHistory(field, period, btnElement) {
                     }
                 }
 
-                if (field === 'energy_kwh') {
-                    chart._kwhCumAc = acCumRaw;
-                    chart._kwhCumOutlet = outletCumRaw;
-                    chart._kwhCumLamp = lampCumRaw;
-                }
+
 
                 // Compute Total values (AC + Outlet + Lamp)
                 var maxLen = Math.max(acValues.length, outletValues.length, lampValues.length);
